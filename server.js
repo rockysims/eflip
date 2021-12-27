@@ -38,13 +38,13 @@ const getTypeIds = async (regionId) => {
 const THE_FORGE_REGION_ID = 10000002;
 app.get('/refresh', async (req, res) => {
 	const regionId = THE_FORGE_REGION_ID;
-	const typeIds = (await getTypeIds(regionId)).slice(0, 2000);
+	const typeIds = await getTypeIds(regionId);
 
 	const daysByTypeId = {};
-	for (let i = 0; i * 50 < typeIds.length; i++) {
+	for (let i = 0; i * 100 < typeIds.length; i++) {
 		console.log({i});
 		const promises = [];
-		for (let typeId of typeIds.slice(i * 50, (i + 1) * 50)) {
+		for (let typeId of typeIds.slice(i * 100, (i + 1) * 100)) {
 			const url = `https://esi.evetech.net/latest/markets/${regionId}/history/?datasource=tranquility&type_id=${typeId}`;
 			const daysPromise = axiosGet(url);
 			daysPromise.then(days => {
@@ -60,7 +60,6 @@ app.get('/refresh', async (req, res) => {
 	}
 
 	console.log('Object.keys(daysByTypeId): ', Object.keys(daysByTypeId));
-
 	fs.writeFileSync('public/history.json', JSON.stringify(daysByTypeId));
 	console.log('write done');
 
