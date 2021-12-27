@@ -40,7 +40,6 @@ app.get('/refresh', async (req, res) => {
 	const regionId = THE_FORGE_REGION_ID;
 	const typeIds = await getTypeIds(regionId);
 
-	const daysByTypeId = {};
 	for (let i = 0; i * 100 < typeIds.length; i++) {
 		console.log({i});
 		const promises = [];
@@ -48,7 +47,7 @@ app.get('/refresh', async (req, res) => {
 			const url = `https://esi.evetech.net/latest/markets/${regionId}/history/?datasource=tranquility&type_id=${typeId}`;
 			const daysPromise = axiosGet(url);
 			daysPromise.then(days => {
-				daysByTypeId[typeId] = days;
+				fs.writeFileSync(`public/history/${typeId}.json`, JSON.stringify(days));
 			}, reason => {
 				console.log('did not get days for ' + typeId);
 			});
@@ -59,9 +58,7 @@ app.get('/refresh', async (req, res) => {
 		});
 	}
 
-	console.log('Object.keys(daysByTypeId): ', Object.keys(daysByTypeId));
-	fs.writeFileSync('public/history.json', JSON.stringify(daysByTypeId));
-	console.log('write done');
+	console.log('done refreshing');
 
 	res.json({fresh: true});
 });
