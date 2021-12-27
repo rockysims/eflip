@@ -68,8 +68,11 @@ app.get('/build', async (req, res) => {
 
 	const daysByTypeId = {};
 	for (let typeId of typeIds) {
-		const days = JSON.parse(fs.readFileSync(`public/history/${typeId}.json`));
-		daysByTypeId[typeId] = days;
+		const path = `public/history/${typeId}.json`
+		if (fs.existsSync(path)) {
+			const days = JSON.parse(fs.readFileSync(path));
+			daysByTypeId[typeId] = days;
+		}
 	}
 
 	console.log('writing daysByTypeId.json file...');
