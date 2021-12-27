@@ -38,7 +38,7 @@ const getTypeIds = async (regionId) => {
 const THE_FORGE_REGION_ID = 10000002;
 app.get('/refresh', async (req, res) => {
 	const regionId = THE_FORGE_REGION_ID;
-	const typeIds = (await getTypeIds(regionId)).slice(0, 201);
+	const typeIds = (await getTypeIds(regionId)).slice(0, 2000);
 
 	const daysByTypeId = {};
 	for (let i = 0; i * 50 < typeIds.length; i++) {
