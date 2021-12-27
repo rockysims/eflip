@@ -59,8 +59,24 @@ app.get('/refresh', async (req, res) => {
 	}
 
 	console.log('done refreshing');
-
 	res.json({fresh: true});
+});
+
+app.get('/build', async (req, res) => {
+	const regionId = THE_FORGE_REGION_ID;
+	const typeIds = await getTypeIds(regionId);
+
+	const daysByTypeId = {};
+	for (let typeId of typeIds) {
+		const days = JSON.parse(fs.readFileSync(`public/history/${typeId}.json`));
+		daysByTypeId[typeId] = days;
+	}
+
+	console.log('writing daysByTypeId.json file...');
+	fs.writeFileSync(`public/daysByTypeId.json`, JSON.stringify(daysByTypeId));
+
+	console.log('done building');
+	res.json({built: true});
 });
 
 //---
