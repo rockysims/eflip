@@ -51,7 +51,7 @@ const getItemReport = async (regionId, typeId) => {
 		const profitPerFlipList = [];
 		for (let day of days) {
 			if (day.highest === day.lowest) continue;
-			if (day.highest > overallAverage * 10) continue; //crazy over priced so ignore
+			if (day.highest > overallAverage * 5) continue; //crazy over priced so ignore
 			const lowFrac = (day.highest - day.average) / (day.highest - day.lowest);
 			const highFrac = 1 - lowFrac;
 			const lowVolume = lowFrac * day.volume;
