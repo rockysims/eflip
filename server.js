@@ -15,8 +15,7 @@ app.use(express.static('public'));
 
 const axiosGet = async url => {
 	return axios.get(url).then(res => {
-		console.log('GOT ' + url);
-		// console.log(res.data);
+		// console.log('GOT ' + url);
 		return res.data;
 	}, error => {
 		console.log('GET failed because: ', error.response.status);
@@ -50,7 +49,6 @@ app.get('/refresh', async (req, res) => {
 			const daysPromise = axiosGet(url);
 			daysPromise.then(days => {
 				daysByTypeId[typeId] = days;
-				console.log('got days for ' + typeId);
 			}, reason => {
 				console.log('did not get days for ' + typeId);
 			});
@@ -61,7 +59,7 @@ app.get('/refresh', async (req, res) => {
 		});
 	}
 
-	console.log(daysByTypeId);
+	console.log('Object.keys(daysByTypeId): ', Object.keys(daysByTypeId));
 
 	fs.writeFileSync('public/history.json', JSON.stringify(daysByTypeId));
 	console.log('write done');
