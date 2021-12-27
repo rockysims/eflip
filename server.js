@@ -65,7 +65,29 @@ app.get('/refresh', async (req, res) => {
 app.get('/build', async (req, res) => {
 	const regionId = THE_FORGE_REGION_ID;
 	const typeIds = await getTypeIds(regionId);
+	
+	for (let i = 0; i * 1000 < typeIds.length; i++) {
+		const daysByTypeId = {};
+		for (let typeId of typeIds.slice(i * 1000, (i + 1) * 1000)) {
+			const path = `public/history/${typeId}.json`
+			if (fs.existsSync(path)) {
+				const days = JSON.parse(fs.readFileSync(path));
+				daysByTypeId[typeId] = days;
+			}
+		}
 
+		console.log('writing daysByTypeId.json file...');
+		fs.writeFileSync(`public/daysByTypeId_${i}.json`, JSON.stringify(daysByTypeId));
+	}
+
+	console.log('done building');
+	res.json({built: true});
+});
+
+app.get('/history', async (req, res) => {
+	const regionId = THE_FORGE_REGION_ID;
+	const typeIds = await getTypeIds(regionId);
+	
 	const daysByTypeId = {};
 	for (let typeId of typeIds) {
 		const path = `public/history/${typeId}.json`
@@ -75,11 +97,8 @@ app.get('/build', async (req, res) => {
 		}
 	}
 
-	console.log('writing daysByTypeId.json file...');
-	fs.writeFileSync(`public/daysByTypeId.json`, JSON.stringify(daysByTypeId));
-
-	console.log('done building');
-	res.json({built: true});
+	console.log('done history');
+	res.json(daysByTypeId);
 });
 
 //---
