@@ -1,6 +1,7 @@
 {
 	"scripts": {
-		"start": "nodemon server.js"
+		"dev": "nodemon server.js",
+		"start": "node --max_old_space_size=5000 server.js"
 	},
 	"dependencies": {
 		"axios": "^0.24.0",
