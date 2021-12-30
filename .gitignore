@@ -1,5 +1,5 @@
 node_modules
 .env
 .DS_Store
-public/history
-!public/history/nothing.json
+cache
+!cache/nothing.json
