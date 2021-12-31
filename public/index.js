@@ -1,5 +1,6 @@
 const THE_FORGE_REGION_ID = 10000002;
-const STEP_SIZE = 100;
+const DAYS_CONSIDERED = 30;
+const STEP_SIZE = 500;
 const SELL_TAX = 0.11;
 const BUY_TAX = 0.6;
 
@@ -73,66 +74,70 @@ const getTypeNameById = async () => {
 
 const getDays = async (regionId, typeId) => {
 	const url = `https://esi.evetech.net/latest/markets/${regionId}/history/?datasource=tranquility&type_id=${typeId}`;
-	return ((await getOrFetch(url)) || []).slice(-90);
+	return ((await getOrFetch(url)) || []).slice(-1 * DAYS_CONSIDERED);
 };
 
-const centerAverage = values => {
-	if (values.length === 0) throw new Error("No inputs");
-
-	values.sort((a, b) => {
-		return a - b;
-	});
-
-	const start = Math.floor(0.25 * values.length);
-	const end = Math.floor(0.75 * values.length);
-	const centerValues = values.slice(start, end + 1);
-	
-	return centerValues.reduce((a, c) => a + c, 0) / centerValues.length;
-}
+const getOrders = async (regionId, typeId) => {
+	const url = `https://esi.evetech.net/latest/markets/${regionId}/orders/?datasource=tranquility&type_id=${typeId}`;
+	return await getOrFetch(url);
+};
 
 const getItemReport = async (regionId, typeId) => {
 	try {
 		const days = await getDays(regionId, typeId);
+		const orders = await getOrders(regionId, typeId);
+		
+		const recentOrders = orders.filter(order => {
+			const issued = moment(order.issued);
+			const hoursOld = moment().diff(issued, 'hour');
+			return hoursOld < 24;
+		});
+		const recentSellOrders = recentOrders.filter(order => order.is_buy_order === false);
+		const recentBuyOrders = recentOrders.filter(order => order.is_buy_order === true);
+		const activeFlippers = Math.max(recentSellOrders.length, recentBuyOrders.length);
 
 		const overallAverage = days.map(day => day.average).reduce((a, c) => a + c, 0) / days.length;
 	
 		let totalFlipProfit = 0;
 		let totalFlipVolume = 0;
 		let buyCosts = [];
-		let sellProfits = [];
+		let sellRevenues = [];
 		const profitPerFlipList = [];
 		for (let day of days) {
-			if (days.length < 30) break;
+			if (days.length < DAYS_CONSIDERED) break;
 			if (day.highest === day.lowest) continue;
-			if (day.highest > overallAverage * 3) continue; //crazy over priced so ignore
+			if (day.highest > overallAverage * 10) continue; //crazy over priced so ignore
 			const lowFrac = (day.highest - day.average) / (day.highest - day.lowest);
 			const highFrac = 1 - lowFrac;
 			const lowVolume = lowFrac * day.volume;
 			const highVolume = highFrac * day.volume;
-			const flipVolume = Math.min(lowVolume, highVolume);
-			const sellProfit = day.highest * (1 - SELL_TAX);
+			const flipVolume = Math.floor(Math.min(lowVolume, highVolume) / (activeFlippers + 1));
+			const sellRevenue = day.highest * (1 - SELL_TAX);
 			const buyCost = day.lowest * (1 + BUY_TAX);
-			const profitPerFlip = sellProfit - buyCost;
+			const profitPerFlip = sellRevenue - buyCost;
 			if (profitPerFlip > 0) {
 				totalFlipProfit += profitPerFlip * flipVolume;
 				totalFlipVolume += flipVolume;
 				profitPerFlipList.push(profitPerFlip);
 				buyCosts.push(buyCost);
-				sellProfits.push(sellProfit);
+				sellRevenues.push(sellRevenue);
 			}
 		}
 
-		const buyCostAvgMil = (buyCosts.reduce((a, c) => a + c, 0) / 1000000) / buyCosts.length;
-		const sellProfitAvgMil = (sellProfits.reduce((a, c) => a + c, 0) / 1000000) / sellProfits.length;
-
-		if (buyCostAvgMil > 100) throw 'too high a price';
-	
+		const buyCostAvg = buyCosts.reduce((a, c) => a + c, 0) / buyCosts.length;
+		const sellRevenueAvg = sellRevenues.reduce((a, c) => a + c, 0) / sellRevenues.length;
+		const profitPerFlipAvg = profitPerFlipList.reduce((a, c) => a + c, 0) / profitPerFlipList.length;
+		const dailyFlipProfit = totalFlipProfit / days.length;
+		
+		const buyCostAvgMil = Math.round(buyCostAvg / (1000000/100)) / 100;
+		const sellRevenueAvgMil = Math.round(sellRevenueAvg / (1000000/100)) / 100;
 		return {
 			totalFlipVolume: Math.floor(totalFlipVolume),
 			buyCostAvgMil,
-			sellProfitAvgMil,
-			profitPerFlipAvgMil: (profitPerFlipList.reduce((a, c) => a + c, 0) / 1000000) / profitPerFlipList.length,
-			dailyFlipProfitMil: (totalFlipProfit / 1000000) / days.length
+			sellRevenueAvgMil,
+			activeFlippers,
+			profitPerFlipAvgMil: Math.round(profitPerFlipAvg / (1000000/100)) / 100,
+			dailyFlipProfitMil: Math.round(dailyFlipProfit / (1000000/100)) / 100
 		};
 	} catch (reason) {
 		console.warn(reason);
@@ -147,31 +152,23 @@ document.addEventListener('DOMContentLoaded', async () => {
 	const typeIds = await getTypeIds(THE_FORGE_REGION_ID);
 	outputElem.innerHTML = 'typeIds.length: ' + typeIds.length;
 
-	// const daysByTypeId = {};
-	// for (let i = 0; i * STEP_SIZE < typeIds.length; i++) {
-	// 	const promises = [];
-	// 	for (let typeId of typeIds.slice(i * STEP_SIZE, (i + 1) * STEP_SIZE)) {
-	// 		const promise = getDays(THE_FORGE_REGION_ID, typeId);
-	// 		promise.then(days => {
-	// 			daysByTypeId[typeId] = days;
-	// 		});
-	// 		promises.push(promise);
-	// 	}
-	// 	await Promise.all(promises);
-
-	// 	outputElem.innerHTML = `${i * STEP_SIZE} / ${typeIds.length}`;
-	// }
-
 	const typeNameById = await getTypeNameById();
 
 	outputElem.innerHTML = `Processing`;
 
-	let i = 0;
 	const itemReportByTypeId = {};
-	for (let typeId of typeIds) {
-		itemReportByTypeId[typeId] = await getItemReport(THE_FORGE_REGION_ID, typeId);
-		if (++i % 100 === 0) outputElem.innerHTML = `Processing ${i} / ${typeIds.length}`;
+	for (let step = 0; step * STEP_SIZE < typeIds.length; step++) {
+		const promises = [];
+		for (let typeId of typeIds.slice(step * STEP_SIZE, (step + 1) * STEP_SIZE)) {
+			const reportPromise = getItemReport(THE_FORGE_REGION_ID, typeId);
+			reportPromise.then(itemReport => itemReportByTypeId[typeId] = itemReport);
+			promises.push(reportPromise);
+		}
+		await Promise.all(promises);
+		outputElem.innerHTML = `Processing ${step * STEP_SIZE} / ${typeIds.length}`;
 	}
+
+	outputElem.innerHTML = `Sorting`;
 
 	const typeIdsOrderedByProfitDesc = typeIds.sort((a, b) => {
 		const aRep = itemReportByTypeId[a];
@@ -183,7 +180,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 	let html = '';
 	for (let typeId of typeIdsOrderedByProfitDesc) {
-		const typeName = typeNameById[typeId];
+		// const typeName = typeNameById[typeId];
 		// if (typeName.includes('Men\'s') || typeName.includes('Women\'s') || typeName.includes('SKIN')) continue;
 
 		const itemReport = itemReportByTypeId[typeId];
@@ -194,6 +191,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 		}
 		if (itemReport.totalFlipVolume < 5) {
 			console.log(`${typeId} volume too low`);
+			continue;
+		}
+		if (itemReport.buyCostAvgMil > 100) {
+			console.log('price too high');
+			continue;
+		}
+		if (itemReport.sellRevenueAvgMil < itemReport.buyCostAvgMil * 2) {
+			console.log('margin too slim');
 			continue;
 		}
 		html += '<div>';
