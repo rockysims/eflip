@@ -9,10 +9,10 @@ const CachedResponseSchema = new mongoose.Schema({
 	data: {
 		type: String,
 		required: true
-	},
-	scrapedAt: {
-		type: Number,
-		required: true
+	}
+}, {
+	timestamps: {
+		createdAt: true
 	}
 });
 

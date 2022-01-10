@@ -12,8 +12,6 @@ mongoose.connection.on('error', err => console.error('MongoDB connection error:'
 
 // ---
 
-const scrapedAt = Date.now();
-
 const axiosGet = async (url, options = {}) => {
 	let promise;
 	for (let attempt = 0; attempt < 5; attempt++) {
@@ -34,8 +32,7 @@ const fetchAndCache = async (url) => {
 	const data = await axiosGet(url);
 	const newCachedResponse = new CachedResponse({
 		url,
-		data: JSON.stringify(data),
-		scrapedAt
+		data: JSON.stringify(data)
 	});
 	await newCachedResponse.save();
 
