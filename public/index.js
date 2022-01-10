@@ -74,7 +74,10 @@ const getTypeNameById = async () => {
 
 const getDays = async (regionId, typeId) => {
 	const url = `https://esi.evetech.net/latest/markets/${regionId}/history/?datasource=tranquility&type_id=${typeId}`;
-	return ((await getOrFetch(url)) || []).slice(-1 * DAYS_CONSIDERED);
+	const days = await getOrFetch(url);
+	return Array.isArray(days)
+		? days.slice(-1 * DAYS_CONSIDERED)
+		: [];
 };
 
 const getOrders = async (regionId, typeId) => {
