@@ -69,7 +69,7 @@ const main = async () => {
 
 	const regionIds = (await getRegionIds()).slice(0, 2); //TODO: delete the ".slice(0, 2)" part
 	for (let regionId of regionIds) {
-		const typeIds = (await getTypeIds(regionId)).slice(0, 2); //TODO: delete the ".slice(0, 2)" part
+		const typeIds = (await getTypeIds(regionId)).slice(0, 200); //TODO: delete the ".slice(0, 200)" part
 		for (let step = 0; step * STEP_SIZE < typeIds.length; step++) {
 			const ordersPromises = [];
 			for (let typeId of typeIds.slice(step * STEP_SIZE, (step + 1) * STEP_SIZE)) {
