@@ -15,7 +15,12 @@ mongoose.connection.on('error', err => console.error('MongoDB connection error:'
 const scrapedAt = Date.now();
 
 const axiosGet = async (url, options = {}) => {
-	return axios.get(url, options).then(res => res.data);
+	return axios.get(url, options)
+		.then(res => res.data)
+		.catch(reason => {
+			console.log(`Failed to axiosGet(${url})`);
+			throw reason;
+		});
 };
 
 const localCache = {};
