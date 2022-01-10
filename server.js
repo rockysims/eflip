@@ -23,6 +23,8 @@ app.get('/file/:path', async (req, res) => {
 });
 
 app.post('/file/:path', async (req, res) => {
+	if (!fs.existsSync('cache')) fs.mkdirSync('cache');
+
 	const path = 'cache/' + req.params.path;
 	// console.log('save ' + path);
 	fs.writeFileSync(path, JSON.stringify(req.body));
