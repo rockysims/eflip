@@ -71,6 +71,7 @@ const getOrders = async (regionId, typeId) => {
 	return await fetchAndCache(url);
 };
 
+const BATCH_SIZE = 1000;
 const scrapeRegion = async (regionId) => {
 	const typeIds = (await getTypeIds(regionId));
 	for (let step = 0; step * BATCH_SIZE < typeIds.length; step++) {
@@ -82,24 +83,25 @@ const scrapeRegion = async (regionId) => {
 		await Promise.all(ordersPromises);
 		console.log(`Processed types ${step * BATCH_SIZE} - ${step * BATCH_SIZE + batchOfTypeIds.length} (regionId: ${regionId})`);
 	}
-	console.log(`scraped (${regionId})`);
 };
 
-const BATCH_SIZE = 1000;
-const main = async () => {
-	console.log('clean up');
-	await CachedResponse.deleteMany({}); //TODO: detele this line in favor of the line below
-	// await CachedResponse.deleteMany({ createdAt: { $lt: Date.now() - 1000*60*60*24*10 } }); //Note: this line is untested
+module.exports = scrapeRegion;
 
-	const regionIds = (await getRegionIds());
-	console.log('started');
-	for (let regionId of regionIds) {
-		await scrapeRegion(regionId);
-	}
+// const main = async () => {
+// 	console.log('clean up');
+// 	await CachedResponse.deleteMany({}); //TODO: detele this line in favor of the line below
+// 	// await CachedResponse.deleteMany({ createdAt: { $lt: Date.now() - 1000*60*60*24*10 } }); //Note: this line is untested
+
+// 	const regionIds = (await getRegionIds());
+// 	for (let regionId of regionIds) {
+// 		console.log(`scraping (${regionId})`);
+// 		await scrapeRegion(regionId);
+// 		console.log(`scraped (${regionId})`);
+// 	}
 	
-	console.log('done');
-};
-main();
+// 	console.log('done');
+// };
+// main();
 
 
 
@@ -120,3 +122,4 @@ main();
 // 	"volume_remain":193,
 // 	"volume_total":200
 // }
+

@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
 const fs = require('fs');
+const scrapeRegion = require('scraper.js');
 
 //express setup
 const app = express();
@@ -11,6 +12,16 @@ app.use(bodyParser.json());
 app.use(express.static('public'));
 
 //---
+
+app.get('/api/scrape/:regionId', async (req, res) => {
+	const { regionId } = req.params;
+	try {
+		await scrapeRegion(regionId);
+		res.json({done: true});
+	} catch (reason) {
+		res.status(500).json(reason);
+	}
+});
 
 app.get('/file/:path', async (req, res) => {
 	const path = 'cache/' + req.params.path;
