@@ -39,7 +39,7 @@ const fetchAndCache = async (url) => {
 	return data;
 };
 
-getRegionIds = async () => {
+const getRegionIds = async () => {
 	const url = `https://esi.evetech.net/latest/universe/regions`;
 	const regionIds = await fetchAndCache(url);
 	return regionIds;
@@ -82,7 +82,10 @@ const scrapeRegion = async (regionId) => {
 	}
 };
 
-module.exports = scrapeRegion;
+module.exports = {
+	scrapeRegion,
+	getRegionIds
+};
 
 // const main = async () => {
 // 	console.log('clean up');

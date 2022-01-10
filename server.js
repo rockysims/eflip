@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
 const fs = require('fs');
-const scrapeRegion = require('./scraper');
+const { scrapeRegion } = require('./scraper');
 
 //express setup
 const app = express();

@@ -3,6 +3,7 @@ require('dotenv').config();
 const { default: axios } = require('axios');
 const mongoose = require('mongoose');
 const CachedResponse = require('./models/CachedResponse');
+const { getRegionIds } = require('./scraper');
 
 //mongo setup
 mongoose.connect(process.env.MONGODB_URI, {
