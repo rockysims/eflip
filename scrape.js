@@ -63,7 +63,7 @@ const getOrders = async (regionId, typeId) => {
 	return await fetchAndCache(url);
 };
 
-const STEP_SIZE = 100;
+const STEP_SIZE = 1000;
 const main = async () => {
 	await CachedResponse.deleteMany({}); //TODO: detele this line (if there is enough space in database...)
 
