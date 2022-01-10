@@ -72,18 +72,22 @@ const getOrders = async (regionId, typeId) => {
 };
 
 const scrapeRegion = async (regionId) => {
+	console.log(`scraping (${regionId})`);
 	const typeIds = (await getTypeIds(regionId));
-	for (let step = 0; step * STEP_SIZE < typeIds.length; step++) {
+	for (let step = 0; step * TYPE_BATCH_SIZE < typeIds.length; step++) {
 		const ordersPromises = [];
-		for (let typeId of typeIds.slice(step * STEP_SIZE, (step + 1) * STEP_SIZE)) {
+		const batchOfTypeIds = typeIds.slice(step * TYPE_BATCH_SIZE, (step + 1) * TYPE_BATCH_SIZE);
+		for (let typeId of batchOfTypeIds) {
 			ordersPromises.push(getOrders(regionId, typeId));
 		}
 		await Promise.all(ordersPromises);
-		console.log(`Processed ${step * STEP_SIZE} - ${typeIds.length} (regionId: ${regionId})`);
+		console.log(`Processed types ${step * TYPE_BATCH_SIZE} - ${step * TYPE_BATCH_SIZE + batchOfTypeIds.length} (regionId: ${regionId})`);
 	}
+	console.log(`scraped (${regionId})`);
 };
 
-const STEP_SIZE = 1000;
+const REGION_BATCH_SIZE = 3;
+const TYPE_BATCH_SIZE = 1000;
 const main = async () => {
 	console.log('clean up');
 	await CachedResponse.deleteMany({}); //TODO: detele this line in favor of the line below
@@ -91,6 +95,15 @@ const main = async () => {
 
 	const regionIds = (await getRegionIds());
 	console.log('started');
+	for (let step = 0; step * REGION_BATCH_SIZE < regionIds.length; step++) {
+		const promises = [];
+		const batchOfRegionIds = regionIds.slice(step * REGION_BATCH_SIZE, (step + 1) * REGION_BATCH_SIZE);
+		for (let regionId of batchOfRegionIds) {
+			promises.push(scrapeRegion(regionId));
+		}
+		await Promise.all(promises);
+		console.log(`Processed regions ${step * REGION_BATCH_SIZE} - ${step * REGION_BATCH_SIZE + batchOfRegionIds.length}`);
+	}
 	await Promise.all(regionIds.map(scrapeRegion));
 	console.log('done');
 };
