@@ -71,25 +71,27 @@ const getOrders = async (regionId, typeId) => {
 	return await fetchAndCache(url);
 };
 
+const scrapeRegion = async (regionId) => {
+	const typeIds = (await getTypeIds(regionId));
+	for (let step = 0; step * STEP_SIZE < typeIds.length; step++) {
+		const ordersPromises = [];
+		for (let typeId of typeIds.slice(step * STEP_SIZE, (step + 1) * STEP_SIZE)) {
+			ordersPromises.push(getOrders(regionId, typeId));
+		}
+		await Promise.all(ordersPromises);
+		console.log(`Processed ${step * STEP_SIZE} - ${typeIds.length} (regionId: ${regionId})`);
+	}
+};
+
 const STEP_SIZE = 1000;
 const main = async () => {
 	console.log('clean up');
-	await CachedResponse.deleteMany({}); //TODO: detele this line (if there is enough space in database...)
+	await CachedResponse.deleteMany({}); //TODO: detele this line in favor of the line below
+	// await CachedResponse.deleteMany({ createdAt: { $lt: Date.now() - 1000*60*60*24*10 } }); //Note: this line is untested
 
 	const regionIds = (await getRegionIds());
 	console.log('started');
-	for (let regionId of regionIds) {
-		const typeIds = (await getTypeIds(regionId));
-		for (let step = 0; step * STEP_SIZE < typeIds.length; step++) {
-			const ordersPromises = [];
-			for (let typeId of typeIds.slice(step * STEP_SIZE, (step + 1) * STEP_SIZE)) {
-				ordersPromises.push(getOrders(regionId, typeId));
-			}
-			await Promise.all(ordersPromises);
-			console.log(`Processing ${step * STEP_SIZE} / ${typeIds.length} (regionId: ${regionId})`);
-		}
-	}
-
+	await Promise.all(regionIds.map(scrapeRegion));
 	console.log('done');
 };
 main();
