@@ -31,12 +31,8 @@ const axiosGet = async (url, options = {}) => {
 	return promise;
 };
 
-const localCache = {};
 const fetchAndCache = async (url) => {
-	if (localCache[url]) return localCache[url];
-
 	const data = await axiosGet(url);
-	localCache[url] = data;
 	const newCachedResponse = new CachedResponse({
 		url,
 		data: JSON.stringify(data),
