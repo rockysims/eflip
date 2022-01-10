@@ -74,9 +74,11 @@ const getOrders = async (regionId, typeId) => {
 
 const STEP_SIZE = 1000;
 const main = async () => {
+	console.log('clean up');
 	await CachedResponse.deleteMany({}); //TODO: detele this line (if there is enough space in database...)
 
-	const regionIds = (await getRegionIds()).slice(0, 2); //TODO: delete the ".slice(0, 2)" part
+	const regionIds = (await getRegionIds());
+	console.log('started');
 	for (let regionId of regionIds) {
 		const typeIds = (await getTypeIds(regionId));
 		for (let step = 0; step * STEP_SIZE < typeIds.length; step++) {
