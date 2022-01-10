@@ -16,7 +16,7 @@ const scrapedAt = Date.now();
 
 const axiosGet = async (url, options = {}) => {
 	let promise;
-	for (let attempt = 0; attempt < 3; attempt++) {
+	for (let attempt = 0; attempt < 5; attempt++) {
 		if (attempt > 0) console.log(`Retry ${attempt} to axiosGet(${url})`);
 		promise = axios.get(url, options).then(res => res.data);
 		try {
@@ -24,7 +24,6 @@ const axiosGet = async (url, options = {}) => {
 			break;
 		} catch (err) {
 			if (err.response.status === 500) break;
-			console.log(`Failed attempt to axiosGet(${url})`);
 		}
 	}
 
@@ -38,7 +37,7 @@ const fetchAndCache = async (url) => {
 		data: JSON.stringify(data),
 		scrapedAt
 	});
-	newCachedResponse.save();
+	await newCachedResponse.save();
 
 	return data;
 };
