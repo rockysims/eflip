@@ -15,12 +15,20 @@ mongoose.connection.on('error', err => console.error('MongoDB connection error:'
 const scrapedAt = Date.now();
 
 const axiosGet = async (url, options = {}) => {
-	return axios.get(url, options)
-		.then(res => res.data)
-		.catch(reason => {
-			console.log(`Failed to axiosGet(${url})`);
-			throw reason;
-		});
+	let promise;
+	for (let attempt = 0; attempt < 3; attempt++) {
+		if (attempt > 0) console.log(`Retry ${attempt} to axiosGet(${url})`);
+		promise = axios.get(url, options).then(res => res.data);
+		try {
+			await promise;
+			break;
+		} catch (err) {
+			if (err.response.status === 500) break;
+			console.log(`Failed attempt to axiosGet(${url})`);
+		}
+	}
+
+	return promise;
 };
 
 const localCache = {};
@@ -84,6 +92,8 @@ const main = async () => {
 			console.log(`Processing ${step * STEP_SIZE} / ${typeIds.length} (regionId: ${regionId})`);
 		}
 	}
+
+	console.log('done');
 };
 main();
 
