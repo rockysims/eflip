@@ -27,25 +27,3 @@ const main = async () => {
 	console.log('cron end');
 };
 main();
-
-
-
-
-
-//order:
-// {
-// 	"duration":90,
-// 	"is_buy_order":false,
-// 	"issued":"2021-12-29T09:34:21Z",
-// 	"location_id":60003760,
-// 	"min_volume":1,
-// 	"order_id":6160946530,
-// 	"price":15230,
-// 	"range":"region",
-// 	"system_id":30000142,
-// 	"type_id":31764,
-// 	"volume_remain":193,
-// 	"volume_total":200
-// }
-
-module.exports = mongoose.model('CachedResponse', CachedResponseSchema);
