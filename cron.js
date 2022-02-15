@@ -21,7 +21,9 @@ const main = async () => {
 	let i = 0;
 	for (let regionId of regionIds) {
 		console.log(`scraping ${regionId} (${++i}/${regionIds.length})`);
-		await axios.get(`https://eflip.herokuapp.com/api/scrape/${regionId}`);
+		await axios.get(`https://eflip.herokuapp.com/api/scrape/${regionId}`, {
+			timeout: 300 * 1000
+		});
 		console.log(`scraped (${regionId})`);
 	}
 	
