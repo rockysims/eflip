@@ -20,8 +20,9 @@ const saveJson = async (path, data) => {
 	});
 };
 
-const loadJson = async (path) => {
-	return await fetch(`/file/${path}`, {
+const loadJson = async (path, hoursStaleLimit = -1) => {
+	const url = `/file/${path}?hoursStaleLimit=${hoursStaleLimit}`
+	return await fetch(url, {
 		method: 'GET'
 	}).then(
 		res => res.json(),
@@ -57,10 +58,10 @@ const fetchWithRetries = async (url) => {
 	return null;
 };
 
-const getOrFetch = async url => {
+const getOrFetch = async (url, hoursStaleLimit = -1) => {
 	const path = `${url.replace(/[^a-zA-Z0-9]+/g, '')}.json`;
 	try {
-		const cachedData = await loadJson(path);
+		const cachedData = await loadJson(path, hoursStaleLimit);
 		if (cachedData || cachedData === null) return cachedData;	
 	} catch (reason) {
 		console.log('getOrFetch caught reason: ', reason)
@@ -82,7 +83,7 @@ const getTypeIds = async (regionId) => {
 	const promises = [];
 	for (let p = 1; p <= 16; p++) {
 		const url = `https://esi.evetech.net/latest/markets/${regionId}/types/?datasource=tranquility&page=${p}`;
-		promises.push(getOrFetch(url));
+		promises.push(getOrFetch(url, 8));
 	}
 	return Promise.all(promises).then(results => {
 		return results.flat()//.slice(0, 1000);
@@ -104,7 +105,7 @@ const loadTypeNameById = async () => {
 
 const getDays = async (regionId, typeId) => {
 	const url = `https://esi.evetech.net/latest/markets/${regionId}/history/?datasource=tranquility&type_id=${typeId}`;
-	const days = await getOrFetch(url);
+	const days = await getOrFetch(url, 24);
 	return Array.isArray(days)
 		? days
 		: [];
@@ -112,7 +113,7 @@ const getDays = async (regionId, typeId) => {
 
 const getOrders = async (regionId, typeId) => {
 	const url = `https://esi.evetech.net/latest/markets/${regionId}/orders/?datasource=tranquility&type_id=${typeId}`;
-	const orders = await getOrFetch(url);
+	const orders = await getOrFetch(url, 0.2);
 	return Array.isArray(orders)
 		? orders
 		: [];
@@ -214,7 +215,7 @@ const getTypeName = async typeId => {
 
 	if (!typeNameById[typeId]) {
 		const url = `https://esi.evetech.net/latest/universe/types/${typeId}/?datasource=tranquility&language=en`;
-		const type = await getOrFetch(url);
+		const type = await getOrFetch(url, 24*7);
 		typeNameById[typeId] = type.name;
 	}
 
