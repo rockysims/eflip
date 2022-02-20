@@ -21,6 +21,13 @@ const BUY_TAX = 0.01;
 const HAULING_REWARD_FRACTION = 0.05;
 const COST_LIMIT = 100 * 1000000;
 
+const ignoreOneActiveSellerForTypeIds = [
+	// 31484, //Small Energy Locus Coordinator II (31484)
+	// 56066, //Glorification-5 'Devana' Filament (56066) 
+	// 18797, //Coreli A-Type Thermal Coating (18797)
+	// 61203, //Common Moon Mining Crystal Type B II (61203)
+];
+
 const saveJson = async (path, data) => {
 	await fetch(`/file/${path}`, {
 		method: 'POST',
@@ -232,7 +239,7 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 			const hoursOld = moment().diff(issued, 'hour');
 			return hoursOld < 24 * Math.max(1, daysPerSell);
 		});
-		const destActiveSellers = destRecentSellOrders.length;
+		const destActiveSellers = Math.max(0, destRecentSellOrders.length - (ignoreOneActiveSellerForTypeIds.includes(typeId) ? 1 : 0));
 
 		//calc destAvailableDailySellVolume
 		const destDailySellVolume = Math.floor(totalSellVolume / DAYS_CONSIDERED);
