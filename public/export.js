@@ -151,14 +151,18 @@ const roundNonZero = (num, nonZeroDigits = 2) => {
 	const end = Math.max(
 		index + nonZeroDigits,
 		dotIndex === -1
-		? numStr.length
-		: dotIndex + (num < 10 ? 2 : 0)
+			? numStr.length
+			: dotIndex + (
+				num < Math.pow(10, nonZeroDigits)
+					? nonZeroDigits
+					: 0
+			)
 	);
 	return numStr.substring(0, end);
 };
 
-const roundMils = amount => {
-	return roundNonZero(amount / 1000000);
+const roundMils = (amount, nonZeroDigits = 2) => {
+	return roundNonZero(amount / 1000000, nonZeroDigits);
 };
 
 let typeNameById = null;
@@ -174,6 +178,17 @@ const getTypeName = async typeId => {
 	}
 
 	return typeNameById[typeId];
+};
+
+let typeM3ById = {};
+const getTypeM3 = async typeId => {
+	if (!typeM3ById[typeId]) {
+		const url = `https://esi.evetech.net/latest/universe/types/${typeId}/?datasource=tranquility&language=en`;
+		const type = await getOrFetch(url, 24*7);
+		typeM3ById[typeId] = type.packaged_volume;
+	}
+
+	return typeM3ById[typeId];
 };
 
 //---
@@ -241,9 +256,9 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 		});
 		const destActiveSellers = Math.max(0, destRecentSellOrders.length - (ignoreOneActiveSellerForTypeIds.includes(typeId) ? 1 : 0));
 
-		//calc destAvailableDailySellVolume
+		//calc destAvailableDailySellVolumeRaw
 		const destDailySellVolume = Math.floor(totalSellVolume / DAYS_CONSIDERED);
-		const destAvailableDailySellVolume = Math.floor(destDailySellVolume / (destActiveSellers + 1));
+		const destAvailableDailySellVolumeRaw = destDailySellVolume / (destActiveSellers + 1);
 
 		const srcSellOrdersAsc = srcSellOrders.sort((a, b) => {
 			return a.price - b.price;
@@ -252,24 +267,44 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 		const destAveragePricesSlice = destAveragePrices.slice(-1 * DAYS_TO_COMPLETE);
 		const destRecentAverageSellPrice = destAveragePricesSlice.reduce((acc, cur) => acc + cur, 0) / destAveragePricesSlice.length;
 		const dayReports = [];
-		// let traderDaysOfCompetition = 0;
 		for (let d = 1; d <= DAYS_TO_COMPLETE; d++) {
 			let volume = 0;
 			let cost = 0;
 			let revenue = 0;
 
-			// //update traderDaysOfCompetition
-			// const competingSellOrderCount = destSellOrders.filter(order => {
-			// 	const issued = moment(order.issued);
-			// 	const hoursOld = moment().diff(issued, 'hour');
-			// 	return hoursOld < 24 * d;
-			// }).length;
-			// traderDaysOfCompetition += competingSellOrderCount;
+			const pastDaysVolume = dayReports.reduce((acc, cur) => acc + cur.volume, 0);
+			const pastDaysCost = dayReports.reduce((acc, cur) => acc + cur.cost, 0);
+			const todayVolumeLimit = Math.floor(destAvailableDailySellVolumeRaw * d - pastDaysVolume);
 
 			let loopLimit = 100;
 			while (true) {
 				if (loopLimit-- <= 0) throw 'loopLimit exhausted';
+				if (volume >= todayVolumeLimit) break;
 	
+				//calc vol
+				const costSoFar = cost + pastDaysCost;
+				const affordableVol = Math.floor((COST_LIMIT - costSoFar) / srcSellOrdersAsc[0].price);
+				const vol = Math.min(
+					srcSellOrdersAsc[0].volume_remain,
+					todayVolumeLimit - volume,
+					affordableVol
+				);
+
+				srcSellOrdersAsc[0].volume_remain -= vol;
+				const haulCost = srcSellOrdersAsc[0].price * HAULING_REWARD_FRACTION;
+				const costPerItem = srcSellOrdersAsc[0].price + haulCost;
+
+				const destSellPrice = Math.min(destBestSellPrice, destRecentAverageSellPrice);
+				const revenuePerItem = destSellPrice * (1 - SELL_TAX);
+	
+				const profitPerItem = revenuePerItem - costPerItem;
+				const profitPerDayEstimate = profitPerItem * destAvailableDailySellVolumeRaw;
+				if (profitPerDayEstimate < 2000000) break;
+
+				volume += vol;
+				cost += vol * costPerItem;
+				revenue += vol * revenuePerItem;
+
 				//remove empty orders from srcSellOrdersAsc
 				for (let i = 0; i < srcSellOrdersAsc.length; i++) {
 					const srcBestSellOrder = srcSellOrdersAsc[0];
@@ -278,25 +313,6 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 				}
 
 				if (srcSellOrdersAsc.length <= 0) break;
-	
-				const costSoFar = cost + dayReports.reduce((acc, cur) => acc + cur.cost, 0);
-				const affordableVol = Math.floor((COST_LIMIT - costSoFar) / srcSellOrdersAsc[0].price);
-				const vol = Math.min(srcSellOrdersAsc[0].volume_remain, destAvailableDailySellVolume - volume, affordableVol);
-				if (vol <= 0) break;
-
-				srcSellOrdersAsc[0].volume_remain -= vol;
-				const costPerItem = srcSellOrdersAsc[0].price;
-
-				const destSellPrice = Math.min(destBestSellPrice, destRecentAverageSellPrice);
-				const revenuePerItem = destSellPrice * (1 - SELL_TAX);
-	
-				const profitPerItem = revenuePerItem - costPerItem;
-				const profitPerDayEstimate = profitPerItem * destAvailableDailySellVolume;
-				if (profitPerDayEstimate < 2000000) break;
-
-				volume += vol;
-				cost += vol * costPerItem;
-				revenue += vol * revenuePerItem;
 			}
 
 			dayReports.push({
@@ -319,10 +335,10 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 
 		return {
 			volume: report.volume,
-			costPerItemMil: roundMils(report.cost / report.volume),
-			revenuePerItemMil: roundMils(report.revenue / report.volume),
+			costPerItemMil: roundMils(Math.ceil(report.cost / report.volume), 3),
+			revenuePerItemMil: roundMils(Math.floor(report.revenue / report.volume), 3),
 			activeSellers: destActiveSellers,
-			profitPerItemMil: roundMils((report.revenue - report.cost) / report.volume),
+			profitPerItemMil: roundMils((report.revenue - report.cost) / report.volume, 3),
 			dailyProfitMil: roundMils((report.revenue - report.cost) / DAYS_TO_COMPLETE),
 			activeDaysFraction: roundNonZero(activeDays / DAYS_CONSIDERED)
 		};
@@ -340,8 +356,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 	
 	
 	const typeIds = (await getTypeIds(END_REGION_ID));
-	// const typeIds = (await getTypeIds(END_REGION_ID)).slice(0, 5000); //TODO: remove the ".slice(0, 1000)" part
-	// const typeIds = [16649];
+	// const typeIds = (await getTypeIds(END_REGION_ID)).slice(0, 1000); //TODO: remove the ".slice(0, 1000)" part
+	// const typeIds = [648, 27379, 33362, 650];
+	// const typeIds = [6865];
 
 
 	outputElem.innerHTML = 'typeIds.length: ' + typeIds.length;
@@ -357,6 +374,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 			const reportPromise = getItemExportReport(START_REGION_ID, START_STATION_ID, END_REGION_ID, END_STATION_ID, typeId);
 			reportPromise.then(itemReport => itemReportByTypeId[typeId] = itemReport);
 			promises.push(reportPromise);
+			promises.push(getTypeM3(typeId)); //preload m3
 		}
 		await Promise.all(promises);
 		outputElem.innerHTML = `Processing ${step * STEP_SIZE} / ${typeIds.length}`;
@@ -407,14 +425,21 @@ document.addEventListener('DOMContentLoaded', async () => {
 		// }
 		
 		const { volume, costPerItemMil, revenuePerItemMil } = itemReport;
-		const costMil = roundNonZero(costPerItemMil * volume);
+		const costMil = roundNonZero(costPerItemMil * volume, 3);
 		const revenueMil = roundNonZero(revenuePerItemMil * volume);
+		const m3 = await getTypeM3(typeId);
 
 		html += '<div>';
-		html += 	`${await getTypeName(typeId)} (${typeId})`;
+		html += 	`${await getTypeName(typeId)} (${typeId}) &nbsp; `;
+		html += 	`<span class="dim">`;
+		html += 		`${roundNonZero(Math.ceil(volume * m3) / 1000)}km3 (${roundNonZero(m3)}m3 * ${volume})`;
+		html += 	`</span>`;
 		html += '</div>';
 		html += '<div>';
-		html += 	`${itemReport.dailyProfitMil} &nbsp; <span class="dim">(-${costMil} + ${revenueMil}) / ${DAYS_TO_COMPLETE}</span>`;
+		html += 	`${itemReport.dailyProfitMil} &nbsp; `;
+		html += 	`<span class="dim">`;
+		html += 		`(-${costMil} + ${revenueMil}) / ${DAYS_TO_COMPLETE}`;
+		html += 	`</span>`;
 		html += '<div>';	
 		html += '</div>';	
 		html += 	`${JSON.stringify(itemReport)}`;

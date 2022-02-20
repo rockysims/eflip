@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<link rel="shortcut icon" href="#" />
+	<title>eFlip</title>
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.1/moment.min.js"
+			integrity="sha512-qTXRIMyZIFb8iQcfjXWCO8+M5Tbc38Qi5WzdPOYZHIlZpzBHG3L3by84BBBOiRGiEb7KKtAOAs5qYdUiZiQNNQ=="
+			crossorigin="anonymous"
+			referrerpolicy="no-referrer"
+	></script>
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.1/moment.min.js" integrity="sha512-qTXRIMyZIFb8iQcfjXWCO8+M5Tbc38Qi5WzdPOYZHIlZpzBHG3L3by84BBBOiRGiEb7KKtAOAs5qYdUiZiQNNQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+	<style type="text/css">
+		.dim {
+			color: rgb(190, 190, 190);
+		}
+		.pending {
+			color: red;
+		}
+	</style>
+	<script src="export.js"></script>
+</head>
+<body>
+	<textarea id="reportsText" style="width: 100%; height: 300px;"></textarea>
+	<div style="display: flex; justify-content: space-between;">
+		<div id="sums"></div>
+		<button id="export">Copy item orders to clipboard</button>
+	</div>
+	<script type="text/javascript">
+		const reportsTextElem = document.querySelector('#reportsText');
+		const sumsElem = document.querySelector('#sums');
+		const exportElem = document.querySelector('#export');
+
+		let exportStr = '';
+		exportElem.addEventListener('click', async () => {
+			exportElem.classList.add('pending');
+			await navigator.clipboard.writeText(exportStr);
+			exportElem.classList.remove('pending');
+		});
+
+		reportsTextElem.addEventListener('input', e => {
+			const reportTexts = e.target.value.trim()
+				.split(/\n\s*\n/)
+				.filter(rep => rep.indexOf('{') !== -1);
+
+			let km3Total = 0;
+			let costTotal = 0;
+			let revenueTotal = 0;
+			const orderStrs = [];
+			try {
+				for (let reportText of reportTexts) {
+					const lines = reportText.split('\n');
+					const typeName = lines[0].match(/(.*?)\(\d+\)\s\s/)[1];
+					const km3 = lines[0].match(/([\d\.]+)km3/)[1];
+					const [fullMatch, cost, revenue] = lines[1].match(/-([\d\.]+) \+ ([\d\.]+)/);
+					const volume = JSON.parse(lines[2]).volume;
+					km3Total += +km3;
+					costTotal += +cost;
+					revenueTotal += +revenue;
+					orderStrs.push(typeName + '\t' + volume);
+				}
+			} catch(err) {
+				console.error(err);
+			}
+			exportStr = orderStrs.join('\n');
+			
+			let html = '';
+			html += roundNonZero(revenueTotal - costTotal);
+			html += `<span class="dim">`;
+			html += 	` (-${roundNonZero(costTotal)} + ${roundNonZero(revenueTotal)}) `;
+			html += `</span>`;
+			html += roundNonZero(km3Total) + 'km3';
+			sumsElem.innerHTML = html;
+		});
+	</script>
+	<hr/>
+	<div class="outputDiv"></div>
+</body>
+</html>
+
