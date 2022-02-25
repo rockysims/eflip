@@ -417,20 +417,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 		// 	console.log(`${typeId} margin crashed`);
 		// 	continue;
 		// }
-		if (itemReport.volume < 3) {
-			console.log(`${typeId} volume too low`);
-			continue;
-		}
-		// if (itemReport.sellRevenueAvgMil < itemReport.buyCostAvgMil * 1.25) {
-		// 	console.log('margin too slim');
+		// if (itemReport.volume < 3) {
+		// 	console.log(`${typeId} volume too low`);
 		// 	continue;
 		// }
-		if (itemReport.activeDaysFraction < 0.2) {
-			console.log('too slow');
+		if (itemReport.revenuePerItemMil < itemReport.costPerItemMil * 1.5) {
+			console.log('margin too slim');
 			continue;
 		}
-		// if (itemReport.cost / itemReport.volume > 100) {
-		// 	console.log('price too high');
+		// if (itemReport.activeDaysFraction < 0.2) {
+		// 	console.log('too slow');
 		// 	continue;
 		// }
 		
