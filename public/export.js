@@ -366,18 +366,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 	const outputElem = document.querySelector('.outputDiv');
 
 	outputElem.innerHTML = 'Starting...';
-	
-	
-	
+
+
+
 	const typeIds = (await getTypeIds(END_REGION_ID));
-	// const typeIds = (await getTypeIds(END_REGION_ID)).slice(0, 1000); //TODO: remove the ".slice(0, 1000)" part
-	// const typeIds = [648, 27379, 33362, 650];
-	// const typeIds = [6865];
+	// const typeIds = (await getTypeIds(END_REGION_ID)).slice(0, 1000);
+	// const typeIds = [54754, 49099, 34306, 12221, 34290];
 
 
-	outputElem.innerHTML = 'typeIds.length: ' + typeIds.length;
-
-	// const typeNameById = await getTypeNameById();
 
 	outputElem.innerHTML = `Processing`;
 
