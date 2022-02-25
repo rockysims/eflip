@@ -8,10 +8,17 @@ const AMARR_STATION_ID = 60008494;
 const DODIXIE_STATION_ID = 60011866;
 const RENS_STATION_ID = 60004588;
 
+//*
 const START_REGION_ID = JITA_REGION_ID;
 const START_STATION_ID = JITA_STATION_ID;
 const END_REGION_ID = AMARR_REGION_ID;
 const END_STATION_ID = AMARR_STATION_ID;
+/*/
+const END_REGION_ID = JITA_REGION_ID;
+const END_STATION_ID = JITA_STATION_ID;
+const START_REGION_ID = AMARR_REGION_ID;
+const START_STATION_ID = AMARR_STATION_ID;
+//*/
 
 const DAYS_CONSIDERED = 30;
 const DAYS_TO_COMPLETE = 5;
@@ -22,10 +29,17 @@ const HAULING_REWARD_FRACTION = 0.05;
 const COST_LIMIT = 100 * 1000000;
 
 const ignoreOneActiveSellerForTypeIds = [
+	//Max
 	// 31484, //Small Energy Locus Coordinator II (31484)
 	// 56066, //Glorification-5 'Devana' Filament (56066) 
 	// 18797, //Coreli A-Type Thermal Coating (18797)
 	// 61203, //Common Moon Mining Crystal Type B II (61203)
+
+	//Taymor
+	// 49099, //Zero-Point Mass Entangler (49099)
+	// 34306, //Large Higgs Anchor I (34306)
+	// 12221, //Medium Remote Capacitor Transmitter II (12221)
+	// 34290, //Polarized Rocket Launcher (34290)
 ];
 
 const saveJson = async (path, data) => {
