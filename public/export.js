@@ -441,10 +441,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 		const { volume, costPerItemMil, revenuePerItemMil } = itemReport;
 		const costMil = roundNonZero(costPerItemMil * volume, 3);
 		const revenueMil = roundNonZero(revenuePerItemMil * volume);
+		const typeName = await getTypeName(typeId);
 		const m3 = await getTypeM3(typeId);
 
 		html += '<div>';
-		html += 	`${await getTypeName(typeId)} (${typeId}) &nbsp; `;
+		html += 	`${typeName} (${typeId}) &nbsp; `;
 		html += 	`<span class="dim">`;
 		html += 		`${roundNonZero(Math.ceil(volume * m3) / 1000)}km3 (${roundNonZero(m3)}m3 * ${volume})`;
 		html += 	`</span>`;
