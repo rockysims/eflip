@@ -26,7 +26,7 @@ const STEP_SIZE = 250;
 const SELL_TAX = 0.08 + 0.024;
 const BUY_TAX = 0.01;
 const HAULING_REWARD_FRACTION = 0.05;
-const COST_LIMIT = 100 * 1000000;
+const COST_LIMIT = 1000 * Math.pow(10, 6);
 
 const ignoreOneActiveSellerForTypeIds = [
 	//Max
