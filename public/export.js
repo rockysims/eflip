@@ -21,7 +21,7 @@ const END_STATION_ID = JITA_STATION_ID;
 //*/
 
 const DAYS_CONSIDERED = 30;
-const DAYS_TO_COMPLETE = 5;
+const DAYS_TO_COMPLETE = 3;
 const STEP_SIZE = 250;
 const SELL_TAX = 0.08 + 0.024;
 const BUY_TAX = 0.01;
