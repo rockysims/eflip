@@ -90,19 +90,6 @@ const getTypeIds = async (regionId) => {
 	});
 };
 
-const loadTypeNameById = async () => {
-	const typeData = await fetch('invTypes.json', {
-		method: 'get'
-	}).then(res => res.json());
-
-	const typeNameById = {};
-	for (let typeDatum of typeData) {
-		typeNameById[typeDatum.typeID] = typeDatum.typeName;
-	}
-
-	return typeNameById;
-};
-
 const getDays = async (regionId, typeId) => {
 	const url = `https://esi.evetech.net/latest/markets/${regionId}/history/?datasource=tranquility&type_id=${typeId}`;
 	const days = await getOrFetch(url, 24);
@@ -207,12 +194,8 @@ const getItemReport = async (regionId, typeId) => {
 	}
 };
 
-let typeNameById = null;
+let typeNameById = {};
 const getTypeName = async typeId => {
-	if (typeNameById === null) {
-		typeNameById = await loadTypeNameById(typeId);
-	}
-
 	if (!typeNameById[typeId]) {
 		const url = `https://esi.evetech.net/latest/universe/types/${typeId}/?datasource=tranquility&language=en`;
 		const type = await getOrFetch(url, 24*7);
