@@ -284,11 +284,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 			continue;
 		}
 		if (itemReport.sellRevenueAvgMil < itemReport.buyCostAvgMil * 1.25) {
-			console.log('margin too slim');
+			console.log(`${typeId} margin too slim`);
 			continue;
 		}
 		if (itemReport.buyCostAvgMil > 100) {
-			console.log('price too high');
+			console.log(`${typeId} price too high`);
 			continue;
 		}
 		html += '<div>';
