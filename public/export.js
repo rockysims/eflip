@@ -216,6 +216,7 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 		//calc totalSellVolume and activeDays
 		let activeDays = 0;
 		let totalSellVolume = 0;
+		const destSellPrices = [];
 		const destAveragePrices = [];
 		for (let day of destDays) {
 			if (nowMoment.diff(day.date, 'd') > DAYS_CONSIDERED) continue;
@@ -239,6 +240,7 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 			const profitPerItem = sellRevenue - (srcBestSellPrice + haulCost);
 
 			if (profitPerItem > 0) {
+				destSellPrices.push(day.highest);
 				totalSellVolume += highVolume;
 				activeDays++;
 			}
@@ -261,8 +263,7 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 			return a.price - b.price;
 		});
 
-		const destAveragePricesSlice = destAveragePrices.slice(-1 * DAYS_TO_COMPLETE);
-		const destRecentAverageSellPrice = destAveragePricesSlice.reduce((acc, cur) => acc + cur, 0) / destAveragePricesSlice.length;
+		const destRecentAverageSellPrice = avg(destSellPrices.slice(-1 * DAYS_TO_COMPLETE));
 		const dayReports = [];
 		for (let d = 1; d <= DAYS_TO_COMPLETE; d++) {
 			let volume = 0;
