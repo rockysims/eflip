@@ -110,28 +110,45 @@ const roundMils = (amount) => {
 	return Math.round(amount / (1000000/100)) / 100;
 };
 
+const avg = (list) => {
+	return list.reduce((acc, cur) => acc + cur, 0) / list.length;
+};
+
 const nowMoment = moment();
 const getItemReport = async (regionId, typeId) => {
 	try {
 		const days = await getDays(regionId, typeId);
 		const orders = await getOrders(regionId, typeId);
 		
-		const overallAverage = days.map(day => day.average).reduce((a, c) => a + c, 0) / DAYS_CONSIDERED;
-	
 		let totalFlipProfit = 0;
 		let totalFlipVolume = 0;
 		let buyCosts = [];
 		let sellRevenues = [];
 		const profitPerFlipList = [];
+		const pastDays = [];
 		for (let day of days) {
-			if (nowMoment.diff(day.date, 'd') > DAYS_CONSIDERED) continue;
-			if (day.highest === day.lowest) continue;
-			if (day.highest > overallAverage * 10) continue; //crazy over priced so ignore
-			const lowFrac = (day.highest - day.average) / (day.highest - day.lowest);
+			const age = nowMoment.diff(day.date, 'd');
+			if (age > DAYS_CONSIDERED + 5) continue;
+			pastDays.push(day);
+			if (age > DAYS_CONSIDERED) continue;
+
+			//calc recentMiddlePrice (and skip day if crazy over priced || recent high/low prices are the same)
+			const recentDays = pastDays.slice(-5);
+			const recentHighPrice = avg([...recentDays.map(day => day.highest)]);
+			const recentLowPrice = avg([...recentDays.map(day => day.lowest)]);
+			const recentMiddlePrice = recentLowPrice + (recentHighPrice - recentLowPrice) * 0.5;
+			if (day.highest > recentMiddlePrice * 10) continue; //crazy over priced so skip day
+			if (recentHighPrice === recentLowPrice) continue; //can't tell if buy or sell so skip day
+
+			//calc flipVolume
+			const lowFrac = day.highest === day.lowest
+				? (day.highest < recentMiddlePrice ? 1 : 0)
+				: (day.highest - day.average) / (day.highest - day.lowest);
 			const highFrac = 1 - lowFrac;
 			const lowVolume = lowFrac * day.volume;
 			const highVolume = highFrac * day.volume;
 			const flipVolume = Math.floor(Math.min(lowVolume, highVolume));
+			
 			const sellRevenue = day.highest * (1 - SELL_TAX);
 			const buyCost = day.lowest * (1 + BUY_TAX);
 			const profitPerFlip = sellRevenue - buyCost;
