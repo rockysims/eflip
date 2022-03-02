@@ -166,6 +166,10 @@ const roundMils = (amount, nonZeroDigits = 2) => {
 	return roundNonZero(amount / 1000000, nonZeroDigits);
 };
 
+const avg = (list) => {
+	return list.reduce((acc, cur) => acc + cur, 0) / list.length;
+};
+
 let typeNameById = {};
 const getTypeName = async typeId => {
 	if (!typeNameById[typeId]) {
@@ -217,19 +221,24 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 		let activeDays = 0;
 		let totalSellVolume = 0;
 		const destSellPrices = [];
-		const destAveragePrices = [];
+		const pastDays = [];
 		for (let day of destDays) {
-			if (nowMoment.diff(day.date, 'd') > DAYS_CONSIDERED) continue;
+			const age = nowMoment.diff(day.date, 'd');
+			if (age > DAYS_CONSIDERED + 5) continue;
+			pastDays.push(day);
+			if (age > DAYS_CONSIDERED) continue;
 
-			//calc recentAveragePrice (and skip day if crazy over priced)
-			const recentAveragePrices = [...destAveragePrices, day.average].slice(-10);
-			const recentAveragePrice = recentAveragePrices.reduce((acc, cur) => acc + cur, 0) / recentAveragePrices.length;
-			if (day.highest > recentAveragePrice * 10) continue; //crazy over priced so skip day
-			destAveragePrices.push(day.average);
+			//calc recentMiddlePrice (and skip day if crazy over priced || recent high/low prices are the same)
+			const recentDays = pastDays.slice(-5);
+			const recentHighPrice = avg([...recentDays.map(day => day.highest)]);
+			const recentLowPrice = avg([...recentDays.map(day => day.lowest)]);
+			const recentMiddlePrice = recentLowPrice + (recentHighPrice - recentLowPrice) * 0.5;
+			if (day.highest > recentMiddlePrice * 10) continue; //crazy over priced so skip day
+			if (recentHighPrice === recentLowPrice) continue; //can't tell if buy or sell so skip day
 
 			//calc highVolume
 			const lowFrac = day.highest === day.lowest
-				? (day.highest < recentAveragePrice ? 1 : 0)
+				? (day.highest < recentMiddlePrice ? 1 : 0)
 				: (day.highest - day.average) / (day.highest - day.lowest);
 			const highFrac = 1 - lowFrac;
 			const highVolume = highFrac * day.volume;
