@@ -238,6 +238,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 			const reportPromise = getItemResellReport(THE_REGION_ID, THE_STATION_ID, typeId);
 			reportPromise.then(itemReport => itemReportByTypeId[typeId] = itemReport);
 			promises.push(reportPromise);
+			promises.push(getTypeName(typeId)); //preload typeName
 		}
 		await Promise.all(promises);
 		outputElem.innerHTML = `Processing ${step * STEP_SIZE} / ${typeIds.length}`;
