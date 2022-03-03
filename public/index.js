@@ -62,6 +62,7 @@ const getOrFetch = async (url, hoursStaleLimit = -1) => {
 	const path = `${url.replace(/[^a-zA-Z0-9]+/g, '')}.json`;
 	try {
 		const cachedData = await loadJson(path, hoursStaleLimit);
+		if (cachedData && cachedData.error) throw "cached data had error";
 		if (cachedData || cachedData === null) return cachedData;	
 	} catch (reason) {
 		console.log('getOrFetch caught reason: ', reason)
