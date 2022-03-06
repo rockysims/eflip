@@ -13,7 +13,11 @@ const START_REGION_ID = JITA_REGION_ID;
 const START_STATION_ID = JITA_STATION_ID;
 const END_REGION_ID = AMARR_REGION_ID;
 const END_STATION_ID = AMARR_STATION_ID;
+// const END_REGION_ID = DODIXIE_REGION_ID;
+// const END_STATION_ID = DODIXIE_STATION_ID;
 /*/
+// const START_REGION_ID = DODIXIE_REGION_ID;
+// const START_STATION_ID = DODIXIE_STATION_ID;
 const START_REGION_ID = AMARR_REGION_ID;
 const START_STATION_ID = AMARR_STATION_ID;
 const END_REGION_ID = JITA_REGION_ID;
@@ -21,7 +25,7 @@ const END_STATION_ID = JITA_STATION_ID;
 //*/
 
 const DAYS_CONSIDERED = 30;
-const DAYS_TO_COMPLETE = 3;
+const DAYS_TO_COMPLETE = 5;
 const STEP_SIZE = 250;
 const SELL_TAX = 0.08 + 0.024;
 const BUY_TAX = 0.01;
@@ -34,12 +38,15 @@ const ignoreOneActiveSellerForTypeIds = [
 	// 56066, //Glorification-5 'Devana' Filament (56066) 
 	// 18797, //Coreli A-Type Thermal Coating (18797)
 	// 61203, //Common Moon Mining Crystal Type B II (61203)
+	// 28282, //'Integrated' Infiltrator (28282)
+	// 19229, //Pithum A-Type Kinetic Shield Amplifier (19229)
 
 	//Taymor
 	// 49099, //Zero-Point Mass Entangler (49099)
 	// 34306, //Large Higgs Anchor I (34306)
 	// 12221, //Medium Remote Capacitor Transmitter II (12221)
 	// 34290, //Polarized Rocket Launcher (34290)
+	// 34278, // Polarized Light Neutron Blaster (34278)
 ];
 
 const saveJson = async (path, data) => {
