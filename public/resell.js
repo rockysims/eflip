@@ -108,7 +108,7 @@ const getDays = async (regionId, typeId) => {
 
 const getOrders = async (regionId, typeId) => {
 	const url = `https://esi.evetech.net/latest/markets/${regionId}/orders/?datasource=tranquility&type_id=${typeId}`;
-	const orders = await getOrFetch(url, 0);
+	const orders = await getOrFetch(url, 0.1);
 	return Array.isArray(orders)
 		? orders
 		: [];
