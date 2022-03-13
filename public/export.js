@@ -223,7 +223,7 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 			if (order.price < bestSellOrder.price) bestSellOrder = order;
 			return bestSellOrder;
 		}, destSellOrders[0] || null);
-		const destBestSellPrice = destBestSellOrder?.price || 0;
+		const destBestSellPrice = destBestSellOrder?.price || null;
 
 		//calc totalSellVolume and activeDays
 		let activeDays = 0;
@@ -309,7 +309,9 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 				const haulCost = srcSellOrdersAsc[0].price * HAULING_REWARD_FRACTION;
 				const costPerItem = srcSellOrdersAsc[0].price + haulCost;
 
-				const destSellPrice = Math.min(destBestSellPrice, destRecentAverageSellPrice);
+				const destSellPrice = destBestSellPrice === null
+					? destRecentAverageSellPrice
+					: Math.min(destBestSellPrice, destRecentAverageSellPrice);
 				const revenuePerItem = destSellPrice * (1 - SELL_TAX);
 	
 				const profitPerItem = revenuePerItem - costPerItem;
