@@ -1,119 +1,30 @@
-const JITA_REGION_ID = 10000002; //The Forge
-const AMARR_REGION_ID = 10000043; //Domain
-const DODIXIE_REGION_ID = 10000032; //Sinq Laison
-const RENS_REGION_ID = 10000030; //Heimatar
-// const HEK_REGION_ID = 10000042; //Metropolis
+const {
+	getTypeIds,
+	getDays,
+	getOrders,
+	roundMils,
+	avg,
+	getTypeName,
+
+	constants: {
+		JITA_REGION_ID,
+		AMARR_REGION_ID,
+		DODIXIE_REGION_ID,
+		RENS_REGION_ID,
+		
+		JITA_STATION_ID,
+		AMARR_STATION_ID,
+		DODIXIE_STATION_ID,
+		RENS_STATION_ID,
+
+		SELL_TAX,
+		BUY_TAX
+	}
+} = util;
+
 const THE_REGION_ID = JITA_REGION_ID;
 const DAYS_CONSIDERED = 20//30;
 const STEP_SIZE = 500;
-const SELL_TAX = 0.08 + 0.0233;
-const BUY_TAX = 0.024;
-
-const saveJson = async (path, data) => {
-	await fetch(`/file/${path}`, {
-		method: 'POST',
-		headers: {
-		  'Accept': 'application/json',
-		  'Content-Type': 'application/json'
-		},
-		body: JSON.stringify(data)
-	});
-};
-
-const loadJson = async (path, hoursStaleLimit = -1) => {
-	const url = `/file/${path}?hoursStaleLimit=${hoursStaleLimit}`
-	return await fetch(url, {
-		method: 'GET'
-	}).then(
-		res => res.json(),
-		() => {}
-	);
-};
-
-const fetchWithRetries = async (url) => {
-	for (let retries = 0; retries < 5; retries++) {
-		const fetchedData = await fetch(url, {
-			method: 'get'
-		}).then(res => {
-			const data = res.json();
-			if (data.error) {
-				console.log('GET failed. data.error: ', data.error);
-				return null;
-			} else {
-				return data;
-			}
-		}, async error => {
-			console.log('GET failed. error.response.status: ', error.response.status);
-			return null;
-		});
-		
-		if (fetchedData !== null) {
-			return fetchedData;
-		} else {
-			console.log(`retrying ${url}`);
-		}
-	}
-
-	console.error('fetchWithRetries() exhausted retry limit');
-	return null;
-};
-
-const getOrFetch = async (url, hoursStaleLimit = -1) => {
-	const path = `${url.replace(/[^a-zA-Z0-9]+/g, '')}.json`;
-	try {
-		const cachedData = await loadJson(path, hoursStaleLimit);
-		if (cachedData && cachedData.error) throw "cached data had error";
-		if (cachedData || cachedData === null) return cachedData;	
-	} catch (reason) {
-		console.log('getOrFetch caught reason: ', reason)
-	}
-
-	return fetchWithRetries(url).then(async data => {
-		await saveJson(path, data);
-		return data;
-	}, async error => {
-		console.log('GET failed because: ', error.response.status);
-		await saveJson(path, null);
-		return null;
-	});
-};
-
-//---
-
-const getTypeIds = async (regionId) => {
-	const promises = [];
-	for (let p = 1; p <= 16; p++) {
-		const url = `https://esi.evetech.net/latest/markets/${regionId}/types/?datasource=tranquility&page=${p}`;
-		promises.push(getOrFetch(url, 8));
-	}
-	return Promise.all(promises).then(results => {
-		return results.flat()//.slice(0, 1000);
-	});
-};
-
-const getDays = async (regionId, typeId) => {
-	const url = `https://esi.evetech.net/latest/markets/${regionId}/history/?datasource=tranquility&type_id=${typeId}`;
-	const days = await getOrFetch(url, 24);
-	return Array.isArray(days)
-		? days
-		: [];
-};
-
-const getOrders = async (regionId, typeId) => {
-	const url = `https://esi.evetech.net/latest/markets/${regionId}/orders/?datasource=tranquility&type_id=${typeId}`;
-	const orders = await getOrFetch(url, 0.2);
-	return Array.isArray(orders)
-		? orders
-		: [];
-};
-
-const roundMils = (amount) => {
-	return Math.round(amount / (1000000/100)) / 100;
-};
-
-const avg = (list) => {
-	return list.reduce((acc, cur) => acc + cur, 0) / list.length;
-};
 
 const nowMoment = moment();
 const getItemReport = async (regionId, typeId) => {
@@ -212,17 +123,6 @@ const getItemReport = async (regionId, typeId) => {
 	}
 };
 
-let typeNameById = {};
-const getTypeName = async typeId => {
-	if (!typeNameById[typeId]) {
-		const url = `https://esi.evetech.net/latest/universe/types/${typeId}/?datasource=tranquility&language=en`;
-		const type = await getOrFetch(url, 24*7);
-		typeNameById[typeId] = type.name;
-	}
-
-	return typeNameById[typeId];
-};
-
 document.addEventListener('DOMContentLoaded', async () => {
 	const outputElem = document.querySelector('.outputDiv');
 
@@ -236,8 +136,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 
 	outputElem.innerHTML = 'typeIds.length: ' + typeIds.length;
-
-	// const typeNameById = await getTypeNameById();
 
 	outputElem.innerHTML = `Processing`;
 
@@ -267,9 +165,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 	html += `Region: ${THE_REGION_ID}<br/>`;
 	html += '<br/>';
 	for (let typeId of typeIdsOrderedByProfitDesc) {
-		// const typeName = typeNameById[typeId];
-		// if (typeName.includes('Men\'s') || typeName.includes('Women\'s') || typeName.includes('SKIN')) continue;
-
 		const itemReport = itemReportByTypeId[typeId];
 		if (!itemReport) continue;
 		if (itemReport.dailyFlipProfitMil < 1 || itemReport.totalFlipVolume === 0) {
