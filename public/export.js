@@ -430,6 +430,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 		// 	console.log('too slow');
 		// 	continue;
 		// }
+		if (itemReport.activeSellers + 1 > itemReport.revenuePerItemMil / itemReport.costPerItemMil) {
+			console.log('too much competition for the roi');
+			continue;
+		}
 		
 		const { volume, costPerItemMil, revenuePerItemMil } = itemReport;
 		const costMil = roundNonZero(costPerItemMil * volume, 3);
