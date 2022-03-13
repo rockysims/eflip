@@ -28,7 +28,7 @@ const DAYS_CONSIDERED = 30;
 const DAYS_TO_COMPLETE = 5;
 const STEP_SIZE = 250;
 const SELL_TAX = 0.08 + 0.024;
-const BUY_TAX = 0.01;
+const BUY_TAX = 0.024;
 const HAULING_REWARD_FRACTION = 0.05;
 const COST_LIMIT = 1000 * Math.pow(10, 6);
 

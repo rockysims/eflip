@@ -7,7 +7,7 @@ const THE_REGION_ID = JITA_REGION_ID;
 const DAYS_CONSIDERED = 20//30;
 const STEP_SIZE = 500;
 const SELL_TAX = 0.08 + 0.0233;
-const BUY_TAX = 0.01;
+const BUY_TAX = 0.024;
 
 const saveJson = async (path, data) => {
 	await fetch(`/file/${path}`, {
