@@ -277,22 +277,22 @@ document.addEventListener('DOMContentLoaded', async () => {
 			}
 			continue;
 		}
-		// if (itemReport.profitPerFlipNowMil < itemReport.profitPerFlipAvgMil * 0.8) {
-		// 	console.log(`${typeId} margin crashed`);
-		// 	continue;
-		// }
+		if (itemReport.profitPerFlipNowMil < itemReport.profitPerFlipAvgMil * 0.8) {
+			console.log(`${typeId} margin crashed`);
+			continue;
+		}
 		// if (itemReport.volume < 3) {
 		// 	console.log(`${typeId} volume too low`);
 		// 	continue;
 		// }
-		if (itemReport.revenuePerItemMil < itemReport.costPerItemMil * 1.5) {
+		if (itemReport.revenuePerItemMil < itemReport.costPerItemMil * 2) {
 			console.log('margin too slim');
 			continue;
 		}
-		// if (itemReport.activeDaysFraction < 0.2) {
-		// 	console.log('too slow');
-		// 	continue;
-		// }
+		if (itemReport.activeDaysFraction < 0.25) {
+			console.log('too slow');
+			continue;
+		}
 		if (itemReport.activeSellers + 1 > itemReport.revenuePerItemMil / itemReport.costPerItemMil) {
 			console.log('too much competition for the roi');
 			continue;
