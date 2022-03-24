@@ -286,15 +286,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 		// 	continue;
 		// }
 		if (itemReport.revenuePerItemMil < itemReport.costPerItemMil * 2) {
-			console.log('margin too slim');
+			console.log(`${typeId} margin too slim`);
 			continue;
 		}
 		if (itemReport.activeDaysFraction < 0.25) {
-			console.log('too slow');
+			console.log(`${typeId} too slow`);
 			continue;
 		}
 		if (itemReport.activeSellers + 1 > itemReport.revenuePerItemMil / itemReport.costPerItemMil) {
-			console.log('too much competition for the roi');
+			console.log(`${typeId} too much competition for the roi`);
 			continue;
 		}
 		
