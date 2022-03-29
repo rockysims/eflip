@@ -289,7 +289,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 			console.log(`${typeId} margin too slim`);
 			continue;
 		}
-		if (itemReport.activeDaysFraction < 0.25) {
+		if (itemReport.activeDaysFraction < 0.2) {
 			console.log(`${typeId} too slow`);
 			continue;
 		}
