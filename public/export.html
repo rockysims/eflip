@@ -22,14 +22,20 @@
 			font-style: italic;
 			opacity: 0.5;
 		}
+		.mark.hide {
+			display: none;
+		}
 	</style>
 	<script src="util.js"></script>
 	<script src="export.js"></script>
 </head>
 <body>
 	<textarea id="markText" style="width: 100%; height: 30px; font-size: 8px; opacity: 0.5;"></textarea>
+	<input id="markCheckbox" type="checkbox" checked="true" style="opacity: 0.8;" /> <span class="dim">Show Marked</span><br/>
+	<br/>
 	<script type="text/javascript">
 		const markTextElem = document.querySelector('#markText');
+		const markCheckboxElem = document.querySelector('#markCheckbox');
 		const outputDiv = document.querySelector('#outputDiv');
 		
 		const updateMarked = () => {
@@ -39,6 +45,11 @@
 				const typeName = itemDiv.querySelector('div:first-child').innerHTML.match(/(.*?) \(\d+\)/)[1];
 				if (markTypeNames.includes(typeName)) {
 					itemDiv.classList.add('mark');
+					if (markCheckboxElem.checked) {
+						itemDiv.classList.remove('hide');
+					} else {
+						itemDiv.classList.add('hide');
+					}
 				} else {
 					itemDiv.classList.remove('mark');
 				}
@@ -46,6 +57,7 @@
 		};
 
 		markTextElem.addEventListener('input', updateMarked);
+		markCheckboxElem.addEventListener('change', updateMarked);
 	</script>
 	<textarea id="reportsText" style="width: 100%; height: 300px;"></textarea>
 	<div style="display: flex; justify-content: space-between;">
