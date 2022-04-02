@@ -227,7 +227,7 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 };
 
 document.addEventListener('DOMContentLoaded', async () => {
-	const outputElem = document.querySelector('.outputDiv');
+	const outputElem = document.querySelector('#outputDiv');
 
 	outputElem.innerHTML = 'Starting...';
 
@@ -304,24 +304,27 @@ document.addEventListener('DOMContentLoaded', async () => {
 		const typeName = await getTypeName(typeId);
 		const m3 = await getTypeM3(typeId);
 
-		html += '<div>';
-		html += 	`${typeName} (${typeId}) &nbsp; `;
-		html += 	`<span class="dim">`;
-		html += 		`${roundNonZero(Math.ceil(volume * m3) / 1000)}km3 (${roundNonZero(m3)}m3 * ${volume})`;
-		html += 	`</span>`;
-		html += '</div>';
-		html += '<div>';
-		html += 	`${itemReport.dailyProfitMil} &nbsp; `;
-		html += 	`<span class="dim">`;
-		html += 		`(-${costMil} + ${revenueMil}) / ${DAYS_TO_COMPLETE}`;
-		html += 	`</span>`;
-		html += '<div>';	
+		html += '<div class="item">';
+		html += 	'<div>';
+		html += 		`${typeName} (${typeId}) &nbsp; `;
+		html += 		`<span class="dim">`;
+		html += 			`${roundNonZero(Math.ceil(volume * m3) / 1000)}km3 (${roundNonZero(m3)}m3 * ${volume})`;
+		html += 		`</span>`;
+		html += 	'</div>';
+		html += 	'<div>';
+		html += 		`${itemReport.dailyProfitMil} &nbsp; `;
+		html += 		`<span class="dim">`;
+		html += 			`(-${costMil} + ${revenueMil}) / ${DAYS_TO_COMPLETE}`;
+		html += 		`</span>`;
+		html += 	'<div>';	
+		html += 	'</div>';	
+		html += 		`${JSON.stringify(itemReport)}`;
+		html += 	'</div>';	
+		html += 	'<div>&nbsp;</div>';
 		html += '</div>';	
-		html += 	`${JSON.stringify(itemReport)}`;
-		html += '</div>';	
-		html += '<div>&nbsp;</div>';
 	}
 	outputElem.innerHTML = html;
+	updateMarked(); //defined in export.html
 });
 
 //TODO: consider that it may not always take DAYS_TO_COMPLETE to sell hauled volume (could change dailyProfit perhaps)

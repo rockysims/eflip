@@ -18,11 +18,35 @@
 		.pending {
 			color: red;
 		}
+		.mark {
+			font-style: italic;
+			opacity: 0.5;
+		}
 	</style>
 	<script src="util.js"></script>
 	<script src="export.js"></script>
 </head>
 <body>
+	<textarea id="markText" style="width: 100%; height: 30px; font-size: 8px;"></textarea>
+	<script type="text/javascript">
+		const markTextElem = document.querySelector('#markText');
+		const outputDiv = document.querySelector('#outputDiv');
+		
+		const updateMarked = () => {
+			const markTypeNames = markTextElem.value.split('\n');
+			const itemDivs = document.querySelectorAll('div.item');
+			for (let itemDiv of itemDivs) {
+				const typeName = itemDiv.querySelector('div:first-child').innerHTML.match(/(.*?) \(\d+\)/)[1];
+				if (markTypeNames.includes(typeName)) {
+					itemDiv.classList.add('mark');
+				} else {
+					itemDiv.classList.remove('mark');
+				}
+			}
+		};
+
+		markTextElem.addEventListener('input', updateMarked);
+	</script>
 	<textarea id="reportsText" style="width: 100%; height: 300px;"></textarea>
 	<div style="display: flex; justify-content: space-between;">
 		<div id="sums"></div>
@@ -76,7 +100,7 @@
 		});
 	</script>
 	<hr/>
-	<div class="outputDiv"></div>
+	<div id="outputDiv"></div>
 </body>
 </html>
 
