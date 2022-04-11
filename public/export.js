@@ -293,8 +293,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 			console.log(`${typeId} too slow`);
 			continue;
 		}
-		if (itemReport.activeSellers + 1 > itemReport.revenuePerItemMil / itemReport.costPerItemMil) {
-			console.log(`${typeId} too much competition for the roi`);
+		if (
+			itemReport.activeSellers + 1 > itemReport.revenuePerItemMil / itemReport.costPerItemMil //poor percentage profit (relative to competition)
+			&& itemReport.dailyProfitMil < itemReport.activeSellers * 3 //poor absolute profit (relative to competition)
+		) {
+			console.log(`${typeId} too much competition for the return`);
 			continue;
 		}
 		
