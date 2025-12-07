@@ -79,7 +79,7 @@
 		reportsTextElem.addEventListener('input', e => {
 			const reportTexts = e.target.value.trim()
 				.split(/\n\s*\n/)
-				.filter(rep => rep.indexOf('{') !== -1);
+				.filter(rep => rep.indexOf('volume:') !== -1);
 
 			let km3Total = 0;
 			let costTotal = 0;
@@ -91,7 +91,7 @@
 					const typeName = lines[0].match(/(.*?)\(\d+\)\s\s/)[1];
 					const km3 = lines[0].match(/([\d\.]+)km3/)[1];
 					const [fullMatch, cost, revenue] = lines[1].match(/-([\d\.]+) \+ ([\d\.]+)/);
-					const volume = JSON.parse(lines[2]).volume;
+					const volume = lines[2].match(/volume: ([\d\.]+)/)[1];
 					km3Total += +km3;
 					costTotal += +cost;
 					revenueTotal += +revenue;
