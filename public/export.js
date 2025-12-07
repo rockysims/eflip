@@ -175,7 +175,7 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 
 			let loopLimit = 100;
 			while (true) {
-				if (loopLimit-- <= 0) throw 'loopLimit exhausted';
+				if (loopLimit-- <= 0) throw `loopLimit exhausted (typeId: ${typeId})`;
 				if (volume >= todayVolumeLimit) break;
 	
 				//calc vol
@@ -257,7 +257,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 	const typeIds = (await getTypeIds(END_REGION_ID));
 	// const typeIds = (await getTypeIds(END_REGION_ID)).slice(0, 1000);
-	// const typeIds = [90459, 54754, 49099, 34306, 12221, 34290];
+	// const typeIds = [35947, 61207, 90459, 54754, 49099, 34306, 12221, 34290, 4348, 16272];
 
 
 
@@ -313,6 +313,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 		}
 		if (itemReport.activeDaysFraction < 0.2) {
 			console.log(`${typeId} too slow`);
+			continue;
+		}
+		const hem = (min, val, max) => Math.min(Math.max(min, val), max);
+		const profitRating = hem(0, itemReport.dailyProfitMil * 0.1, 1);
+		const tooRecentThresholdMin = 1 / 24;
+		const tooRecentThresholdMax = 30 / 24;
+		const tooRecentlyThreshold = Math.floor((tooRecentThresholdMax - (tooRecentThresholdMax - tooRecentThresholdMin) * profitRating) * 100) / 100;
+		if (itemReport.daysSinceSellerUpdate !== null && itemReport.daysSinceSellerUpdate < tooRecentlyThreshold) {
+			console.log(`${typeId} seller updated too recently (${itemReport.daysSinceSellerUpdate} days ago < ${tooRecentlyThreshold}) vs daily profits (${itemReport.dailyProfitMil})`);
 			continue;
 		}
 		const adjustedActiveSellers = itemReport.activeSellers * (0.1 + Math.pow(0.9, Math.max(1, itemReport.daysSinceSellerUpdate)));
