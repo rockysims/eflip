@@ -124,18 +124,39 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 			}
 		}
 
-		//calc destActiveSellers
-		const daysPerSell = DAYS_CONSIDERED / totalSellVolume;
-		const destRecentSellOrders = destSellOrders.filter(order => {
-			const issued = moment(order.issued);
-			const hoursOld = moment().diff(issued, 'hour');
-			return hoursOld < 24 * Math.max(1, daysPerSell);
-		});
-		const destActiveSellers = Math.max(0, destRecentSellOrders.length - (ignoreOneActiveSellerForTypeIds.includes(typeId) ? 1 : 0));
+		function calcDestSellersReport() {
+			const mostRecentOrder = destSellOrders.slice(-1)[0];
+			if (mostRecentOrder) {
+				const mostRecentOrderIssuedMoment = moment(mostRecentOrder.issued);
+
+				//calc sellerCount
+				const daysPerSell = DAYS_CONSIDERED / totalSellVolume;
+				const destRecentSellOrders = destSellOrders.filter(order => {
+					const issued = moment(order.issued);
+					const hoursOlderThanMostRecent = mostRecentOrderIssuedMoment.diff(issued, 'hour');
+					return hoursOlderThanMostRecent < 24 * Math.max(1, daysPerSell);
+				});
+				const sellerCount = Math.max(0, destRecentSellOrders.length - (ignoreOneActiveSellerForTypeIds.includes(typeId) ? 1 : 0));
+
+				const daysSinceSellerUpdateExact = nowMoment.diff(mostRecentOrderIssuedMoment, 'hour') / 24;
+				const daysSinceSellerUpdate = Math.round(daysSinceSellerUpdateExact * 100) / 100;
+
+				return {
+					sellerCount,
+					daysSinceSellerUpdate
+				}
+			} else {
+				return {
+					sellerCount: null,
+					daysSinceSellerUpdate: null
+				}
+			}
+		}
+		const destSellersReport = calcDestSellersReport();
 
 		//calc destAvailableDailySellVolumeRaw
 		const destDailySellVolumeRaw = totalSellVolume / DAYS_CONSIDERED;
-		const destAvailableDailySellVolumeRaw = destDailySellVolumeRaw / (destActiveSellers + 1);
+		const destAvailableDailySellVolumeRaw = destDailySellVolumeRaw / (destSellersReport.sellerCount + 1);
 
 		const srcSellOrdersAsc = srcSellOrders.sort((a, b) => {
 			return a.price - b.price;
@@ -215,7 +236,8 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 			volume: report.volume,
 			costPerItemMil: roundMils(Math.ceil(report.cost / report.volume), 3),
 			revenuePerItemMil: roundMils(Math.floor(report.revenue / report.volume), 3),
-			activeSellers: destActiveSellers,
+			activeSellers: destSellersReport.sellerCount,
+			daysSinceSellerUpdate: destSellersReport.daysSinceSellerUpdate,
 			profitPerItemMil: roundMils((report.revenue - report.cost) / report.volume, 3),
 			dailyProfitMil: roundMils((report.revenue - report.cost) / DAYS_TO_COMPLETE),
 			activeDaysFraction: roundNonZero(activeDays / DAYS_CONSIDERED)
@@ -235,7 +257,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 	const typeIds = (await getTypeIds(END_REGION_ID));
 	// const typeIds = (await getTypeIds(END_REGION_ID)).slice(0, 1000);
-	// const typeIds = [54754, 49099, 34306, 12221, 34290];
+	// const typeIds = [90459, 54754, 49099, 34306, 12221, 34290];
 
 
 
@@ -293,9 +315,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 			console.log(`${typeId} too slow`);
 			continue;
 		}
+		const adjustedActiveSellers = itemReport.activeSellers * (0.1 + Math.pow(0.9, Math.max(1, itemReport.daysSinceSellerUpdate)));
 		if (
-			itemReport.activeSellers + 1 > itemReport.revenuePerItemMil / itemReport.costPerItemMil //poor percentage profit (relative to competition)
-			&& itemReport.dailyProfitMil < itemReport.activeSellers * 3 //poor absolute profit (relative to competition)
+			adjustedActiveSellers + 1 > itemReport.revenuePerItemMil / itemReport.costPerItemMil //poor percentage profit (relative to competition)
+			&& itemReport.dailyProfitMil < adjustedActiveSellers * 3 //poor absolute profit (relative to competition)
 		) {
 			console.log(`${typeId} too much competition for the return`);
 			continue;
@@ -306,6 +329,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 		const revenueMil = roundNonZero(revenuePerItemMil * volume);
 		const typeName = await getTypeName(typeId);
 		const m3 = await getTypeM3(typeId);
+
+		const itemReportStr = Object.entries(itemReport).map(([key, val]) => key + ': ' + val).join(' &nbsp; ');
 
 		html += '<div class="item">';
 		html += 	'<div>';
@@ -320,8 +345,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 		html += 			`(-${costMil} + ${revenueMil}) / ${DAYS_TO_COMPLETE}`;
 		html += 		`</span>`;
 		html += 	'<div>';	
-		html += 	'</div>';	
-		html += 		`${JSON.stringify(itemReport)}`;
+		html += 	'</div>';
+		html += 		itemReportStr;
 		html += 	'</div>';	
 		html += 	'<div>&nbsp;</div>';
 		html += '</div>';	

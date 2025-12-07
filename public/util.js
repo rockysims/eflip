@@ -82,7 +82,8 @@ const util = (() => {
 	};
 	
 	const getDays = async (regionId, typeId) => {
-		const url = `https://esi.evetech.net/latest/markets/${regionId}/history/?datasource=tranquility&type_id=${typeId}`;
+		// const url = `https://esi.evetech.net/latest/markets/${regionId}/history/?datasource=tranquility&type_id=${typeId}`;
+		const url = `https://esi.evetech.net/markets/${regionId}/history?type_id=${typeId}`;
 		const days = await getOrFetch(url, 24);
 		return Array.isArray(days)
 			? days
