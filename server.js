@@ -53,10 +53,21 @@ app.post('/file/:path', async (req, res) => {
 
 //---
 
-const port = process.env.PORT || 5000;
+const port = process.env.PORT || 5001;
 app.listen(port, () => console.log(`Listening on port ${port}...`));
 
-
+(() => {
+	const host = 'localhost';
+	const port = 4000;
+	const cors_proxy = require('cors-anywhere');
+	cors_proxy.createServer({
+		originWhitelist: [], // Allow all origins
+		requireHeader: [],
+		removeHeaders: ['cookie', 'cookie2']
+	}).listen(port, host, function() {
+		console.log('Running CORS Anywhere on ' + host + ':' + port);
+	});
+})();
 
 // const csvToJson = require('convert-csv-to-json');
 // let fileInputName = 'public/invTypes.csv'; 
