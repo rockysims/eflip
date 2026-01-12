@@ -131,16 +131,19 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 		}
 
 		function calcDestSellersReport() {
-			const mostRecentOrder = destSellOrders.slice(-1)[0];
+			const mostRecentOrder = destSellOrders.reduce((newestOrder, cur) => {
+				if (!newestOrder) return cur;
+				const curIsNewer = moment(cur.issued).isAfter(moment(newestOrder.issued));
+				return curIsNewer ? cur : newestOrder;
+			}, null);
 			if (mostRecentOrder) {
 				const mostRecentOrderIssuedMoment = moment(mostRecentOrder.issued);
 
 				//calc sellerCount
-				const daysPerSell = DAYS_CONSIDERED / totalSellVolume;
 				const destRecentSellOrders = destSellOrders.filter(order => {
 					const issued = moment(order.issued);
 					const hoursOlderThanMostRecent = mostRecentOrderIssuedMoment.diff(issued, 'hour');
-					return hoursOlderThanMostRecent < 24 * Math.max(1, daysPerSell);
+					return hoursOlderThanMostRecent < 24;
 				});
 				const sellerCount = Math.max(0, destRecentSellOrders.length - (ignoreOneActiveSellerForTypeIds.includes(typeId) ? 1 : 0));
 
