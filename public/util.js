@@ -77,7 +77,9 @@ const util = (() => {
 			promises.push(getOrFetch(url, 8));
 		}
 		return Promise.all(promises).then(results => {
-			return results.flat()//.slice(0, 1000);
+			return results
+				.filter(result => !result.error)
+				.flat()//.slice(0, 1000);
 		});
 	};
 	
