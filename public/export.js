@@ -313,7 +313,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 		// 	console.log(`${typeId} volume too low`);
 		// 	continue;
 		// }
-		if (itemReport.revenuePerItemMil < itemReport.costPerItemMil * 1.8) {
+		if (itemReport.revenuePerItemMil < itemReport.costPerItemMil * 1.5) {
 			console.log(`${typeId} margin too slim`);
 			continue;
 		}
