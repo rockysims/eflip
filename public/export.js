@@ -272,7 +272,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 	const itemReportByTypeId = {};
 	for (let step = 0; step * STEP_SIZE < typeIds.length; step++) {
 		const promises = [];
-		for (let typeId of typeIds.slice(step * STEP_SIZE, (step + 1) * STEP_SIZE)) {
+		const typeIdsSlice = typeIds.slice(step * STEP_SIZE, (step + 1) * STEP_SIZE);
+		for (let typeId of typeIdsSlice) {
 			const reportPromise = getItemExportReport(START_REGION_ID, START_STATION_ID, END_REGION_ID, END_STATION_ID, typeId);
 			reportPromise.then(itemReport => itemReportByTypeId[typeId] = itemReport);
 			promises.push(reportPromise);
