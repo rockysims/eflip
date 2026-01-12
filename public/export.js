@@ -50,7 +50,7 @@ const DAYS_CONSIDERED = 30;
 const DAYS_TO_COMPLETE = 5;
 const STEP_SIZE = 250;
 const HAULING_REWARD_FRACTION = 0.05;
-const COST_LIMIT = 1000 * Math.pow(10, 6);
+const COST_LIMIT = 10 * Math.pow(10, 9);
 
 const ignoreOneActiveSellerForTypeIds = [
 	//Max
