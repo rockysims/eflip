@@ -92,24 +92,30 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 		}, destSellOrders[0] || null);
 		const destBestSellPrice = destBestSellOrder?.price || null;
 
+		const ordinaryPrice = getOrdinaryPrice(destDays);
+
 		//calc totalSellVolume and activeDays
 		let activeDays = 0;
 		let totalSellVolume = 0;
 		const destSellPrices = [];
 		const pastDays = [];
+		const RECENT_THRESHOLD_DAYS = 10;
 		for (let day of destDays) {
 			const age = nowMoment.diff(day.date, 'd');
-			if (age > DAYS_CONSIDERED + 5) continue;
+			if (age > DAYS_CONSIDERED + RECENT_THRESHOLD_DAYS) continue;
 			pastDays.push(day);
 			if (age > DAYS_CONSIDERED) continue;
 
 			//calc recentMiddlePrice (and skip day if crazy over priced || recent high/low prices are the same)
-			const recentDays = pastDays.slice(-5);
+			const recentDays = pastDays.slice(-1 * RECENT_THRESHOLD_DAYS);
 			const recentHighPrice = avg([...recentDays.map(day => day.highest)]);
 			const recentLowPrice = avg([...recentDays.map(day => day.lowest)]);
-			const recentMiddlePrice = recentLowPrice + (recentHighPrice - recentLowPrice) * 0.5;
+			
+			const recentMiddlePrice = recentHighPrice === recentLowPrice
+				? ordinaryPrice
+				: recentLowPrice + (recentHighPrice - recentLowPrice) * 0.5;
+
 			if (day.highest > recentMiddlePrice * 10) continue; //crazy over priced so skip day
-			if (recentHighPrice === recentLowPrice) continue; //can't tell if buy or sell so skip day
 
 			//calc highVolume
 			const lowFrac = day.highest === day.lowest
@@ -119,7 +125,7 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 			const highVolume = highFrac * day.volume;
 
 			//calc profitPerItem
-			const sellRevenue = day.highest * (1 - SELL_TAX);
+			const sellRevenue = Math.min(day.highest, ordinaryPrice) * (1 - SELL_TAX);
 			const haulCost = HAULING_REWARD_FRACTION * srcBestSellPrice;
 			const profitPerItem = sellRevenue - (srcBestSellPrice + haulCost);
 
@@ -267,6 +273,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 	const typeIds = (await getTypeIds(END_REGION_ID));
 	// const typeIds = (await getTypeIds(END_REGION_ID)).slice(0, 1000);
 	// const typeIds = [35947, 61207, 90459, 54754, 49099, 34306, 12221, 34290, 4348, 16272];
+	// const typeIds = [62630];
 
 
 
@@ -373,6 +380,55 @@ document.addEventListener('DOMContentLoaded', async () => {
 	outputElem.innerHTML = html;
 	updateMarked(); //defined in export.html
 });
+
+// Takes days and buckets them into volume weighted price buckets then returns the price from the dominant bucket
+function getOrdinaryPrice(days, priceBucketPercent = 0.2 ) {
+	// Step 1: compute reference price
+	const overallAveragePrice = days.reduce((sum, day) => sum + day.average, 0) / days.length;
+
+	// Step 2: fixed bucket size derived from reference price
+	const bucketSize = overallAveragePrice * priceBucketPercent;
+
+	// bucketKey -> bucket
+	const bucketByKey = {};
+
+	for (const day of days) {
+		const averagePrice = day.average;
+		const tradeVolume = day.volume;
+
+		// Step 3: assign to bucket
+		const bucketKey = Math.round(averagePrice / bucketSize);
+
+		let bucket = bucketByKey[bucketKey];
+		if (!bucket) {
+			bucket = {
+				totalVolume: 0,
+				weightedPriceSum: 0
+			};
+			bucketByKey[bucketKey] = bucket;
+		}
+
+		// Step 4: accumulate
+		bucket.totalVolume += tradeVolume;
+		bucket.weightedPriceSum += averagePrice * tradeVolume;
+	}
+
+	// Step 5: find dominant bucket
+	let dominantBucket = null;
+	for (const bucket of Object.values(bucketByKey)) {
+		if (
+			dominantBucket === null ||
+			bucket.totalVolume > dominantBucket.totalVolume
+		) {
+			dominantBucket = bucket;
+		}
+	}
+
+	// Step 6: volume-weighted price of dominant bucket
+	return dominantBucket.weightedPriceSum / dominantBucket.totalVolume;
+}
+
+
 
 //TODO: consider that it may not always take DAYS_TO_COMPLETE to sell hauled volume (could change dailyProfit perhaps)
 
