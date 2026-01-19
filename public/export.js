@@ -125,12 +125,13 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 			const highVolume = highFrac * day.volume;
 
 			//calc profitPerItem
-			const sellRevenue = Math.min(day.highest, ordinaryPrice) * (1 - SELL_TAX);
+			const sellPrice = Math.min(day.highest, ordinaryPrice);
+			const sellRevenue = sellPrice * (1 - SELL_TAX);
 			const haulCost = HAULING_REWARD_FRACTION * srcBestSellPrice;
 			const profitPerItem = sellRevenue - (srcBestSellPrice + haulCost);
 
 			if (profitPerItem > 0) {
-				destSellPrices.push(day.highest);
+				destSellPrices.push(sellPrice);
 				totalSellVolume += highVolume;
 				activeDays++;
 			}
