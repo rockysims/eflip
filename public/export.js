@@ -172,7 +172,9 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 
 		//calc destAvailableDailySellVolumeRaw
 		const destDailySellVolumeRaw = totalSellVolume / DAYS_CONSIDERED;
-		const destAvailableDailySellVolumeRaw = destDailySellVolumeRaw / (destSellersReport.sellerCount + 1);
+		const sellerFreshnessFactor = Math.max(0, 1 - destSellersReport.daysSinceSellerUpdate / DAYS_TO_COMPLETE);
+		const depreciatedSellerCount = Math.ceil(destSellersReport.sellerCount * sellerFreshnessFactor);
+		const destAvailableDailySellVolumeRaw = destDailySellVolumeRaw / (depreciatedSellerCount + 1);
 
 		const srcSellOrdersAsc = srcSellOrders.sort((a, b) => {
 			return a.price - b.price;
