@@ -328,7 +328,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 		// 	continue;
 		// }
 		if (itemReport.revenuePerItemMil < itemReport.costPerItemMil * 1.5) {
-			console.log(`${typeId} margin too slim (${Math.round(100 * itemReport.revenuePerItemMil / itemReport.costPerItemMil) / 100}x`);
+			console.log(`${typeId} margin too slim (${Math.round(100 * itemReport.revenuePerItemMil / itemReport.costPerItemMil) / 100}x)`);
 			continue;
 		}
 		if (itemReport.activeDaysFraction < 0.2) {
