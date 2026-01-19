@@ -20,10 +20,15 @@ const util = (() => {
 		);
 	};
 	
-	const fetchWithRetries = async (url) => {
+	const fetchWithRetries = async (url, accessToken = null) => {
 		for (let retries = 0; retries < 5; retries++) {
+			const headers = {};
+			if (accessToken) {
+				headers['Authorization'] = `Bearer ${accessToken}`;
+			}
 			const fetchedData = await fetch(url, {
-				method: 'get'
+				method: 'get',
+				headers
 			}).then(res => {
 				const data = res.json();
 				if (data.error) {
@@ -48,7 +53,7 @@ const util = (() => {
 		return null;
 	};
 	
-	const getOrFetch = async (url, hoursStaleLimit = -1) => {
+	const getOrFetch = async (url, hoursStaleLimit = -1, accessToken = null) => {
 		const path = `${url.replace(/[^a-zA-Z0-9]+/g, '')}.json`;
 		try {
 			const cachedData = await loadJson(path, hoursStaleLimit);
@@ -58,7 +63,7 @@ const util = (() => {
 			console.log('getOrFetch caught reason: ', reason)
 		}
 	
-		return fetchWithRetries(url).then(async data => {
+		return fetchWithRetries(url, accessToken).then(async data => {
 			await saveJson(path, data);
 			return data;
 		}, async error => {
@@ -100,6 +105,22 @@ const util = (() => {
 			: [];
 	};
 	
+	const getCharacterWalletTransactions = async (characterId, accessToken, hoursStaleLimit = 0.05) => {
+		const url = `https://esi.evetech.net/latest/characters/${characterId}/wallet/transactions/?datasource=tranquility`;
+		const transactions = await getOrFetch(url, hoursStaleLimit, accessToken);
+		return Array.isArray(transactions)
+			? transactions
+			: [];
+	};
+	
+	const getCharacterWalletJournals = async (characterId, accessToken, hoursStaleLimit = 0.05) => {
+		const url = `https://esi.evetech.net/latest/characters/${characterId}/wallet/journal/?datasource=tranquility`;
+		const journals = await getOrFetch(url, hoursStaleLimit, accessToken);
+		return Array.isArray(journals)
+			? journals
+			: [];
+	};
+
 	//---
 	
 	const roundNonZero = (num, nonZeroDigits = 2) => {
@@ -157,6 +178,8 @@ const util = (() => {
 		getTypeIds,
 		getDays,
 		getOrders,
+		getCharacterWalletTransactions,
+		getCharacterWalletJournals,
 		roundNonZero,
 		roundMils,
 		avg,
