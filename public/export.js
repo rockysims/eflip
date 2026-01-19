@@ -92,7 +92,7 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 		}, destSellOrders[0] || null);
 		const destBestSellPrice = destBestSellOrder?.price || null;
 
-		const ordinaryPrice = getOrdinaryPrice(destDays);
+		const ordinaryPrice = getOrdinaryPrice(destDays) || 0;
 
 		//calc totalSellVolume and activeDays
 		let activeDays = 0;
@@ -383,6 +383,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 // Takes days and buckets them into volume weighted price buckets then returns the price from the dominant bucket
 function getOrdinaryPrice(days, priceBucketPercent = 0.2 ) {
+	if (days.length === 0) return null;
+
 	// Step 1: compute reference price
 	const overallAveragePrice = days.reduce((sum, day) => sum + day.average, 0) / days.length;
 
