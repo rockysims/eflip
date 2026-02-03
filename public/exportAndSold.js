@@ -18,7 +18,19 @@ const getItemExportAndSoldReport = async (transactions) => {
 		const avgCost = avg(buyTransactions.map(tx => tx.unit_price));
 		const avgRevenue = avg(sellTransactions.map(tx => tx.unit_price));
 		const sold = sellTransactions.map(sellTx => sellTx.quantity).reduce((acc, cur) => acc + cur, 0);
+
+
+
+		//TODO: consider journal entries to adjust for broker fees and sales tax (and relisting fees)
+		// tx.journal_ref_id <-> j.id (for sales tax)
+		// ? (for broker fee) j.ref_type === "brokers_fee"
+		// ? (for broker fee when changing price if different)
+
+		// console.log({transactions, avgCost, avgRevenue})
+		// const sellJournals = journals.filter(j => j.)
 		
+
+
 		return {
 			avgCostMil: roundMils(avgCost),
 			avgRevenueMil: roundMils(avgRevenue),
@@ -37,19 +49,18 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 	outputElem.innerHTML = 'Starting...';
 
-	const journals = [];
-	journals.push(...(await getCharacterWalletJournals(BUYER_CHARACTER_ID, BUYER_ACCESS_TOKEN)));
-	if (BUYER_CHARACTER_ID !== SELLER_CHARACTER_ID){
-		journals.push(...(await getCharacterWalletJournals(SELLER_CHARACTER_ID, SELLER_ACCESS_TOKEN)));
-	}
-	console.log({journals})
-	
-
 	const transactions = [];
 	transactions.push(...(await getCharacterWalletTransactions(BUYER_CHARACTER_ID, BUYER_ACCESS_TOKEN)));
 	if (BUYER_CHARACTER_ID !== SELLER_CHARACTER_ID){
 		transactions.push(...(await getCharacterWalletTransactions(SELLER_CHARACTER_ID, SELLER_ACCESS_TOKEN)));
 	}
+
+	// const journals = [];
+	// journals.push(...(await getCharacterWalletJournals(BUYER_CHARACTER_ID, BUYER_ACCESS_TOKEN)));
+	// if (BUYER_CHARACTER_ID !== SELLER_CHARACTER_ID){
+	// 	journals.push(...(await getCharacterWalletJournals(SELLER_CHARACTER_ID, SELLER_ACCESS_TOKEN)));
+	// }
+
 	const typeIds = [...(new Set(transactions.map(tx => tx.type_id)))];
 
 	outputElem.innerHTML = `Processing`;
@@ -58,7 +69,18 @@ document.addEventListener('DOMContentLoaded', async () => {
 	const promises = [];
 	for (let typeId of typeIds) {
 		const transactionsOfType = transactions.filter(tx => tx.type_id === typeId);
-		const reportPromise = getItemExportAndSoldReport(transactionsOfType);
+		// const journalRefIds = transactionsOfType.map(tx => tx.journal_ref_id);
+		const hydratedTransactionsOfType = transactionsOfType.map(tx => ({
+			...tx,
+			// journals: journals.filter(j => journalRefIds.includes(j.id))
+		}));
+		// const journalRefIds = transactionsOfType.map(tx => tx.journal_ref_id);
+		// const referencedJournals = journals.filter(j => journalRefIds.includes(j.id));
+		// console.log({
+		// 	journalsOfType: referencedJournals,
+		// 	journals
+		// })
+		const reportPromise = getItemExportAndSoldReport(hydratedTransactionsOfType);
 		reportPromise.then(itemReport => itemReportByTypeId[typeId] = itemReport);
 		promises.push(reportPromise);
 	}
@@ -66,11 +88,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 	outputElem.innerHTML = `Sorting`;
 
-	const typeIdsOrderedByProfitDesc = typeIds.sort((a, b) => {
-		const aRep = itemReportByTypeId[a];
-		const bRep = itemReportByTypeId[b];
-		return (bRep?.totalProfitMil || 0) - (aRep?.totalProfitMil || 0);
-	});
+	const typeIdsOrderedByProfitDesc = typeIds
+		.filter(typeId => !isNaN(itemReportByTypeId[typeId].totalProfitMil))	
+		.sort((a, b) => {
+			const aRep = itemReportByTypeId[a];
+			const bRep = itemReportByTypeId[b];
+			return bRep.totalProfitMil - aRep.totalProfitMil;
+		});
 
 	outputElem.innerHTML = `Ready`;
 

@@ -15,21 +15,25 @@ const util = (() => {
 		return await fetch(url, {
 			method: 'GET'
 		}).then(
-			res => res.json(),
+			res => res.status === 404 ? null : res.json(),
 			() => {}
 		);
 	};
 	
-	const fetchWithRetries = async (url, accessToken = null) => {
+	const fetchWithRetries = async (url, accessToken = null, postBody = null) => {
 		for (let retries = 0; retries < 5; retries++) {
 			const headers = {};
 			if (accessToken) {
 				headers['Authorization'] = `Bearer ${accessToken}`;
 			}
-			const fetchedData = await fetch(url, {
-				method: 'get',
+			const fetchOptions = {
+				method: postBody ? 'post' : 'get',
 				headers
-			}).then(res => {
+			};
+			if (postBody) {
+				fetchOptions.body = JSON.stringify(postBody);
+			}
+			const fetchedData = await fetch(url, fetchOptions).then(res => {
 				const data = res.json();
 				if (data.error) {
 					console.log('GET failed. data.error: ', data.error);
@@ -37,7 +41,7 @@ const util = (() => {
 				} else {
 					return data;
 				}
-			}, async error => {
+			}).catch(async error => {
 				console.log('GET failed. error.response.status: ', error.response.status);
 				return null;
 			});
@@ -58,9 +62,9 @@ const util = (() => {
 		try {
 			const cachedData = await loadJson(path, hoursStaleLimit);
 			if (cachedData && cachedData.error) throw "cached data had error";
-			if (cachedData || cachedData === null) return cachedData;	
+			if (cachedData) return cachedData;	
 		} catch (reason) {
-			console.log('getOrFetch caught reason: ', reason)
+			console.log('getOrFetch caught reason: ', reason);
 		}
 	
 		return fetchWithRetries(url, accessToken).then(async data => {
@@ -97,15 +101,15 @@ const util = (() => {
 			: [];
 	};
 	
-	const getOrders = async (regionId, typeId, hoursStaleLimit = 1) => {
-		const url = `https://esi.evetech.net/latest/markets/${regionId}/orders/?datasource=tranquility&type_id=${typeId}`;
+	const getOrders = async (regionId, typeId, orderType = 'all', hoursStaleLimit = 0.5) => {
+		const url = `https://esi.evetech.net/latest/markets/${regionId}/orders/?datasource=tranquility&type_id=${typeId}&order_type=${orderType}`;
 		const orders = await getOrFetch(url, hoursStaleLimit);
 		return Array.isArray(orders)
 			? orders
 			: [];
 	};
 	
-	const getCharacterWalletTransactions = async (characterId, accessToken, hoursStaleLimit = 0.05) => {
+	const getCharacterWalletTransactions = async (characterId, accessToken, hoursStaleLimit = 0.05*100) => {
 		const url = `https://esi.evetech.net/latest/characters/${characterId}/wallet/transactions/?datasource=tranquility`;
 		const transactions = await getOrFetch(url, hoursStaleLimit, accessToken);
 		return Array.isArray(transactions)
@@ -113,12 +117,27 @@ const util = (() => {
 			: [];
 	};
 	
-	const getCharacterWalletJournals = async (characterId, accessToken, hoursStaleLimit = 0.05) => {
+	const getCharacterWalletJournals = async (characterId, accessToken, hoursStaleLimit = 0.05*100) => {
 		const url = `https://esi.evetech.net/latest/characters/${characterId}/wallet/journal/?datasource=tranquility`;
 		const journals = await getOrFetch(url, hoursStaleLimit, accessToken);
 		return Array.isArray(journals)
 			? journals
 			: [];
+	};
+
+	//---
+
+	const getFuzzworkPricesInRegion = async (regionId, typeIds, hoursStaleLimit = 0.5) => {
+		const FUZZ_STEP_SIZE = 25;
+		const fuzzPricesByTypeIdFragments = [];
+		for (let step = 0; step * FUZZ_STEP_SIZE < typeIds.length; step++) {
+			const typeIdsSlice = typeIds.slice(step * FUZZ_STEP_SIZE, (step + 1) * FUZZ_STEP_SIZE);
+			const url = `https://market.fuzzwork.co.uk/aggregates/?region=${regionId}&types=${typeIdsSlice.join(',')}`;
+			fuzzPricesByTypeIdFragments.push(await getOrFetch(url, hoursStaleLimit));
+		}
+
+		const fuzzPricesByTypeId = Object.assign({}, ...fuzzPricesByTypeIdFragments);
+		return fuzzPricesByTypeId;
 	};
 
 	//---
@@ -151,6 +170,18 @@ const util = (() => {
 	const avg = (list) => {
 		return list.reduce((acc, cur) => acc + cur, 0) / list.length;
 	};
+
+	const typeIdByName = {};
+	const getTypeIdByName = async typeName => {
+		if (!typeIdByName[typeName]) {
+			const url = `https://esi.evetech.net/universe/ids`;
+			const res = await fetchWithRetries(url, null, [typeName]);
+			const typeId = res.inventory_types[0].id;
+			typeIdByName[typeName] = typeId;
+		}
+
+		return typeIdByName[typeName];
+	}
 	
 	const typeNameById = {};
 	const getTypeName = async typeId => {
@@ -183,8 +214,10 @@ const util = (() => {
 		roundNonZero,
 		roundMils,
 		avg,
+		getTypeIdByName,
 		getTypeName,
 		getTypeM3,
+		getFuzzworkPricesInRegion,
 
 		constants: {
 			JITA_REGION_ID: 10000002, //The Forge

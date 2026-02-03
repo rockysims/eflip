@@ -5,8 +5,10 @@ const {
 	roundNonZero,
 	roundMils,
 	avg,
+	getTypeIdByName,
 	getTypeName,
 	getTypeM3,
+	getFuzzworkPricesInRegion,
 
 	constants: {
 		JITA_REGION_ID,
@@ -38,10 +40,10 @@ const END_STATION_ID = AMARR_STATION_ID;
 /*/
 // const START_REGION_ID = DODIXIE_REGION_ID;
 // const START_STATION_ID = DODIXIE_STATION_ID;
-const START_REGION_ID = STACMON_REGION_ID;
-const START_STATION_ID = STACMON_STATION_ID;
-// const START_REGION_ID = AMARR_REGION_ID;
-// const START_STATION_ID = AMARR_STATION_ID;
+// const START_REGION_ID = STACMON_REGION_ID;
+// const START_STATION_ID = STACMON_STATION_ID;
+const START_REGION_ID = AMARR_REGION_ID;
+const START_STATION_ID = AMARR_STATION_ID;
 const END_REGION_ID = JITA_REGION_ID;
 const END_STATION_ID = JITA_STATION_ID;
 //*/
@@ -49,8 +51,9 @@ const END_STATION_ID = JITA_STATION_ID;
 const DAYS_CONSIDERED = 30;
 const DAYS_TO_COMPLETE = 5;
 const STEP_SIZE = 250;
-const HAULING_REWARD_FRACTION = 0.05;
+const HAULING_REWARD_FRACTION = 0.10;
 const COST_LIMIT = 10 * Math.pow(10, 9);
+const MIN_ROI = 1.5;
 
 const ignoreOneActiveSellerForTypeIds = [
 	//Max
@@ -70,10 +73,10 @@ const ignoreOneActiveSellerForTypeIds = [
 ];
 
 const nowMoment = moment();
-const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, destLocationId, typeId) => {
+const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, destLocationId, typeId, isAlwaysShow = false) => {
 	try {
-		const srcOrders = (await getOrders(srcRegionId, typeId)).filter(order => order.location_id === srcLocationId);
-		const destOrders = (await getOrders(destRegionId, typeId)).filter(order => order.location_id === destLocationId);
+		const srcOrders = (await getOrders(srcRegionId, typeId, 'sell')).filter(order => order.location_id === srcLocationId);
+		const destOrders = (await getOrders(destRegionId, typeId, 'sell')).filter(order => order.location_id === destLocationId);
 		const destDays = await getDays(destRegionId, typeId);
 
 		//calc srcBestSellPrice
@@ -213,10 +216,10 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 					? destRecentAverageSellPrice
 					: Math.min(destBestSellPrice, destRecentAverageSellPrice);
 				const revenuePerItem = destSellPrice * (1 - SELL_TAX);
-	
+
 				const profitPerItem = revenuePerItem - costPerItem;
 				const profitPerDayEstimate = profitPerItem * destAvailableDailySellVolumeRaw;
-				if (profitPerDayEstimate < 2000000) break;
+				if (profitPerDayEstimate < 2000000 && !isAlwaysShow) break;
 
 				volume += vol;
 				cost += vol * costPerItem;
@@ -250,16 +253,29 @@ const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, des
 			revenue: 0
 		});
 
-		return {
-			volume: report.volume,
-			costPerItemMil: roundMils(Math.ceil(report.cost / report.volume), 3),
-			revenuePerItemMil: roundMils(Math.floor(report.revenue / report.volume), 3),
-			activeSellers: destSellersReport.sellerCount,
-			daysSinceSellerUpdate: destSellersReport.daysSinceSellerUpdate,
-			profitPerItemMil: roundMils((report.revenue - report.cost) / report.volume, 3),
-			dailyProfitMil: roundMils((report.revenue - report.cost) / DAYS_TO_COMPLETE),
-			activeDaysFraction: roundNonZero(activeDays / DAYS_CONSIDERED)
-		};
+		if (report.volume > 0) {
+			return {
+				volume: report.volume,
+				costPerItemMil: roundMils(Math.ceil(report.cost / report.volume), 3),
+				revenuePerItemMil: roundMils(Math.floor(report.revenue / report.volume), 3),
+				activeSellers: destSellersReport.sellerCount,
+				daysSinceSellerUpdate: destSellersReport.daysSinceSellerUpdate,
+				profitPerItemMil: roundMils((report.revenue - report.cost) / report.volume, 3),
+				dailyProfitMil: roundMils((report.revenue - report.cost) / DAYS_TO_COMPLETE),
+				activeDaysFraction: roundNonZero(activeDays / DAYS_CONSIDERED)
+			};
+		} else {
+			return {
+				volume: report.volume,
+				costPerItemMil: roundMils(Math.ceil(srcBestSellPrice), 3),
+				revenuePerItemMil: roundMils(Math.floor(destBestSellPrice), 3),
+				activeSellers: destSellersReport.sellerCount,
+				daysSinceSellerUpdate: destSellersReport.daysSinceSellerUpdate,
+				profitPerItemMil: roundMils((destBestSellPrice - srcBestSellPrice), 3),
+				dailyProfitMil: 0,
+				activeDaysFraction: roundNonZero(activeDays / DAYS_CONSIDERED)
+			};
+		}
 	} catch (reason) {
 		console.warn(reason);
 		return null;
@@ -276,7 +292,38 @@ document.addEventListener('DOMContentLoaded', async () => {
 	const typeIds = (await getTypeIds(END_REGION_ID));
 	// const typeIds = (await getTypeIds(END_REGION_ID)).slice(0, 1000);
 	// const typeIds = [35947, 61207, 90459, 54754, 49099, 34306, 12221, 34290, 4348, 16272];
-	// const typeIds = [62630];
+	// const typeIds = [33900];
+
+
+
+``
+	
+	const alwaysShowNames = [
+		'\'Undertaker\' Heavy Missile Launcher',
+		'10000MN Monopropellant Enduring Afterburner',
+		'Arch Angel Phased Plasma XL',
+		'Blood Brass Tag',
+		'Blood Diamond Tag',
+		'Blood Gold Tag',
+		'Dual Anode Light Particle Stream I',
+		'ElectroPunch Ultra S',
+		'Imperial Navy Small Capacitor Booster',
+		'Medium Pulse Laser Battery',
+		'Precursor Battleship',
+		'Small Pulse Laser Battery',
+		'Standup Radar ECM Script',
+		'Standup Variable Spectrum ECM II',
+		'Trinary State Processor',
+		'Unstable Medium Armor Repairer Mutaplasmid',
+		'Void XL',
+	];
+	const alwaysShowTypeIds = await Promise.all(alwaysShowNames.map(name => getTypeIdByName(name)));
+	for (let typeId of alwaysShowTypeIds) {
+		if (!typeIds.includes(typeId)) {
+			typeIds.push(typeId);
+		}
+	}
+
 
 
 
@@ -286,7 +333,31 @@ document.addEventListener('DOMContentLoaded', async () => {
 	for (let step = 0; step * STEP_SIZE < typeIds.length; step++) {
 		const promises = [];
 		const typeIdsSlice = typeIds.slice(step * STEP_SIZE, (step + 1) * STEP_SIZE);
+
+		const srcFuzzByTypeId = await getFuzzworkPricesInRegion(START_REGION_ID, typeIdsSlice);
+		const destFuzzByTypeId = await getFuzzworkPricesInRegion(END_REGION_ID, typeIdsSlice);
 		for (let typeId of typeIdsSlice) {
+			//triage with fuzzwork prices
+			if (!alwaysShowTypeIds.includes(typeId)) {
+				const srcFuzzPrice = +srcFuzzByTypeId[typeId].sell.min;
+				const destFuzzPrice = +destFuzzByTypeId[typeId].sell.min;
+				if (srcFuzzPrice === 0 || destFuzzPrice === 0) {
+					console.warn(`${typeId} fuzz no price (src: ${srcFuzzPrice}, dest: ${destFuzzPrice})`);
+					continue;
+				}
+				if (destFuzzPrice < srcFuzzPrice) {
+					console.log(`${typeId} fuzz negative spread (src: ${util.roundMils(srcFuzzPrice)}, dest: ${util.roundMils(destFuzzPrice)})`);
+					continue;
+				}
+				if (destFuzzPrice < srcFuzzPrice * MIN_ROI) {
+					// Fuzz margin too slim
+					console.log(`${typeId} fuzz margin too slim (${Math.round(100 * destFuzzPrice / srcFuzzPrice) / 100}x)`);
+					continue;
+				}
+				console.log(`${typeId} fuzz margin ok (${Math.round(100 * destFuzzPrice / srcFuzzPrice) / 100}x)`);
+			}
+
+			//generate report
 			const reportPromise = getItemExportReport(START_REGION_ID, START_STATION_ID, END_REGION_ID, END_STATION_ID, typeId);
 			reportPromise.then(itemReport => itemReportByTypeId[typeId] = itemReport);
 			promises.push(reportPromise);
@@ -309,48 +380,52 @@ document.addEventListener('DOMContentLoaded', async () => {
 	let html = '';
 	html += `Start Region: ${START_REGION_ID}<br/>`;
 	html += `End Region: ${END_REGION_ID}<br/>`;
+	html += `<span class="dim">${moment().format('MMM. Do, h:mm a')}</span><br/>`;
 	html += '<br/>';
 	for (let typeId of typeIdsOrderedByProfitDesc) {
 		const itemReport = itemReportByTypeId[typeId];
 		if (!itemReport) continue;
-		if (itemReport.dailyProfitMil < 1 || itemReport.volume === 0) {
-			if (itemReport.dailyProfitMil > 0) {
-				console.log(`${typeId} not profitable (dailyProfitMil: ${itemReport.dailyProfitMil})`);
+
+		if (!alwaysShowTypeIds.includes(typeId)) {
+			if (itemReport.dailyProfitMil < 1 || itemReport.volume === 0) {
+				if (itemReport.dailyProfitMil > 0) {
+					console.log(`${typeId} not profitable (dailyProfitMil: ${itemReport.dailyProfitMil})`);
+				}
+				continue;
 			}
-			continue;
-		}
-		if (itemReport.profitPerFlipNowMil < itemReport.profitPerFlipAvgMil * 0.8) {
-			console.log(`${typeId} margin crashed`);
-			continue;
-		}
-		// if (itemReport.volume < 3) {
-		// 	console.log(`${typeId} volume too low`);
-		// 	continue;
-		// }
-		if (itemReport.revenuePerItemMil < itemReport.costPerItemMil * 1.5) {
-			console.log(`${typeId} margin too slim (${Math.round(100 * itemReport.revenuePerItemMil / itemReport.costPerItemMil) / 100}x)`);
-			continue;
-		}
-		if (itemReport.activeDaysFraction < 0.2) {
-			console.log(`${typeId} too slow`);
-			continue;
-		}
-		const hem = (min, val, max) => Math.min(Math.max(min, val), max);
-		const profitRating = hem(0, itemReport.dailyProfitMil * 0.1, 1);
-		const tooRecentThresholdMin = 1 / 24;
-		const tooRecentThresholdMax = 30 / 24;
-		const tooRecentlyThreshold = Math.floor((tooRecentThresholdMax - (tooRecentThresholdMax - tooRecentThresholdMin) * profitRating) * 100) / 100;
-		if (itemReport.daysSinceSellerUpdate !== null && itemReport.daysSinceSellerUpdate < tooRecentlyThreshold) {
-			console.log(`${typeId} seller updated too recently (${itemReport.daysSinceSellerUpdate} days ago < ${tooRecentlyThreshold}) vs daily profits (${itemReport.dailyProfitMil})`);
-			continue;
-		}
-		const adjustedActiveSellers = itemReport.activeSellers * (0.1 + Math.pow(0.9, Math.max(1, itemReport.daysSinceSellerUpdate)));
-		if (
-			adjustedActiveSellers + 1 > itemReport.revenuePerItemMil / itemReport.costPerItemMil //poor percentage profit (relative to competition)
-			&& itemReport.dailyProfitMil < adjustedActiveSellers * 3 //poor absolute profit (relative to competition)
-		) {
-			console.log(`${typeId} too much competition for the return`);
-			continue;
+			if (itemReport.profitPerFlipNowMil < itemReport.profitPerFlipAvgMil * 0.8) {
+				console.log(`${typeId} margin crashed`);
+				continue;
+			}
+			// if (itemReport.volume < 3) {
+			// 	console.log(`${typeId} volume too low`);
+			// 	continue;
+			// }
+			if (itemReport.revenuePerItemMil < itemReport.costPerItemMil * MIN_ROI) {
+				console.log(`${typeId} margin too slim (${Math.round(100 * itemReport.revenuePerItemMil / itemReport.costPerItemMil) / 100}x)`);
+				continue;
+			}
+			if (itemReport.activeDaysFraction < 0.2) {
+				console.log(`${typeId} too slow`);
+				continue;
+			}
+			const hem = (min, val, max) => Math.min(Math.max(min, val), max);
+			const profitRating = hem(0, itemReport.dailyProfitMil * 0.1, 1);
+			const tooRecentThresholdMin = 1 / 24;
+			const tooRecentThresholdMax = 30 / 24;
+			const tooRecentlyThreshold = Math.floor((tooRecentThresholdMax - (tooRecentThresholdMax - tooRecentThresholdMin) * profitRating) * 100) / 100;
+			if (itemReport.daysSinceSellerUpdate !== null && itemReport.daysSinceSellerUpdate < tooRecentlyThreshold) {
+				console.log(`${typeId} seller updated too recently (${itemReport.daysSinceSellerUpdate} days ago < ${tooRecentlyThreshold}) vs daily profits (${itemReport.dailyProfitMil})`);
+				continue;
+			}
+			const adjustedActiveSellers = itemReport.activeSellers * (0.1 + Math.pow(0.9, Math.max(1, itemReport.daysSinceSellerUpdate)));
+			if (
+				adjustedActiveSellers + 1 > itemReport.revenuePerItemMil / itemReport.costPerItemMil //poor percentage profit (relative to competition)
+				&& itemReport.dailyProfitMil < adjustedActiveSellers * 3 //poor absolute profit (relative to competition)
+			) {
+				console.log(`${typeId} too much competition for the return`);
+				continue;
+			}
 		}
 		
 		const { volume, costPerItemMil, revenuePerItemMil } = itemReport;
@@ -361,9 +436,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 		const itemReportStr = Object.entries(itemReport).map(([key, val]) => key + ': ' + val).join(' &nbsp; ');
 
-		html += '<div class="item">';
+		const classNames = ['item'];
+		if (alwaysShowTypeIds.includes(typeId)) classNames.push('alwaysShowItem');
+		html += `<div class="${classNames.join(' ')}">`;
 		html += 	'<div>';
-		html += 		`${typeName} (${typeId}) &nbsp; `;
+		html += 		`<span class="name">${typeName}</span> (${typeId}) &nbsp; `;
 		html += 		`<span class="dim">`;
 		html += 			`${roundNonZero(Math.ceil(volume * m3) / 1000)}km3 (${roundNonZero(m3)}m3 * ${volume})`;
 		html += 		`</span>`;
