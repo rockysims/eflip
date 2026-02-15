@@ -7,7 +7,7 @@ const fs = require('fs');
 
 //express setup
 const app = express();
-app.use(bodyParser.json());
+app.use(bodyParser.json({limit: '5mb'}));
 
 //static setup
 app.use(express.static('public'));
