@@ -118,11 +118,19 @@ const util = (() => {
 	};
 	
 	const getCharacterWalletJournals = async (characterId, accessToken, hoursStaleLimit = 0.05*100) => {
-		const url = `https://esi.evetech.net/latest/characters/${characterId}/wallet/journal/?datasource=tranquility`;
-		const journals = await getOrFetch(url, hoursStaleLimit, accessToken);
-		return Array.isArray(journals)
-			? journals
-			: [];
+		const journals = [];
+		for (let p = 1; p <= 100; p++) {
+			const url = `https://esi.evetech.net/latest/characters/${characterId}/wallet/journal/?datasource=tranquility&page=${p}`;
+			const journalsPage = await getOrFetch(url, hoursStaleLimit, accessToken);
+			if (journalsPage && !journalsPage.error) {
+				journals.push(...journalsPage);
+			} else {
+				console.log('break on journal page ', p);
+				break;
+			}
+		}
+		
+		return journals;
 	};
 
 	//---
