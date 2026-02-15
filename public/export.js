@@ -296,26 +296,27 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 
 
-``
+
 	
 	const alwaysShowNames = [
-		'\'Undertaker\' Heavy Missile Launcher',
 		'10000MN Monopropellant Enduring Afterburner',
-		'Arch Angel Phased Plasma XL',
+		'Arch Angel EMP XL',
 		'Blood Brass Tag',
-		'Blood Diamond Tag',
-		'Blood Gold Tag',
-		'Dual Anode Light Particle Stream I',
-		'ElectroPunch Ultra S',
-		'Imperial Navy Small Capacitor Booster',
-		'Medium Pulse Laser Battery',
-		'Precursor Battleship',
+		'Blood Crystal Tag',
+		// 'Blood Silver Tag',
+		'Corelum B-Type Thermal Energized Membrane',
+		'Gravid Ice Harvester Mutaplasmid',
+		'Large Projectile Metastasis Adjuster II',
+		'Lattice Locked Dekaisogen',
+		'Mobile Phase Anchor',
 		'Small Pulse Laser Battery',
+		'Standup Ballistic Control System I',
 		'Standup Radar ECM Script',
-		'Standup Variable Spectrum ECM II',
 		'Trinary State Processor',
-		'Unstable Medium Armor Repairer Mutaplasmid',
 		'Void XL',
+
+		'Domination Torpedo Launcher',
+		'Variegated Asteroid Mining Crystal Type B I',
 	];
 	const alwaysShowTypeIds = await Promise.all(alwaysShowNames.map(name => getTypeIdByName(name)));
 	for (let typeId of alwaysShowTypeIds) {
