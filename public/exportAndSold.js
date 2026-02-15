@@ -55,15 +55,38 @@ document.addEventListener('DOMContentLoaded', async () => {
 		transactions.push(...(await getCharacterWalletTransactions(SELLER_CHARACTER_ID, SELLER_ACCESS_TOKEN)));
 	}
 
-	// const journals = [];
-	// journals.push(...(await getCharacterWalletJournals(BUYER_CHARACTER_ID, BUYER_ACCESS_TOKEN)));
-	// if (BUYER_CHARACTER_ID !== SELLER_CHARACTER_ID){
-	// 	journals.push(...(await getCharacterWalletJournals(SELLER_CHARACTER_ID, SELLER_ACCESS_TOKEN)));
-	// }
+	const journals = [];
+	journals.push(...(await getCharacterWalletJournals(SELLER_CHARACTER_ID, SELLER_ACCESS_TOKEN)));
 
 	const typeIds = [...(new Set(transactions.map(tx => tx.type_id)))];
 
 	outputElem.innerHTML = `Processing`;
+
+	const amountByRefType = {};
+	for (let j of journals) {
+		const internalDonationRegex = new RegExp(`[^ ]+ Isk deposited cash into [^ ]+ Isk's account`);
+		if (internalDonationRegex.test(j.description)) {
+			// isk holder changed but no isk was really spent/received so ignore
+			continue;
+		}
+		if (j.ref_type === 'market_escrow') {
+			// cancels with itself in the long run so ignore
+			continue;
+		}
+		amountByRefType[j.ref_type] = amountByRefType[j.ref_type] || 0;
+		amountByRefType[j.ref_type] += j.amount;
+	}
+	
+	const contractItemFlows = (amountByRefType['contract_price'] || 0);
+	const contractHaulFlows = ['contract_reward_refund', 'contract_reward_deposited', 'player_donation']
+		.reduce((acc, refType) => acc + (amountByRefType[refType] || 0), 0);
+	const contractFeeFlows = ['contract_brokers_fee', 'contract_deposit', 'contract_deposit_refund']
+		.reduce((acc, refType) => acc + (amountByRefType[refType] || 0), 0);
+	const contractFlows = contractItemFlows + contractHaulFlows + contractFeeFlows;
+	const marketSalesTaxFlows = (amountByRefType['transaction_tax'] || 0);
+	const marketBrokerFeeFlows = (amountByRefType['brokers_fee'] || 0);
+	const marketRevenueFlows = (amountByRefType['market_transaction'] || 0);
+	const totalFlows = marketRevenueFlows + marketSalesTaxFlows + marketBrokerFeeFlows + contractFlows;
 
 	const itemReportByTypeId = {};
 	const promises = [];
@@ -76,10 +99,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 		}));
 		// const journalRefIds = transactionsOfType.map(tx => tx.journal_ref_id);
 		// const referencedJournals = journals.filter(j => journalRefIds.includes(j.id));
-		// console.log({
-		// 	journalsOfType: referencedJournals,
-		// 	journals
-		// })
+		// const unreferencedJournals = journals.filter(j => !journalRefIds.includes(j.id));
 		const reportPromise = getItemExportAndSoldReport(hydratedTransactionsOfType);
 		reportPromise.then(itemReport => itemReportByTypeId[typeId] = itemReport);
 		promises.push(reportPromise);
@@ -123,6 +143,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 		html += '</div>';	
 	}
 	html += '<hr/>';
-	html += summedTotalProfitMil;
+	html += (Math.floor(summedTotalProfitMil*100)/100) + '<br/>';
+	html += `${roundMils(totalFlows)} = ${roundMils(marketRevenueFlows)} - ${roundMils(-1*contractFlows)} - ${roundMils(-1*marketSalesTaxFlows)} (tax) - ${roundMils(-1*marketBrokerFeeFlows)} (broker)` + '<br/>';
 	outputElem.innerHTML = html;
 });
