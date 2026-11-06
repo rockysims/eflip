@@ -51,7 +51,8 @@ const ignoreOneActiveSellerForTypeIds = [
 	// 34278, // Polarized Light Neutron Blaster (34278)
 ];
 
-const alwaysShowNames = [
+// Seeds the always-show textarea the first time the page is opened; after that the list lives in the UI.
+const DEFAULT_ALWAYS_SHOW_NAMES = [
 	'10000MN Monopropellant Enduring Afterburner',
 	'Arch Angel EMP XL',
 	'Blood Brass Tag',
@@ -78,7 +79,7 @@ const isAbort = (e) => !!e && e.name === 'AbortError';
 
 // Runs one report. Calls onRow({typeId, name, m3, report, isAlwaysShow}) for every report (filtered ones too).
 // Calls onProgress at least every 500ms.
-const runReport = async ({ startStationKey, endStationKey, signal, onRow = () => {}, onProgress = () => {} }) => {
+const runReport = async ({ startStationKey, endStationKey, alwaysShowNames = [], signal, onRow = () => {}, onProgress = () => {}, onAlwaysShowResolved = () => {} }) => {
 	const start = STATIONS[startStationKey];
 	const end = STATIONS[endStationKey];
 	if (!start || !end) throw new Error(`unknown station (${startStationKey} -> ${endStationKey})`);
@@ -109,15 +110,18 @@ const runReport = async ({ startStationKey, endStationKey, signal, onRow = () =>
 		const typeIds = (await util.getTypeIds(end.regionId)).slice();
 
 		const alwaysShowIdSet = new Set();
-		const alwaysShowIds = await Promise.all(alwaysShowNames.map(name => util.getTypeIdByName(name)));
+		const unresolvedNames = [];
+		const alwaysShowIds = await Promise.all(alwaysShowNames.map(name => util.getTypeIdByName(name).catch(e => { if (isAbort(e)) throw e; return null; })));
 		alwaysShowIds.forEach((typeId, i) => {
 			if (typeId === null || typeId === undefined) {
 				console.warn(`alwaysShow: no type id for "${alwaysShowNames[i]}", skipping`);
+				unresolvedNames.push(alwaysShowNames[i]);
 				return;
 			}
 			alwaysShowIdSet.add(typeId);
 			if (!typeIds.includes(typeId)) typeIds.push(typeId);
 		});
+		onAlwaysShowResolved({ resolved: alwaysShowIdSet.size, unresolved: unresolvedNames });
 
 		progress.typesTotal = typeIds.length;
 		progress.phase = 'running';
@@ -284,6 +288,16 @@ const runReport = async ({ startStationKey, endStationKey, signal, onRow = () =>
 	const theadElem = $('#table thead');
 	const tbodyElem = $('#table tbody');
 	const sumsElem = $('#sums');
+	const totalsElem = $('#totals');
+	const alwaysShowText = $('#alwaysShowText');
+	const alwaysShowNote = $('#alwaysShowNote');
+
+	// The totals strip is sticky at the top; the table header sticks just below it.
+	const updateStickyOffset = () => {
+		document.documentElement.style.setProperty('--sticky-offset', totalsElem.offsetHeight + 'px');
+	};
+	if (typeof ResizeObserver !== 'undefined') new ResizeObserver(updateStickyOffset).observe(totalsElem);
+	updateStickyOffset();
 
 	const stationNames = Object.keys(STATIONS);
 	for (const sel of [startSel, endSel]) {
@@ -654,9 +668,15 @@ const runReport = async ({ startStationKey, endStationKey, signal, onRow = () =>
 			await runReport({
 				startStationKey: startSel.value,
 				endStationKey: endSel.value,
+				alwaysShowNames: alwaysShowNamesFromUi(),
 				signal: controller.signal,
 				onRow: addRow,
-				onProgress: showProgress
+				onProgress: showProgress,
+				onAlwaysShowResolved: ({ resolved, unresolved }) => {
+					alwaysShowNote.textContent = unresolved.length
+						? `${resolved} resolved; not found: ${unresolved.join(', ')}`
+						: `${resolved} resolved`;
+				}
 			});
 		} finally {
 			flushRows();
@@ -746,6 +766,20 @@ const runReport = async ({ startStationKey, endStationKey, signal, onRow = () =>
 			copyBtn.classList.remove('pending');
 		}
 	});
+
+	//--- always-show list (textarea, persisted; seeded from DEFAULT_ALWAYS_SHOW_NAMES once)
+	const alwaysShowNamesFromUi = () => [...new Set(
+		alwaysShowText.value.split('\n').map(line => line.trim()).filter(line => line && !line.startsWith('//'))
+	)];
+	const storedAlwaysShow = lsGet('alwaysShowNames', null);
+	alwaysShowText.value = Array.isArray(storedAlwaysShow) ? storedAlwaysShow.join('\n') : DEFAULT_ALWAYS_SHOW_NAMES.join('\n');
+	if (!Array.isArray(storedAlwaysShow)) lsSet('alwaysShowNames', alwaysShowNamesFromUi());
+	alwaysShowText.addEventListener('input', () => {
+		lsSet('alwaysShowNames', alwaysShowNamesFromUi());
+		alwaysShowNote.textContent = '';
+	});
+	$('#alwaysShowDetails').open = !!lsGet('alwaysShowOpen', false);
+	$('#alwaysShowDetails').addEventListener('toggle', e => lsSet('alwaysShowOpen', e.target.open));
 
 	//--- init
 	loadRouteState();
