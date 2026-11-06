@@ -79,7 +79,49 @@ const isAbort = (e) => !!e && e.name === 'AbortError';
 
 // Runs one report. Calls onRow({typeId, name, m3, report, isAlwaysShow}) for every report (filtered ones too).
 // Calls onProgress at least every 500ms.
-const runReport = async ({ startStationKey, endStationKey, alwaysShowNames = [], signal, onRow = () => {}, onProgress = () => {}, onAlwaysShowResolved = () => {} }) => {
+// Fetches the ESI data for one type and computes its report.
+// Resolves {typeId, name, m3, report, isAlwaysShow}; report is null when there is nothing to buy.
+// options ({signal, queue}) is passed through to util so callers can use their own request queue.
+const buildRow = async ({ start, end, typeId, isAlwaysShow, options = {} }) => {
+	const srcOrders = (await util.getOrders(start.regionId, typeId, 'sell', 0.5, options)).filter(o => o.location_id === start.stationId);
+	const destOrders = (await util.getOrders(end.regionId, typeId, 'sell', 0.5, options)).filter(o => o.location_id === end.stationId);
+	const destDays = await util.getDays(end.regionId, typeId, options);
+	const m3 = await util.getTypeM3(typeId, options);
+	const name = await util.getTypeName(typeId, options);
+	const report = estimate.computeItemReport({
+		srcOrders,
+		destOrders,
+		destDays,
+		typeId,
+		config: {
+			DAYS_CONSIDERED,
+			DAYS_TO_COMPLETE,
+			HAULING_REWARD_FRACTION,
+			COST_LIMIT,
+			MIN_ROI,
+			SELL_TAX,
+			isAlwaysShow,
+			ignoreOneActiveSeller: ignoreOneActiveSellerForTypeIds.includes(typeId)
+		}
+	});
+	return { typeId, name, m3, report, isAlwaysShow };
+};
+
+// Resolves item names to type ids. Resolves {ids: Set, unresolved: [names]}.
+const resolveTypeNames = async (names, options = {}) => {
+	const ids = new Set();
+	const unresolved = [];
+	const results = await Promise.all(names.map(name => util.getTypeIdByName(name, options).catch(e => { if (isAbort(e)) throw e; return null; })));
+	results.forEach((typeId, i) => {
+		if (typeId === null || typeId === undefined) unresolved.push(names[i]);
+		else ids.add(typeId);
+	});
+	return { ids, unresolved };
+};
+
+// alwaysShowIds: already-resolved type ids to report regardless of triage/filters. isAlwaysShow(typeId) is
+// consulted when each report is built, so the caller may change the set while the run is going.
+const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new Set(), isAlwaysShow = (id) => alwaysShowIds.has(id), signal, onRow = () => {}, onProgress = () => {} }) => {
 	const start = STATIONS[startStationKey];
 	const end = STATIONS[endStationKey];
 	if (!start || !end) throw new Error(`unknown station (${startStationKey} -> ${endStationKey})`);
@@ -109,19 +151,10 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowNames = [],
 		emit();
 		const typeIds = (await util.getTypeIds(end.regionId)).slice();
 
-		const alwaysShowIdSet = new Set();
-		const unresolvedNames = [];
-		const alwaysShowIds = await Promise.all(alwaysShowNames.map(name => util.getTypeIdByName(name).catch(e => { if (isAbort(e)) throw e; return null; })));
-		alwaysShowIds.forEach((typeId, i) => {
-			if (typeId === null || typeId === undefined) {
-				console.warn(`alwaysShow: no type id for "${alwaysShowNames[i]}", skipping`);
-				unresolvedNames.push(alwaysShowNames[i]);
-				return;
-			}
-			alwaysShowIdSet.add(typeId);
+		const alwaysShowIdSet = new Set(alwaysShowIds);
+		for (const typeId of alwaysShowIdSet) {
 			if (!typeIds.includes(typeId)) typeIds.push(typeId);
-		});
-		onAlwaysShowResolved({ resolved: alwaysShowIdSet.size, unresolved: unresolvedNames });
+		}
 
 		progress.typesTotal = typeIds.length;
 		progress.phase = 'running';
@@ -144,40 +177,19 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowNames = [],
 		};
 		const startReport = (typeId) => {
 			if (aborted()) return;
-			const isAlwaysShow = alwaysShowIdSet.has(typeId);
 			const task = (async () => {
 				await acquire();
 				try {
 					if (aborted()) return;
-					const srcOrders = (await util.getOrders(start.regionId, typeId, 'sell')).filter(o => o.location_id === start.stationId);
-					const destOrders = (await util.getOrders(end.regionId, typeId, 'sell')).filter(o => o.location_id === end.stationId);
-					const destDays = await util.getDays(end.regionId, typeId);
-					const m3 = await util.getTypeM3(typeId);
-					const name = await util.getTypeName(typeId);
-					const report = estimate.computeItemReport({
-						srcOrders,
-						destOrders,
-						destDays,
-						typeId,
-						config: {
-							DAYS_CONSIDERED,
-							DAYS_TO_COMPLETE,
-							HAULING_REWARD_FRACTION,
-							COST_LIMIT,
-							MIN_ROI,
-							SELL_TAX,
-							isAlwaysShow,
-							ignoreOneActiveSeller: ignoreOneActiveSellerForTypeIds.includes(typeId)
-						}
-					});
+					const row = await buildRow({ start, end, typeId, isAlwaysShow: isAlwaysShow(typeId) });
 					progress.reportsDone++;
-					if (!report) {
+					if (!row.report) {
 						progress.noReport++;
 						return;
 					}
-					if (report.filteredReason) progress.rowsFiltered++;
+					if (row.report.filteredReason) progress.rowsFiltered++;
 					else progress.rowsShown++;
-					onRow({ typeId, name, m3, report, isAlwaysShow });
+					onRow(row);
 				} catch (e) {
 					if (isAbort(e)) return;
 					console.error(`report failed (typeId: ${typeId})`, e);
@@ -665,18 +677,15 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowNames = [],
 		currentRun = { controller };
 		setRunning(true);
 		try {
+			await syncAlwaysShow({ refreshRows: false });
 			await runReport({
 				startStationKey: startSel.value,
 				endStationKey: endSel.value,
-				alwaysShowNames: alwaysShowNamesFromUi(),
+				alwaysShowIds,
+				isAlwaysShow: (id) => alwaysShowIds.has(id),
 				signal: controller.signal,
 				onRow: addRow,
-				onProgress: showProgress,
-				onAlwaysShowResolved: ({ resolved, unresolved }) => {
-					alwaysShowNote.textContent = unresolved.length
-						? `${resolved} resolved; not found: ${unresolved.join(', ')}`
-						: `${resolved} resolved`;
-				}
+				onProgress: showProgress
 			});
 		} finally {
 			flushRows();
@@ -774,9 +783,52 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowNames = [],
 	const storedAlwaysShow = lsGet('alwaysShowNames', null);
 	alwaysShowText.value = Array.isArray(storedAlwaysShow) ? storedAlwaysShow.join('\n') : DEFAULT_ALWAYS_SHOW_NAMES.join('\n');
 	if (!Array.isArray(storedAlwaysShow)) lsSet('alwaysShowNames', alwaysShowNamesFromUi());
+
+	// Edits apply live: names are resolved, the set is swapped, and every item that entered or left it
+	// gets its report rebuilt (always-show bypasses the ROI stop and the filters, so the numbers change),
+	// fetching a report for items the run never produced. Syncs are chained so edits never interleave.
+	let alwaysShowIds = new Set();
+	let alwaysShowSyncChain = Promise.resolve();
+	// Own small queue, so live edits are not stuck behind a running report's backlog.
+	const liveQueue = util.createQueue({ concurrency: 4 });
+	const liveOptions = { queue: liveQueue };
+	const syncAlwaysShow = ({ refreshRows = true } = {}) => {
+		alwaysShowSyncChain = alwaysShowSyncChain.then(async () => {
+			const names = alwaysShowNamesFromUi();
+			lsSet('alwaysShowNames', names);
+			alwaysShowNote.textContent = names.length ? 'resolving…' : '';
+			let resolved;
+			try {
+				resolved = await resolveTypeNames(names, liveOptions);
+			} catch (e) {
+				if (isAbort(e)) return;
+				throw e;
+			}
+			const added = [...resolved.ids].filter(id => !alwaysShowIds.has(id));
+			const removed = [...alwaysShowIds].filter(id => !resolved.ids.has(id));
+			alwaysShowIds = resolved.ids;
+			alwaysShowNote.textContent = resolved.unresolved.length
+				? `${resolved.ids.size} resolved; not found: ${resolved.unresolved.join(', ')}`
+				: (names.length ? `${resolved.ids.size} resolved` : '');
+
+			if (!refreshRows || !reportGeneratedAt) return;
+			const start = STATIONS[startSel.value];
+			const end = STATIONS[endSel.value];
+			await Promise.all([...added, ...removed].map(async (typeId) => {
+				try {
+					const row = await buildRow({ start, end, typeId, isAlwaysShow: alwaysShowIds.has(typeId), options: liveOptions });
+					if (row.report) addRow(row);
+				} catch (e) {
+					if (!isAbort(e)) console.error(`always-show refresh failed (typeId: ${typeId})`, e);
+				}
+			}));
+		}).catch(e => console.error('always-show sync failed', e));
+		return alwaysShowSyncChain;
+	};
+	let alwaysShowInputTimer = null;
 	alwaysShowText.addEventListener('input', () => {
-		lsSet('alwaysShowNames', alwaysShowNamesFromUi());
-		alwaysShowNote.textContent = '';
+		clearTimeout(alwaysShowInputTimer);
+		alwaysShowInputTimer = setTimeout(() => syncAlwaysShow(), 400);
 	});
 	$('#alwaysShowDetails').open = !!lsGet('alwaysShowOpen', false);
 	$('#alwaysShowDetails').addEventListener('toggle', e => lsSet('alwaysShowOpen', e.target.open));
