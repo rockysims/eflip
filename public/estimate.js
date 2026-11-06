@@ -20,6 +20,7 @@
 		MIN_ROI: 1.5,
 		SELL_TAX: 0.08 + 0.024,
 		COMPETE_BAND: 0.10,
+		SUPPLY_BAND: 0.25,
 		ORDINARY_PRICE_DAYS: 90,
 		RECENCY_HALF_LIFE_DAYS: 30,
 		RECENT_THRESHOLD_DAYS: 10,
@@ -244,6 +245,13 @@
 					.filter(order => order.price <= sellPrice * (1 + c.COMPETE_BAND))
 					.reduce((acc, order) => acc + order.volume_remain, 0);
 
+			//calc supplyVolume (dest stock priced close enough to our sellPrice to matter for how long the market takes to absorb it)
+			const supplyVolume = sellPrice === null
+				? 0
+				: destSellOrders
+					.filter(order => order.price <= sellPrice * (1 + c.SUPPLY_BAND))
+					.reduce((acc, order) => acc + order.volume_remain, 0);
+
 			//calc buy cap over the horizon
 			const cap = Math.max(0, dailyDemand * c.DAYS_TO_COMPLETE - competingVolume);
 
@@ -305,8 +313,10 @@
 			}, { volume: 0, cost: 0, revenue: 0 });
 
 			const daysToClearRaw = dailyDemand > 0 ? (total.volume + competingVolume) / dailyDemand : null;
+			const daysOfSupplyRaw = dailyDemand > 0 && sellPrice !== null ? supplyVolume / dailyDemand : null;
 			const common = {
 				daysToClear: daysToClearRaw === null ? null : round2(daysToClearRaw),
+				daysOfSupply: daysOfSupplyRaw === null ? null : round2(daysOfSupplyRaw),
 				competingVolume,
 				dailyDemand: round2(dailyDemand),
 				activeSellers: destSellers.sellerCount,
