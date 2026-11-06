@@ -412,31 +412,72 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		}
 		return true;
 	};
+	// Each filterable column shows "min - max" where each side is a clickable label (the set value, or
+	// "min"/"max" when unset). Clicking turns it into a number field: it saves on every keystroke,
+	// closes on Enter/Tab/blur, and Escape restores the previous value. Blank clears the bound.
+	const boundLabel = (key, bound) => {
+		const f = colFilters[key];
+		const v = f ? f[bound] : null;
+		const isSet = v !== null && v !== undefined;
+		return `<span class="fval${isSet ? ' set' : ''}" data-key="${key}" data-bound="${bound}" title="click to edit">${isSet ? v : bound}</span>`;
+	};
 	const buildFilterRow = () => {
 		filterRowElem.innerHTML = COLUMNS.map(col => {
 			if (col.key === 'name') return '<th class="text"><a href="#" id="clearFilters" title="clear all column filters">clear</a></th>';
 			if (!FILTERABLE(col)) return '<th></th>';
-			const f = colFilters[col.key] || {};
-			const v = (x) => x === null || x === undefined ? '' : x;
-			return `<th class="numeric">` +
-				`<input type="number" step="any" placeholder="min" data-key="${col.key}" data-bound="min" value="${v(f.min)}" title="${esc(col.label)} min">` +
-				`<input type="number" step="any" placeholder="max" data-key="${col.key}" data-bound="max" value="${v(f.max)}" title="${esc(col.label)} max">` +
-				`</th>`;
+			return `<th class="numeric">${boundLabel(col.key, 'min')} - ${boundLabel(col.key, 'max')}</th>`;
 		}).join('');
 	};
-	let colFilterTimer = null;
-	filterRowElem.addEventListener('input', (e) => {
-		const input = e.target;
-		if (!input.dataset || !input.dataset.key) return;
-		const n = parseFloat(input.value);
-		const f = colFilters[input.dataset.key] || (colFilters[input.dataset.key] = { min: null, max: null });
-		f[input.dataset.bound] = Number.isFinite(n) ? n : null;
-		if (f.min === null && f.max === null) delete colFilters[input.dataset.key];
+	const setBound = (key, bound, value) => {
+		const f = colFilters[key] || (colFilters[key] = { min: null, max: null });
+		f[bound] = Number.isFinite(value) ? value : null;
+		if (f.min === null && f.max === null) delete colFilters[key];
 		lsSet('colFilters', colFilters);
+	};
+	let colFilterTimer = null;
+	const scheduleFilterRender = () => {
 		clearTimeout(colFilterTimer);
 		colFilterTimer = setTimeout(render, 150);
-	});
+	};
+	const openBoundEditor = (span) => {
+		const { key, bound } = span.dataset;
+		const f = colFilters[key];
+		const previous = f && f[bound] !== null && f[bound] !== undefined ? f[bound] : null;
+		const input = document.createElement('input');
+		input.type = 'number';
+		input.step = 'any';
+		input.placeholder = bound;
+		input.value = previous === null ? '' : previous;
+		input.dataset.key = key;
+		input.dataset.bound = bound;
+		let closed = false;
+		const close = (restore) => {
+			if (closed) return;
+			closed = true;
+			if (restore) {
+				setBound(key, bound, previous);
+				scheduleFilterRender();
+			}
+			const fresh = document.createElement('template');
+			fresh.innerHTML = boundLabel(key, bound);
+			input.replaceWith(fresh.content.firstChild);
+		};
+		input.addEventListener('input', () => {
+			setBound(key, bound, parseFloat(input.value));
+			scheduleFilterRender();
+		});
+		input.addEventListener('keydown', (e) => {
+			if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); close(false); }
+			else if (e.key === 'Escape') { e.preventDefault(); close(true); }
+		});
+		input.addEventListener('blur', () => close(false));
+		span.replaceWith(input);
+		input.focus();
+		input.select();
+	};
 	filterRowElem.addEventListener('click', (e) => {
+		const span = e.target.closest('span.fval');
+		if (span) { openBoundEditor(span); return; }
 		if (e.target.id !== 'clearFilters') return;
 		e.preventDefault();
 		colFilters = {};
