@@ -112,6 +112,22 @@
 		thead th {
 			top: var(--sticky-offset, 0px);
 		}
+		thead tr.filters th {
+			top: calc(var(--sticky-offset, 0px) + var(--head-h, 0px));
+			cursor: default;
+			padding: 2px 4px;
+			font-weight: normal;
+		}
+		thead tr.filters input {
+			width: 3.6em;
+			font: inherit;
+			font-size: 11px;
+			text-align: right;
+			margin: 0 1px;
+		}
+		thead tr.filters a {
+			color: rgb(150, 150, 150);
+		}
 		#alwaysShowDetails {
 			margin: 4px 0;
 		}
@@ -154,7 +170,7 @@
 	<div id="reportHeader"></div>
 	<div id="totals"><span id="sums"></span></div>
 	<table id="table">
-		<thead></thead>
+		<thead><tr id="sortRow"></tr><tr class="filters" id="filterRow"></tr></thead>
 		<tbody></tbody>
 	</table>
 </body>

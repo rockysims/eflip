@@ -307,8 +307,13 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	// The totals strip is sticky at the top; the table header sticks just below it.
 	const updateStickyOffset = () => {
 		document.documentElement.style.setProperty('--sticky-offset', totalsElem.offsetHeight + 'px');
+		document.documentElement.style.setProperty('--head-h', $('#sortRow').offsetHeight + 'px');
 	};
-	if (typeof ResizeObserver !== 'undefined') new ResizeObserver(updateStickyOffset).observe(totalsElem);
+	if (typeof ResizeObserver !== 'undefined') {
+		const ro = new ResizeObserver(updateStickyOffset);
+		ro.observe(totalsElem);
+		ro.observe($('#sortRow'));
+	}
 	updateStickyOffset();
 
 	const stationNames = Object.keys(STATIONS);
@@ -381,14 +386,64 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 
 	const esc = (s) => String(s).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
 
+	const sortRowElem = $('#sortRow');
+	const filterRowElem = $('#filterRow');
 	const renderHead = () => {
-		theadElem.innerHTML = '<tr>' + COLUMNS.map(col => {
+		sortRowElem.innerHTML = COLUMNS.map(col => {
 			const active = sort.key === col.key;
 			const arrow = active ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : '';
 			const cls = (col.text ? 'text ' : 'numeric ') + (active ? 'sorted' : '');
 			return `<th class="${cls}" data-key="${col.key}">${esc(col.label)}${arrow}</th>`;
-		}).join('') + '</tr>';
+		}).join('');
 	};
+
+	//--- column filters: min/max per numeric column (blank = no limit); persisted globally.
+	// Empty values pass. Selected rows and search matches ignore column filters.
+	const FILTERABLE = (col) => !['select', 'name', 'factor'].includes(col.key);
+	let colFilters = lsGet('colFilters', {});
+	const passesColFilters = (row) => {
+		for (const col of COLUMNS) {
+			const f = colFilters[col.key];
+			if (!f) continue;
+			const v = col.val(row);
+			if (v === null || v === undefined || Number.isNaN(v)) continue;
+			if (f.min !== null && f.min !== undefined && v < f.min) return false;
+			if (f.max !== null && f.max !== undefined && v > f.max) return false;
+		}
+		return true;
+	};
+	const buildFilterRow = () => {
+		filterRowElem.innerHTML = COLUMNS.map(col => {
+			if (col.key === 'name') return '<th class="text"><a href="#" id="clearFilters" title="clear all column filters">clear</a></th>';
+			if (!FILTERABLE(col)) return '<th></th>';
+			const f = colFilters[col.key] || {};
+			const v = (x) => x === null || x === undefined ? '' : x;
+			return `<th class="numeric">` +
+				`<input type="number" step="any" placeholder="min" data-key="${col.key}" data-bound="min" value="${v(f.min)}" title="${esc(col.label)} min">` +
+				`<input type="number" step="any" placeholder="max" data-key="${col.key}" data-bound="max" value="${v(f.max)}" title="${esc(col.label)} max">` +
+				`</th>`;
+		}).join('');
+	};
+	let colFilterTimer = null;
+	filterRowElem.addEventListener('input', (e) => {
+		const input = e.target;
+		if (!input.dataset || !input.dataset.key) return;
+		const n = parseFloat(input.value);
+		const f = colFilters[input.dataset.key] || (colFilters[input.dataset.key] = { min: null, max: null });
+		f[input.dataset.bound] = Number.isFinite(n) ? n : null;
+		if (f.min === null && f.max === null) delete colFilters[input.dataset.key];
+		lsSet('colFilters', colFilters);
+		clearTimeout(colFilterTimer);
+		colFilterTimer = setTimeout(render, 150);
+	});
+	filterRowElem.addEventListener('click', (e) => {
+		if (e.target.id !== 'clearFilters') return;
+		e.preventDefault();
+		colFilters = {};
+		lsSet('colFilters', colFilters);
+		buildFilterRow();
+		render();
+	});
 
 	//--- rows: one persistent <tr> per type id; created once, updated in place, moved/detached but never rebuilt
 	const trByTypeId = new Map();
@@ -466,7 +521,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	const isRowVisible = (row, query) => {
 		if (selected.has(row.typeId)) return true;
 		if (query) return row.name.toLowerCase().includes(query);
-		return showFiltered || !row.report.filteredReason;
+		return (showFiltered || !row.report.filteredReason) && passesColFilters(row);
 	};
 
 	const sortedVisibleRows = () => {
@@ -492,8 +547,9 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	};
 
 	const updateSums = () => {
-		let cost = 0, revenue = 0, km3 = 0, count = 0;
+		let cost = 0, revenue = 0, km3 = 0, count = 0, hiddenByColFilters = 0;
 		for (const row of rows) {
+			if (!selected.has(row.typeId) && !row.report.filteredReason && !passesColFilters(row)) hiddenByColFilters++;
 			if (!selected.has(row.typeId)) continue;
 			cost += orderCost(row);
 			revenue += orderRevenue(row);
@@ -503,7 +559,8 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		sumsElem.innerHTML =
 			`${roundNonZero(revenue - cost)}` +
 			`<span class="dim"> (-${roundNonZero(cost)} + ${roundNonZero(revenue)}) </span>` +
-			`${roundNonZero(km3)}km3 <span class="dim">&middot; ${count} selected</span>`;
+			`${roundNonZero(km3)}km3 <span class="dim">&middot; ${count} selected</span>` +
+			(hiddenByColFilters ? `<span class="dim"> &middot; ${hiddenByColFilters} hidden by column filters</span>` : '');
 	};
 
 	const render = () => {
@@ -836,6 +893,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	//--- init
 	loadRouteState();
 	setRunning(false);
+	buildFilterRow();
 	render();
 	if (autoRunChk.checked) run();
 })();
