@@ -10,112 +10,130 @@
 			crossorigin="anonymous"
 			referrerpolicy="no-referrer"
 	></script>
-	<script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.1/moment.min.js" integrity="sha512-qTXRIMyZIFb8iQcfjXWCO8+M5Tbc38Qi5WzdPOYZHIlZpzBHG3L3by84BBBOiRGiEb7KKtAOAs5qYdUiZiQNNQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 	<style type="text/css">
+		html {
+			color-scheme: light;
+		}
+		body {
+			background: #fff;
+			color: #111;
+			font-family: system-ui, sans-serif;
+			font-size: 13px;
+			margin: 8px;
+		}
 		.dim {
-			color: rgb(190, 190, 190);
+			color: rgb(150, 150, 150);
 		}
 		.pending {
 			color: red;
 		}
-		.mark {
-			font-style: italic;
-			opacity: 0.5;
-		}
-		.mark.hide {
-			display: none;
-		}
 		.alwaysShowItem .name {
 			text-decoration: line-through;
 		}
+		#controls {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 8px 14px;
+			align-items: center;
+			margin-bottom: 6px;
+		}
+		#controls label {
+			white-space: nowrap;
+		}
+		#globalFactor {
+			width: 4.5em;
+		}
+		#progress {
+			font-variant-numeric: tabular-nums;
+			margin: 4px 0;
+		}
+		#reportHeader {
+			margin: 4px 0;
+			min-height: 1.2em;
+		}
+		table {
+			border-collapse: separate;
+			border-spacing: 0;
+			font-variant-numeric: tabular-nums;
+		}
+		thead th {
+			position: sticky;
+			top: 0;
+			background: #f2f2f2;
+			color: #111;
+			border-bottom: 1px solid #bbb;
+			padding: 3px 6px;
+			cursor: pointer;
+			user-select: none;
+			white-space: nowrap;
+			z-index: 1;
+		}
+		thead th.sorted {
+			background: #e2e8f4;
+		}
+		td {
+			padding: 2px 6px;
+			border-bottom: 1px solid #eee;
+			white-space: nowrap;
+		}
+		.numeric {
+			text-align: right;
+		}
+		.text {
+			text-align: left;
+		}
+		td.sel {
+			text-align: center;
+		}
+		tr:hover td {
+			background: #f6f9ff;
+		}
+		tr.filtered td {
+			opacity: 0.6;
+		}
+		td input[type=number] {
+			width: 5.5em;
+			text-align: right;
+			font: inherit;
+		}
+		td input.factor {
+			width: 4.5em;
+		}
+		#footer {
+			position: sticky;
+			bottom: 0;
+			display: flex;
+			justify-content: space-between;
+			gap: 12px;
+			padding: 6px 0;
+			background: #fff;
+			border-top: 1px solid #bbb;
+			margin-top: 4px;
+		}
 	</style>
 	<script src="util.js"></script>
-	<script src="export.js"></script>
+	<script src="estimate.js"></script>
+	<script src="export.js" defer></script>
 </head>
 <body>
-	<textarea id="markText" style="width: 100%; height: 30px; font-size: 8px; opacity: 0.5;"></textarea>
-	<input id="markCheckbox" type="checkbox" checked="true" style="opacity: 0.8;" /> <span class="dim">Show Marked</span><br/>
-	<br/>
-	<script type="text/javascript">
-		const markTextElem = document.querySelector('#markText');
-		const markCheckboxElem = document.querySelector('#markCheckbox');
-		const outputDiv = document.querySelector('#outputDiv');
-		
-		const updateMarked = () => {
-			const markTypeNames = markTextElem.value.split('\n');
-			const itemDivs = document.querySelectorAll('div.item');
-			for (let itemDiv of itemDivs) {
-				const typeName = itemDiv.querySelector('div:first-child').innerHTML.match(/(.*?) \(\d+\)/)[1];
-				if (markTypeNames.includes(typeName)) {
-					itemDiv.classList.add('mark');
-					if (markCheckboxElem.checked) {
-						itemDiv.classList.remove('hide');
-					} else {
-						itemDiv.classList.add('hide');
-					}
-				} else {
-					itemDiv.classList.remove('mark');
-				}
-			}
-		};
-
-		markTextElem.addEventListener('input', updateMarked);
-		markCheckboxElem.addEventListener('change', updateMarked);
-	</script>
-	<textarea id="reportsText" style="width: 100%; height: 300px;"></textarea>
-	<div style="display: flex; justify-content: space-between;">
-		<div id="sums"></div>
-		<button id="export">Copy item orders to clipboard</button>
+	<div id="controls">
+		<label>From <select id="startStation"></select></label>
+		<label>To <select id="endStation"></select></label>
+		<button id="run">Run</button>
+		<button id="stop" disabled>Stop</button>
+		<label><input id="autoRun" type="checkbox" /> auto-run on load</label>
+		<label>global factor <input id="globalFactor" type="number" step="0.1" min="0" value="1" /></label>
+		<label><input id="showFiltered" type="checkbox" /> show filtered</label>
+		<button id="copy">Copy orders</button>
 	</div>
-	<script type="text/javascript">
-		const reportsTextElem = document.querySelector('#reportsText');
-		const sumsElem = document.querySelector('#sums');
-		const exportElem = document.querySelector('#export');
-
-		let exportStr = '';
-		exportElem.addEventListener('click', async () => {
-			exportElem.classList.add('pending');
-			await navigator.clipboard.writeText(exportStr);
-			exportElem.classList.remove('pending');
-		});
-
-		reportsTextElem.addEventListener('input', e => {
-			const reportTexts = e.target.value.trim()
-				.split(/\n\s*\n/)
-				.filter(rep => rep.indexOf('volume:') !== -1);
-
-			let km3Total = 0;
-			let costTotal = 0;
-			let revenueTotal = 0;
-			const orderStrs = [];
-			try {
-				for (let reportText of reportTexts) {
-					const lines = reportText.split('\n');
-					const typeName = lines[0].match(/(.*?)\(\d+\)\s\s/)[1];
-					const km3 = lines[0].match(/([\d\.]+)km3/)[1];
-					const [fullMatch, cost, revenue] = lines[1].match(/-([\d\.]+) \+ ([\d\.]+)/);
-					const volume = lines[2].match(/volume: ([\d\.]+)/)[1];
-					km3Total += +km3;
-					costTotal += +cost;
-					revenueTotal += +revenue;
-					orderStrs.push(typeName + '\t' + volume);
-				}
-			} catch(err) {
-				console.error(err);
-			}
-			exportStr = orderStrs.join('\n');
-			
-			let html = '';
-			html += roundNonZero(revenueTotal - costTotal);
-			html += `<span class="dim">`;
-			html += 	` (-${roundNonZero(costTotal)} + ${roundNonZero(revenueTotal)}) `;
-			html += `</span>`;
-			html += roundNonZero(km3Total) + 'km3';
-			sumsElem.innerHTML = html;
-		});
-	</script>
-	<hr/>
-	<div id="outputDiv"></div>
+	<div id="progress" class="dim">idle</div>
+	<div id="reportHeader"></div>
+	<table id="table">
+		<thead></thead>
+		<tbody></tbody>
+	</table>
+	<div id="footer">
+		<div id="sums"></div>
+	</div>
 </body>
 </html>
-

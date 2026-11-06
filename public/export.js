@@ -1,56 +1,35 @@
+// export.js: pipeline (runReport) + page UI for export.html.
+// Every displayed number comes from ESI (station orders + region history) via estimate.js.
+// Fuzzwork aggregates are used ONLY for triage (deciding which types get a full report).
 const {
-	getTypeIds,
-	getDays,
-	getOrders,
 	roundNonZero,
-	roundMils,
-	avg,
-	getTypeIdByName,
-	getTypeName,
-	getTypeM3,
-	getFuzzworkPricesInRegion,
-
 	constants: {
 		JITA_REGION_ID,
 		AMARR_REGION_ID,
 		DODIXIE_REGION_ID,
 		RENS_REGION_ID,
 		STACMON_REGION_ID,
-		
+
 		JITA_STATION_ID,
 		AMARR_STATION_ID,
 		DODIXIE_STATION_ID,
 		RENS_STATION_ID,
 		STACMON_STATION_ID,
 
-		SELL_TAX,
-		BUY_TAX
+		SELL_TAX
 	}
 } = util;
 
-//*
-const START_REGION_ID = JITA_REGION_ID;
-const START_STATION_ID = JITA_STATION_ID;
-const END_REGION_ID = AMARR_REGION_ID;
-const END_STATION_ID = AMARR_STATION_ID;
-// const END_REGION_ID = STACMON_REGION_ID;
-// const END_STATION_ID = STACMON_STATION_ID;
-// const END_REGION_ID = DODIXIE_REGION_ID;
-// const END_STATION_ID = DODIXIE_STATION_ID;
-/*/
-// const START_REGION_ID = DODIXIE_REGION_ID;
-// const START_STATION_ID = DODIXIE_STATION_ID;
-// const START_REGION_ID = STACMON_REGION_ID;
-// const START_STATION_ID = STACMON_STATION_ID;
-const START_REGION_ID = AMARR_REGION_ID;
-const START_STATION_ID = AMARR_STATION_ID;
-const END_REGION_ID = JITA_REGION_ID;
-const END_STATION_ID = JITA_STATION_ID;
-//*/
+const STATIONS = {
+	Jita: { regionId: JITA_REGION_ID, stationId: JITA_STATION_ID },
+	Amarr: { regionId: AMARR_REGION_ID, stationId: AMARR_STATION_ID },
+	Dodixie: { regionId: DODIXIE_REGION_ID, stationId: DODIXIE_STATION_ID },
+	Rens: { regionId: RENS_REGION_ID, stationId: RENS_STATION_ID },
+	Stacmon: { regionId: STACMON_REGION_ID, stationId: STACMON_STATION_ID }
+};
 
 const DAYS_CONSIDERED = 30;
 const DAYS_TO_COMPLETE = 5;
-const STEP_SIZE = 250;
 const HAULING_REWARD_FRACTION = 0.10;
 const COST_LIMIT = 10 * Math.pow(10, 9);
 const MIN_ROI = 1.5;
@@ -72,459 +51,650 @@ const ignoreOneActiveSellerForTypeIds = [
 	// 34278, // Polarized Light Neutron Blaster (34278)
 ];
 
-const nowMoment = moment();
-const getItemExportReport = async (srcRegionId, srcLocationId, destRegionId, destLocationId, typeId, isAlwaysShow = false) => {
+const alwaysShowNames = [
+	'10000MN Monopropellant Enduring Afterburner',
+	'Arch Angel EMP XL',
+	'Blood Brass Tag',
+	'Blood Crystal Tag',
+	// 'Blood Silver Tag',
+	'Corelum B-Type Thermal Energized Membrane',
+	'Gravid Ice Harvester Mutaplasmid',
+	'Large Projectile Metastasis Adjuster II',
+	'Lattice Locked Dekaisogen',
+	'Mobile Phase Anchor',
+	'Small Pulse Laser Battery',
+	'Standup Ballistic Control System I',
+	'Standup Radar ECM Script',
+	'Trinary State Processor',
+	'Void XL',
+
+	'Domination Torpedo Launcher',
+	'Variegated Asteroid Mining Crystal Type B I',
+];
+
+const isAbort = (e) => !!e && e.name === 'AbortError';
+
+//--- pipeline
+
+// Runs one report. Calls onRow({typeId, name, m3, report, isAlwaysShow}) for every report (filtered ones too).
+// Calls onProgress at least every 500ms.
+const runReport = async ({ startStationKey, endStationKey, signal, onRow = () => {}, onProgress = () => {} }) => {
+	const start = STATIONS[startStationKey];
+	const end = STATIONS[endStationKey];
+	if (!start || !end) throw new Error(`unknown station (${startStationKey} -> ${endStationKey})`);
+
+	const startedAt = Date.now();
+	const progress = {
+		typesTotal: 0,
+		triaged: 0,
+		triagePassed: 0,
+		reportsDone: 0,
+		reportsFailed: 0,
+		rowsShown: 0,
+		rowsFiltered: 0,
+		noReport: 0,
+		phase: 'typeIds'
+	};
+	const emit = () => onProgress({
+		...progress,
+		queue: util.queueStats(),
+		elapsedMs: Date.now() - startedAt
+	});
+	const timer = setInterval(emit, 250);
+	const aborted = () => !!(signal && signal.aborted);
+
+	util.setAbortSignal(signal);
 	try {
-		const srcOrders = (await getOrders(srcRegionId, typeId, 'sell')).filter(order => order.location_id === srcLocationId);
-		const destOrders = (await getOrders(destRegionId, typeId, 'sell')).filter(order => order.location_id === destLocationId);
-		const destDays = await getDays(destRegionId, typeId);
+		emit();
+		const typeIds = (await util.getTypeIds(end.regionId)).slice();
 
-		//calc srcBestSellPrice
-		const srcSellOrders = srcOrders.filter(order => order.is_buy_order === false);
-		const srcBestSellOrder = srcSellOrders.reduce((order, bestSellOrder) => {
-			if (order.price < bestSellOrder.price) bestSellOrder = order;
-			return bestSellOrder;
-		}, srcSellOrders[0] || null);
-		const srcBestSellPrice = srcBestSellOrder?.price || Number.POSITIVE_INFINITY;
-
-		//calc destBestSellPrice
-		const destSellOrders = destOrders.filter(order => order.is_buy_order === false);
-		const destBestSellOrder = destSellOrders.reduce((order, bestSellOrder) => {
-			if (order.price < bestSellOrder.price) bestSellOrder = order;
-			return bestSellOrder;
-		}, destSellOrders[0] || null);
-		const destBestSellPrice = destBestSellOrder?.price || null;
-
-		const ordinaryPrice = getOrdinaryPrice(destDays) || 0;
-
-		//calc totalSellVolume and activeDays
-		let activeDays = 0;
-		let totalSellVolume = 0;
-		const destSellPrices = [];
-		const pastDays = [];
-		const RECENT_THRESHOLD_DAYS = 10;
-		for (let day of destDays) {
-			const age = nowMoment.diff(day.date, 'd');
-			if (age > DAYS_CONSIDERED + RECENT_THRESHOLD_DAYS) continue;
-			pastDays.push(day);
-			if (age > DAYS_CONSIDERED) continue;
-
-			//calc recentMiddlePrice (and skip day if crazy over priced || recent high/low prices are the same)
-			const recentDays = pastDays.slice(-1 * RECENT_THRESHOLD_DAYS);
-			const recentHighPrice = avg([...recentDays.map(day => day.highest)]);
-			const recentLowPrice = avg([...recentDays.map(day => day.lowest)]);
-			
-			const recentMiddlePrice = recentHighPrice === recentLowPrice
-				? ordinaryPrice
-				: recentLowPrice + (recentHighPrice - recentLowPrice) * 0.5;
-
-			if (day.highest > recentMiddlePrice * 10) continue; //crazy over priced so skip day
-
-			//calc highVolume
-			const lowFrac = day.highest === day.lowest
-				? (day.highest < recentMiddlePrice ? 1 : 0)
-				: (day.highest - day.average) / (day.highest - day.lowest);
-			const highFrac = 1 - lowFrac;
-			const highVolume = highFrac * day.volume;
-
-			//calc profitPerItem
-			const sellPrice = Math.min(day.highest, ordinaryPrice);
-			const sellRevenue = sellPrice * (1 - SELL_TAX);
-			const haulCost = HAULING_REWARD_FRACTION * srcBestSellPrice;
-			const profitPerItem = sellRevenue - (srcBestSellPrice + haulCost);
-
-			if (profitPerItem > 0) {
-				destSellPrices.push(sellPrice);
-				totalSellVolume += highVolume;
-				activeDays++;
+		const alwaysShowIdSet = new Set();
+		const alwaysShowIds = await Promise.all(alwaysShowNames.map(name => util.getTypeIdByName(name)));
+		alwaysShowIds.forEach((typeId, i) => {
+			if (typeId === null || typeId === undefined) {
+				console.warn(`alwaysShow: no type id for "${alwaysShowNames[i]}", skipping`);
+				return;
 			}
-		}
-
-		function calcDestSellersReport() {
-			const mostRecentOrder = destSellOrders.reduce((newestOrder, cur) => {
-				if (!newestOrder) return cur;
-				const curIsNewer = moment(cur.issued).isAfter(moment(newestOrder.issued));
-				return curIsNewer ? cur : newestOrder;
-			}, null);
-			if (mostRecentOrder) {
-				const mostRecentOrderIssuedMoment = moment(mostRecentOrder.issued);
-
-				//calc sellerCount
-				const destRecentSellOrders = destSellOrders.filter(order => {
-					const issued = moment(order.issued);
-					const hoursOlderThanMostRecent = mostRecentOrderIssuedMoment.diff(issued, 'hour');
-					return hoursOlderThanMostRecent < 24;
-				});
-				const sellerCount = Math.max(0, destRecentSellOrders.length - (ignoreOneActiveSellerForTypeIds.includes(typeId) ? 1 : 0));
-
-				const daysSinceSellerUpdateExact = nowMoment.diff(mostRecentOrderIssuedMoment, 'hour') / 24;
-				const daysSinceSellerUpdate = Math.round(daysSinceSellerUpdateExact * 100) / 100;
-
-				return {
-					sellerCount,
-					daysSinceSellerUpdate
-				}
-			} else {
-				return {
-					sellerCount: null,
-					daysSinceSellerUpdate: null
-				}
-			}
-		}
-		const destSellersReport = calcDestSellersReport();
-
-		//calc destAvailableDailySellVolumeRaw
-		const destDailySellVolumeRaw = totalSellVolume / DAYS_CONSIDERED;
-		const sellerFreshnessFactor = Math.max(0, 1 - destSellersReport.daysSinceSellerUpdate / DAYS_TO_COMPLETE);
-		const depreciatedSellerCount = Math.ceil(destSellersReport.sellerCount * sellerFreshnessFactor);
-		const destAvailableDailySellVolumeRaw = destDailySellVolumeRaw / (depreciatedSellerCount + 1);
-
-		const srcSellOrdersAsc = srcSellOrders.sort((a, b) => {
-			return a.price - b.price;
+			alwaysShowIdSet.add(typeId);
+			if (!typeIds.includes(typeId)) typeIds.push(typeId);
 		});
 
-		const destRecentAverageSellPrice = avg(destSellPrices.slice(-1 * DAYS_TO_COMPLETE));
-		const dayReports = [];
-		for (let d = 1; d <= DAYS_TO_COMPLETE; d++) {
-			let volume = 0;
-			let cost = 0;
-			let revenue = 0;
+		progress.typesTotal = typeIds.length;
+		progress.phase = 'running';
+		emit();
 
-			const pastDaysVolume = dayReports.reduce((acc, cur) => acc + cur.volume, 0);
-			const pastDaysCost = dayReports.reduce((acc, cur) => acc + cur.cost, 0);
-			const todayVolumeLimit = Math.floor(destAvailableDailySellVolumeRaw * d - pastDaysVolume);
-
-			let loopLimit = 100;
-			while (true) {
-				if (loopLimit-- <= 0) throw `loopLimit exhausted (typeId: ${typeId})`;
-				if (volume >= todayVolumeLimit) break;
-	
-				//calc vol
-				const costSoFar = cost + pastDaysCost;
-				const affordableVol = Math.floor((COST_LIMIT - costSoFar) / srcSellOrdersAsc[0].price);
-				const vol = Math.min(
-					srcSellOrdersAsc[0].volume_remain,
-					todayVolumeLimit - volume,
-					affordableVol
-				);
-
-				srcSellOrdersAsc[0].volume_remain -= vol;
-				const haulCost = srcSellOrdersAsc[0].price * HAULING_REWARD_FRACTION;
-				const costPerItem = srcSellOrdersAsc[0].price + haulCost;
-
-				const destSellPrice = destBestSellPrice === null
-					? destRecentAverageSellPrice
-					: Math.min(destBestSellPrice, destRecentAverageSellPrice);
-				const revenuePerItem = destSellPrice * (1 - SELL_TAX);
-
-				const profitPerItem = revenuePerItem - costPerItem;
-				const profitPerDayEstimate = profitPerItem * destAvailableDailySellVolumeRaw;
-				if (profitPerDayEstimate < 2000000 && !isAlwaysShow) break;
-
-				volume += vol;
-				cost += vol * costPerItem;
-				revenue += vol * revenuePerItem;
-
-				//remove empty orders from srcSellOrdersAsc
-				for (let i = 0; i < srcSellOrdersAsc.length; i++) {
-					const srcBestSellOrder = srcSellOrdersAsc[0];
-					if (srcBestSellOrder.volume_remain > 0) break;
-					else srcSellOrdersAsc.shift(); //remove first
+		// The util queue is FIFO, so starting thousands of report tasks at once would run every task's
+		// first request before any task's second one and rows would only appear at the very end.
+		// Cap the number of report tasks in progress so rows stream in steadily.
+		const MAX_ACTIVE_REPORTS = 40;
+		let activeReports = 0;
+		const waiting = [];
+		const reportPromises = [];
+		const acquire = () => {
+			if (activeReports < MAX_ACTIVE_REPORTS) { activeReports++; return Promise.resolve(); }
+			return new Promise(resolve => waiting.push(resolve));
+		};
+		const release = () => {
+			const next = waiting.shift();
+			if (next) next(); else activeReports--;
+		};
+		const startReport = (typeId) => {
+			if (aborted()) return;
+			const isAlwaysShow = alwaysShowIdSet.has(typeId);
+			const task = (async () => {
+				await acquire();
+				try {
+					if (aborted()) return;
+					const srcOrders = (await util.getOrders(start.regionId, typeId, 'sell')).filter(o => o.location_id === start.stationId);
+					const destOrders = (await util.getOrders(end.regionId, typeId, 'sell')).filter(o => o.location_id === end.stationId);
+					const destDays = await util.getDays(end.regionId, typeId);
+					const m3 = await util.getTypeM3(typeId);
+					const name = await util.getTypeName(typeId);
+					const report = estimate.computeItemReport({
+						srcOrders,
+						destOrders,
+						destDays,
+						typeId,
+						config: {
+							DAYS_CONSIDERED,
+							DAYS_TO_COMPLETE,
+							HAULING_REWARD_FRACTION,
+							COST_LIMIT,
+							MIN_ROI,
+							SELL_TAX,
+							isAlwaysShow,
+							ignoreOneActiveSeller: ignoreOneActiveSellerForTypeIds.includes(typeId)
+						}
+					});
+					progress.reportsDone++;
+					if (!report) {
+						progress.noReport++;
+						return;
+					}
+					if (report.filteredReason) progress.rowsFiltered++;
+					else progress.rowsShown++;
+					onRow({ typeId, name, m3, report, isAlwaysShow });
+				} catch (e) {
+					if (isAbort(e)) return;
+					console.error(`report failed (typeId: ${typeId})`, e);
+					progress.reportsFailed++;
+				} finally {
+					release();
 				}
+			})();
+			reportPromises.push(task);
+		};
 
-				if (srcSellOrdersAsc.length <= 0) break;
+		// Always-show types skip triage.
+		for (const typeId of alwaysShowIdSet) {
+			progress.triaged++;
+			progress.triagePassed++;
+			startReport(typeId);
+		}
+
+		// Triage chunks of 25, all kicked off at once (the util queue caps concurrency).
+		const chunks = [];
+		const triageIds = typeIds.filter(id => !alwaysShowIdSet.has(id));
+		for (let i = 0; i < triageIds.length; i += 25) chunks.push(triageIds.slice(i, i + 25));
+
+		await Promise.all(chunks.map(async (chunk) => {
+			try {
+				const [srcFuzzByTypeId, destFuzzByTypeId] = await Promise.all([
+					util.getFuzzworkPricesInRegion(start.regionId, chunk),
+					util.getFuzzworkPricesInRegion(end.regionId, chunk)
+				]);
+				for (const typeId of chunk) {
+					if (aborted()) break;
+					progress.triaged++;
+					const srcFuzzPrice = +(srcFuzzByTypeId?.[typeId]?.sell?.min ?? 0);
+					const destFuzzPrice = +(destFuzzByTypeId?.[typeId]?.sell?.min ?? 0);
+					if (!srcFuzzPrice || !destFuzzPrice) {
+						console.warn(`${typeId} fuzz no price (src: ${srcFuzzPrice}, dest: ${destFuzzPrice})`);
+						continue;
+					}
+					if (destFuzzPrice < srcFuzzPrice) {
+						console.log(`${typeId} fuzz negative spread (src: ${util.roundMils(srcFuzzPrice)}, dest: ${util.roundMils(destFuzzPrice)})`);
+						continue;
+					}
+					if (destFuzzPrice < srcFuzzPrice * MIN_ROI) {
+						// Fuzz margin too slim
+						console.log(`${typeId} fuzz margin too slim (${Math.round(100 * destFuzzPrice / srcFuzzPrice) / 100}x)`);
+						continue;
+					}
+					console.log(`${typeId} fuzz margin ok (${Math.round(100 * destFuzzPrice / srcFuzzPrice) / 100}x)`);
+					progress.triagePassed++;
+					startReport(typeId);
+				}
+			} catch (e) {
+				if (isAbort(e)) return;
+				console.error('triage chunk failed', e);
+				progress.triaged += chunk.length;
 			}
+		}));
 
-			dayReports.push({
-				volume,
-				cost,
-				revenue
-			});
+		await Promise.all(reportPromises);
+		progress.phase = aborted() ? 'stopped' : 'done';
+	} catch (e) {
+		if (isAbort(e) || aborted()) progress.phase = 'stopped';
+		else {
+			console.error('runReport failed', e);
+			progress.phase = 'error';
 		}
-
-		const report = dayReports.reduce((acc, cur) => {
-			acc.volume += cur.volume;
-			acc.cost += cur.cost;
-			acc.revenue += cur.revenue;
-			return acc;
-		}, {
-			volume: 0,
-			cost: 0,
-			revenue: 0
-		});
-
-		if (report.volume > 0) {
-			return {
-				volume: report.volume,
-				costPerItemMil: roundMils(Math.ceil(report.cost / report.volume), 3),
-				revenuePerItemMil: roundMils(Math.floor(report.revenue / report.volume), 3),
-				activeSellers: destSellersReport.sellerCount,
-				daysSinceSellerUpdate: destSellersReport.daysSinceSellerUpdate,
-				profitPerItemMil: roundMils((report.revenue - report.cost) / report.volume, 3),
-				dailyProfitMil: roundMils((report.revenue - report.cost) / DAYS_TO_COMPLETE),
-				activeDaysFraction: roundNonZero(activeDays / DAYS_CONSIDERED)
-			};
-		} else {
-			return {
-				volume: report.volume,
-				costPerItemMil: roundMils(Math.ceil(srcBestSellPrice), 3),
-				revenuePerItemMil: roundMils(Math.floor(destBestSellPrice), 3),
-				activeSellers: destSellersReport.sellerCount,
-				daysSinceSellerUpdate: destSellersReport.daysSinceSellerUpdate,
-				profitPerItemMil: roundMils((destBestSellPrice - srcBestSellPrice), 3),
-				dailyProfitMil: 0,
-				activeDaysFraction: roundNonZero(activeDays / DAYS_CONSIDERED)
-			};
-		}
-	} catch (reason) {
-		console.warn(reason);
-		return null;
+	} finally {
+		clearInterval(timer);
+		util.setAbortSignal(null);
+		emit();
 	}
 };
 
-document.addEventListener('DOMContentLoaded', async () => {
-	const outputElem = document.querySelector('#outputDiv');
+//--- UI
 
-	outputElem.innerHTML = 'Starting...';
+(() => {
+	if (typeof document === 'undefined') return;
 
+	const $ = (sel) => document.querySelector(sel);
+	const nf = new Intl.NumberFormat('en-US');
+	const nf2 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 });
 
+	//--- localStorage (guarded)
+	const PREFIX = 'eflip.export.';
+	const lsGet = (key, fallback) => {
+		try {
+			const raw = localStorage.getItem(PREFIX + key);
+			return raw === null ? fallback : JSON.parse(raw);
+		} catch (e) { return fallback; }
+	};
+	const lsSet = (key, val) => {
+		try { localStorage.setItem(PREFIX + key, JSON.stringify(val)); } catch (e) { /* ignore */ }
+	};
 
-	const typeIds = (await getTypeIds(END_REGION_ID));
-	// const typeIds = (await getTypeIds(END_REGION_ID)).slice(0, 1000);
-	// const typeIds = [35947, 61207, 90459, 54754, 49099, 34306, 12221, 34290, 4348, 16272];
-	// const typeIds = [33900];
+	//--- elements
+	const startSel = $('#startStation');
+	const endSel = $('#endStation');
+	const runBtn = $('#run');
+	const stopBtn = $('#stop');
+	const autoRunChk = $('#autoRun');
+	const globalFactorInput = $('#globalFactor');
+	const showFilteredChk = $('#showFiltered');
+	const copyBtn = $('#copy');
+	const progressElem = $('#progress');
+	const headerElem = $('#reportHeader');
+	const tableElem = $('#table');
+	const theadElem = $('#table thead');
+	const tbodyElem = $('#table tbody');
+	const sumsElem = $('#sums');
 
+	const stationNames = Object.keys(STATIONS);
+	for (const sel of [startSel, endSel]) {
+		for (const name of stationNames) sel.add(new Option(name, name));
+	}
+	const savedRoute = lsGet('route', { start: 'Jita', end: 'Amarr' });
+	startSel.value = STATIONS[savedRoute.start] ? savedRoute.start : 'Jita';
+	endSel.value = STATIONS[savedRoute.end] ? savedRoute.end : 'Amarr';
+	if (startSel.value === endSel.value) endSel.value = startSel.value === 'Amarr' ? 'Jita' : 'Amarr';
 
+	//--- state
+	let routeKey = '';
+	let rows = [];            // all rows of the current run
+	let rowByTypeId = new Map();
+	let selected = new Set(); // type ids (current route)
+	let factorOverrides = {}; // typeId -> factor (current route)
+	let globalFactor = +lsGet('globalFactor', 1);
+	if (!(globalFactor >= 0)) globalFactor = 1;
+	let sort = lsGet('sort', { key: 'dailyProfitMil', dir: 'desc' });
+	let showFiltered = !!lsGet('showFiltered', false);
+	let pendingRender = false;
+	let renderTimer = null;
+	let lastRenderAt = 0;
+	let currentRun = null; // {controller}
+	let reportGeneratedAt = null;
 
+	const route = () => `${startSel.value}-${endSel.value}`;
+	const loadRouteState = () => {
+		routeKey = route();
+		selected = new Set(lsGet(`selected.${routeKey}`, []));
+		factorOverrides = lsGet(`factors.${routeKey}`, {});
+	};
+	const saveSelected = () => lsSet(`selected.${routeKey}`, [...selected]);
+	const saveFactors = () => lsSet(`factors.${routeKey}`, factorOverrides);
 
-	
-	const alwaysShowNames = [
-		'10000MN Monopropellant Enduring Afterburner',
-		'Arch Angel EMP XL',
-		'Blood Brass Tag',
-		'Blood Crystal Tag',
-		// 'Blood Silver Tag',
-		'Corelum B-Type Thermal Energized Membrane',
-		'Gravid Ice Harvester Mutaplasmid',
-		'Large Projectile Metastasis Adjuster II',
-		'Lattice Locked Dekaisogen',
-		'Mobile Phase Anchor',
-		'Small Pulse Laser Battery',
-		'Standup Ballistic Control System I',
-		'Standup Radar ECM Script',
-		'Trinary State Processor',
-		'Void XL',
+	//--- columns
+	const fmtNum = (v) => v === null || v === undefined ? '' : nf.format(v);
+	const fmtMil = (v) => v === null || v === undefined ? '' : String(v);
+	const fmtRoi = (v) => v === null || v === undefined ? '' : nf2.format(v);
+	const num = (v) => v === null || v === undefined ? null : +v;
 
-		'Domination Torpedo Launcher',
-		'Variegated Asteroid Mining Crystal Type B I',
+	const orderQty = (row) => row.qtyManual ?? Math.ceil(row.report.volume * row.factor);
+	const orderCost = (row) => row.report.costPerItemMil * orderQty(row);
+	const orderRevenue = (row) => row.report.revenuePerItemMil * orderQty(row);
+	const km3Of = (row) => Math.ceil(orderQty(row) * (row.m3 || 0)) / 1000;
+
+	// kind: 'text' | 'num' ; cell: custom html renderer (else fmt(value))
+	const COLUMNS = [
+		{ key: 'select', label: '', sort: (r) => selected.has(r.typeId) ? 1 : 0 },
+		{ key: 'name', label: 'name', sort: (r) => r.name.toLowerCase(), text: true },
+		{ key: 'dailyProfitMil', label: 'daily profit', val: (r) => num(r.report.dailyProfitMil), fmt: fmtMil },
+		{ key: 'profitPerItemMil', label: 'profit/item', val: (r) => num(r.report.profitPerItemMil), fmt: fmtMil },
+		{ key: 'costPerItemMil', label: 'cost/item', val: (r) => num(r.report.costPerItemMil), fmt: fmtMil },
+		{ key: 'revenuePerItemMil', label: 'revenue/item', val: (r) => num(r.report.revenuePerItemMil), fmt: fmtMil },
+		{ key: 'roi', label: 'ROI', val: (r) => num(r.report.roi), fmt: fmtRoi },
+		{ key: 'daysToClear', label: 'days to clear', val: (r) => num(r.report.daysToClear), fmt: fmtRoi },
+		{ key: 'volume', label: 'volume', val: (r) => r.report.volume, fmt: fmtNum },
+		{ key: 'factor', label: 'factor', val: (r) => r.factor },
+		{ key: 'qty', label: 'order qty', val: orderQty },
+		{ key: 'orderCost', label: 'order cost', val: orderCost, fmt: (v) => roundNonZero(v, 3) },
+		{ key: 'orderRevenue', label: 'order revenue', val: orderRevenue, fmt: (v) => roundNonZero(v) },
+		{ key: 'km3', label: 'km3', val: km3Of, fmt: fmtNum },
+		{ key: 'competingVolume', label: 'competing volume', val: (r) => num(r.report.competingVolume), fmt: fmtNum },
+		{ key: 'activeSellers', label: 'active sellers', val: (r) => num(r.report.activeSellers), fmt: fmtNum },
+		{ key: 'daysSinceSellerUpdate', label: 'days since update', val: (r) => num(r.report.daysSinceSellerUpdate), fmt: fmtRoi },
+		{ key: 'activeDaysFraction', label: 'active days', val: (r) => num(r.report.activeDaysFraction), fmt: fmtRoi },
+		{ key: 'dailyProfitOldMil', label: 'daily profit (old)', val: (r) => num(r.report.dailyProfitOldMil), fmt: fmtMil },
+		{ key: 'reason', label: 'reason', sort: (r) => r.report.filteredReason || '', text: true, filteredOnly: true }
 	];
-	const alwaysShowTypeIds = await Promise.all(alwaysShowNames.map(name => getTypeIdByName(name)));
-	for (let typeId of alwaysShowTypeIds) {
-		if (!typeIds.includes(typeId)) {
-			typeIds.push(typeId);
-		}
-	}
+	const visibleColumns = () => COLUMNS.filter(c => !c.filteredOnly || showFiltered);
+	const sortValue = (col, row) => col.sort ? col.sort(row) : col.val(row);
 
+	const esc = (s) => String(s).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
 
+	const renderHead = () => {
+		theadElem.innerHTML = '<tr>' + visibleColumns().map(col => {
+			const active = sort.key === col.key;
+			const arrow = active ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+			const cls = (col.text ? 'text ' : 'numeric ') + (active ? 'sorted' : '');
+			return `<th class="${cls}" data-key="${col.key}">${esc(col.label)}${arrow}</th>`;
+		}).join('') + '</tr>';
+	};
 
-
-	outputElem.innerHTML = `Processing`;
-
-	const itemReportByTypeId = {};
-	for (let step = 0; step * STEP_SIZE < typeIds.length; step++) {
-		const promises = [];
-		const typeIdsSlice = typeIds.slice(step * STEP_SIZE, (step + 1) * STEP_SIZE);
-
-		const srcFuzzByTypeId = await getFuzzworkPricesInRegion(START_REGION_ID, typeIdsSlice);
-		const destFuzzByTypeId = await getFuzzworkPricesInRegion(END_REGION_ID, typeIdsSlice);
-		for (let typeId of typeIdsSlice) {
-			//triage with fuzzwork prices
-			if (!alwaysShowTypeIds.includes(typeId)) {
-				const srcFuzzPrice = +srcFuzzByTypeId[typeId].sell.min;
-				const destFuzzPrice = +destFuzzByTypeId[typeId].sell.min;
-				if (srcFuzzPrice === 0 || destFuzzPrice === 0) {
-					console.warn(`${typeId} fuzz no price (src: ${srcFuzzPrice}, dest: ${destFuzzPrice})`);
-					continue;
-				}
-				if (destFuzzPrice < srcFuzzPrice) {
-					console.log(`${typeId} fuzz negative spread (src: ${util.roundMils(srcFuzzPrice)}, dest: ${util.roundMils(destFuzzPrice)})`);
-					continue;
-				}
-				if (destFuzzPrice < srcFuzzPrice * MIN_ROI) {
-					// Fuzz margin too slim
-					console.log(`${typeId} fuzz margin too slim (${Math.round(100 * destFuzzPrice / srcFuzzPrice) / 100}x)`);
-					continue;
-				}
-				console.log(`${typeId} fuzz margin ok (${Math.round(100 * destFuzzPrice / srcFuzzPrice) / 100}x)`);
+	const rowHtml = (row) => {
+		const cls = [];
+		if (row.report.filteredReason) cls.push('filtered', 'dim');
+		if (row.isAlwaysShow) cls.push('alwaysShowItem');
+		const cells = visibleColumns().map(col => {
+			switch (col.key) {
+				case 'select':
+					return `<td class="sel"><input type="checkbox" class="selbox" ${selected.has(row.typeId) ? 'checked' : ''}></td>`;
+				case 'name':
+					return `<td class="text"><span class="name">${esc(row.name)}</span> <span class="dim">${row.typeId}</span></td>`;
+				case 'factor':
+					return `<td class="numeric"><input type="number" class="factor" step="0.1" min="0" value="${row.factor}"></td>`;
+				case 'qty':
+					return `<td class="numeric"><input type="number" class="qty" step="1" min="0" value="${orderQty(row)}"></td>`;
+				case 'reason':
+					return `<td class="text">${esc(row.report.filteredReason || '')}</td>`;
+				default:
+					return `<td class="numeric" data-col="${col.key}">${col.fmt(col.val(row))}</td>`;
 			}
+		});
+		return `<tr class="${cls.join(' ')}" data-type-id="${row.typeId}">${cells.join('')}</tr>`;
+	};
 
-			//generate report
-			const reportPromise = getItemExportReport(START_REGION_ID, START_STATION_ID, END_REGION_ID, END_STATION_ID, typeId);
-			reportPromise.then(itemReport => itemReportByTypeId[typeId] = itemReport);
-			promises.push(reportPromise);
-			promises.push(getTypeM3(typeId)); //preload m3
+	const sortedVisibleRows = () => {
+		const col = COLUMNS.find(c => c.key === sort.key) || COLUMNS[2];
+		const dir = sort.dir === 'asc' ? 1 : -1;
+		const list = rows.filter(r => showFiltered || !r.report.filteredReason);
+		const keyed = list.map(r => ({ r, v: sortValue(col, r) }));
+		keyed.sort((a, b) => {
+			const an = a.v === null || a.v === undefined || Number.isNaN(a.v);
+			const bn = b.v === null || b.v === undefined || Number.isNaN(b.v);
+			if (an || bn) return an === bn ? 0 : (an ? 1 : -1); // nulls last regardless of direction
+			if (a.v < b.v) return -dir;
+			if (a.v > b.v) return dir;
+			return 0;
+		});
+		return keyed.map(k => k.r);
+	};
+
+	const isEditing = () => {
+		const el = document.activeElement;
+		return !!el && tbodyElem.contains(el) && el.tagName === 'INPUT' && el.type === 'number';
+	};
+
+	const updateSums = () => {
+		let cost = 0, revenue = 0, km3 = 0, count = 0;
+		for (const row of rows) {
+			if (!selected.has(row.typeId)) continue;
+			if (!showFiltered && row.report.filteredReason) continue;
+			cost += orderCost(row);
+			revenue += orderRevenue(row);
+			km3 += km3Of(row);
+			count++;
 		}
-		await Promise.all(promises);
-		outputElem.innerHTML = `Processing ${step * STEP_SIZE} / ${typeIds.length}`;
-	}
+		sumsElem.innerHTML =
+			`${roundNonZero(revenue - cost)}` +
+			`<span class="dim"> (-${roundNonZero(cost)} + ${roundNonZero(revenue)}) </span>` +
+			`${roundNonZero(km3)}km3 <span class="dim">&middot; ${count} selected</span>`;
+	};
 
-	outputElem.innerHTML = `Sorting`;
+	const render = () => {
+		pendingRender = false;
+		lastRenderAt = Date.now();
+		renderHead();
+		const scrollY = window.scrollY;
+		tbodyElem.innerHTML = sortedVisibleRows().map(rowHtml).join('');
+		if (window.scrollY !== scrollY) window.scrollTo(window.scrollX, scrollY);
+		updateSums();
+	};
 
-	const typeIdsOrderedByProfitDesc = typeIds.sort((a, b) => {
-		const aRep = itemReportByTypeId[a];
-		const bRep = itemReportByTypeId[b];
-		return (bRep?.dailyProfitMil || 0) - (aRep?.dailyProfitMil || 0);
+	// Throttled: at most one render per 500ms; suspended while a row input is focused.
+	const scheduleRender = () => {
+		if (pendingRender) return;
+		pendingRender = true;
+		const wait = Math.max(0, 500 - (Date.now() - lastRenderAt));
+		renderTimer = setTimeout(() => {
+			if (isEditing()) { pendingRender = false; return; } // resumes on blur
+			render(); // (not requestAnimationFrame: it never fires in a hidden tab)
+		}, wait);
+	};
+
+	//--- row events
+	const rowFromEvent = (e) => {
+		const tr = e.target.closest('tr[data-type-id]');
+		return tr ? { tr, row: rowByTypeId.get(+tr.dataset.typeId) } : null;
+	};
+
+	const refreshRowCells = (tr, row, skip) => {
+		for (const cell of tr.querySelectorAll('td[data-col]')) {
+			const col = COLUMNS.find(c => c.key === cell.dataset.col);
+			cell.textContent = col.fmt(col.val(row));
+		}
+		const factorInput = tr.querySelector('input.factor');
+		const qtyInput = tr.querySelector('input.qty');
+		if (factorInput && skip !== 'factor') factorInput.value = row.factor;
+		if (qtyInput && skip !== 'qty') qtyInput.value = orderQty(row);
+	};
+
+	tbodyElem.addEventListener('input', (e) => {
+		const hit = rowFromEvent(e);
+		if (!hit || !hit.row) return;
+		const { tr, row } = hit;
+		if (e.target.classList.contains('factor')) {
+			const f = parseFloat(e.target.value);
+			if (!(f >= 0)) return;
+			row.factor = f;
+			row.qtyManual = null;
+			row.hasOverride = true;
+			factorOverrides[row.typeId] = f;
+			saveFactors();
+			refreshRowCells(tr, row, 'factor');
+		} else if (e.target.classList.contains('qty')) {
+			const q = parseInt(e.target.value, 10);
+			if (!(q >= 0)) return;
+			row.qtyManual = q;
+			if (row.report.volume > 0) {
+				row.factor = Math.round(q / row.report.volume * 100) / 100;
+				row.hasOverride = true;
+				factorOverrides[row.typeId] = row.factor;
+				saveFactors();
+			}
+			refreshRowCells(tr, row, 'qty');
+		} else return;
+		updateSums();
 	});
 
-	outputElem.innerHTML = `Ready`;
+	tbodyElem.addEventListener('change', (e) => {
+		if (!e.target.classList.contains('selbox')) return;
+		const hit = rowFromEvent(e);
+		if (!hit || !hit.row) return;
+		if (e.target.checked) selected.add(hit.row.typeId);
+		else selected.delete(hit.row.typeId);
+		saveSelected();
+		updateSums();
+	});
 
-	let html = '';
-	html += `Start Region: ${START_REGION_ID}<br/>`;
-	html += `End Region: ${END_REGION_ID}<br/>`;
-	html += `<span class="dim">${moment().format('MMM. Do, h:mm a')}</span><br/>`;
-	html += '<br/>';
-	for (let typeId of typeIdsOrderedByProfitDesc) {
-		const itemReport = itemReportByTypeId[typeId];
-		if (!itemReport) continue;
+	tbodyElem.addEventListener('focusout', () => {
+		// let focus settle (tabbing between inputs of a row), then resume if not editing
+		setTimeout(() => { if (!isEditing()) scheduleRender(); }, 0);
+	});
 
-		if (!alwaysShowTypeIds.includes(typeId)) {
-			if (itemReport.dailyProfitMil < 1 || itemReport.volume === 0) {
-				if (itemReport.dailyProfitMil > 0) {
-					console.log(`${typeId} not profitable (dailyProfitMil: ${itemReport.dailyProfitMil})`);
-				}
-				continue;
-			}
-			if (itemReport.profitPerFlipNowMil < itemReport.profitPerFlipAvgMil * 0.8) {
-				console.log(`${typeId} margin crashed`);
-				continue;
-			}
-			// if (itemReport.volume < 3) {
-			// 	console.log(`${typeId} volume too low`);
-			// 	continue;
-			// }
-			if (itemReport.revenuePerItemMil < itemReport.costPerItemMil * MIN_ROI) {
-				console.log(`${typeId} margin too slim (${Math.round(100 * itemReport.revenuePerItemMil / itemReport.costPerItemMil) / 100}x)`);
-				continue;
-			}
-			if (itemReport.activeDaysFraction < 0.2) {
-				console.log(`${typeId} too slow`);
-				continue;
-			}
-			const hem = (min, val, max) => Math.min(Math.max(min, val), max);
-			const profitRating = hem(0, itemReport.dailyProfitMil * 0.1, 1);
-			const tooRecentThresholdMin = 1 / 24;
-			const tooRecentThresholdMax = 30 / 24;
-			const tooRecentlyThreshold = Math.floor((tooRecentThresholdMax - (tooRecentThresholdMax - tooRecentThresholdMin) * profitRating) * 100) / 100;
-			if (itemReport.daysSinceSellerUpdate !== null && itemReport.daysSinceSellerUpdate < tooRecentlyThreshold) {
-				console.log(`${typeId} seller updated too recently (${itemReport.daysSinceSellerUpdate} days ago < ${tooRecentlyThreshold}) vs daily profits (${itemReport.dailyProfitMil})`);
-				continue;
-			}
-			const adjustedActiveSellers = itemReport.activeSellers * (0.1 + Math.pow(0.9, Math.max(1, itemReport.daysSinceSellerUpdate)));
-			if (
-				adjustedActiveSellers + 1 > itemReport.revenuePerItemMil / itemReport.costPerItemMil //poor percentage profit (relative to competition)
-				&& itemReport.dailyProfitMil < adjustedActiveSellers * 3 //poor absolute profit (relative to competition)
-			) {
-				console.log(`${typeId} too much competition for the return`);
-				continue;
-			}
-		}
-		
-		const { volume, costPerItemMil, revenuePerItemMil } = itemReport;
-		const costMil = roundNonZero(costPerItemMil * volume, 3);
-		const revenueMil = roundNonZero(revenuePerItemMil * volume);
-		const typeName = await getTypeName(typeId);
-		const m3 = await getTypeM3(typeId);
+	theadElem.addEventListener('click', (e) => {
+		const th = e.target.closest('th[data-key]');
+		if (!th) return;
+		const key = th.dataset.key;
+		if (sort.key === key) sort = { key, dir: sort.dir === 'asc' ? 'desc' : 'asc' };
+		else sort = { key, dir: COLUMNS.find(c => c.key === key).text ? 'asc' : 'desc' };
+		lsSet('sort', sort);
+		render();
+	});
 
-		const itemReportStr = Object.entries(itemReport).map(([key, val]) => key + ': ' + val).join(' &nbsp; ');
-
-		const classNames = ['item'];
-		if (alwaysShowTypeIds.includes(typeId)) classNames.push('alwaysShowItem');
-		html += `<div class="${classNames.join(' ')}">`;
-		html += 	'<div>';
-		html += 		`<span class="name">${typeName}</span> (${typeId}) &nbsp; `;
-		html += 		`<span class="dim">`;
-		html += 			`${roundNonZero(Math.ceil(volume * m3) / 1000)}km3 (${roundNonZero(m3)}m3 * ${volume})`;
-		html += 		`</span>`;
-		html += 	'</div>';
-		html += 	'<div>';
-		html += 		`${itemReport.dailyProfitMil} &nbsp; `;
-		html += 		`<span class="dim">`;
-		html += 			`(-${costMil} + ${revenueMil}) / ${DAYS_TO_COMPLETE}`;
-		html += 		`</span>`;
-		html += 	'<div>';	
-		html += 	'</div>';
-		html += 		itemReportStr;
-		html += 	'</div>';	
-		html += 	'<div>&nbsp;</div>';
-		html += '</div>';	
-	}
-	outputElem.innerHTML = html;
-	updateMarked(); //defined in export.html
-});
-
-// Takes days and buckets them into volume weighted price buckets then returns the price from the dominant bucket
-function getOrdinaryPrice(days, priceBucketPercent = 0.2 ) {
-	if (days.length === 0) return null;
-
-	// Step 1: compute reference price
-	const overallAveragePrice = days.reduce((sum, day) => sum + day.average, 0) / days.length;
-
-	// Step 2: fixed bucket size derived from reference price
-	const bucketSize = overallAveragePrice * priceBucketPercent;
-
-	// bucketKey -> bucket
-	const bucketByKey = {};
-
-	for (const day of days) {
-		const averagePrice = day.average;
-		const tradeVolume = day.volume;
-
-		// Step 3: assign to bucket
-		const bucketKey = Math.round(averagePrice / bucketSize);
-
-		let bucket = bucketByKey[bucketKey];
-		if (!bucket) {
-			bucket = {
-				totalVolume: 0,
-				weightedPriceSum: 0
+	//--- row intake (buffered)
+	let rowBuffer = [];
+	const addRow = ({ typeId, name, m3, report, isAlwaysShow }) => {
+		rowBuffer.push({ typeId, name, m3, report, isAlwaysShow });
+		scheduleFlush();
+	};
+	let flushTimer = null;
+	const scheduleFlush = () => {
+		if (flushTimer) return;
+		flushTimer = setTimeout(() => {
+			flushTimer = null;
+			flushRows();
+		}, 250);
+	};
+	const flushRows = () => {
+		for (const r of rowBuffer) {
+			const override = factorOverrides[r.typeId];
+			const row = {
+				...r,
+				factor: override !== undefined ? override : globalFactor,
+				hasOverride: override !== undefined,
+				qtyManual: null
 			};
-			bucketByKey[bucketKey] = bucket;
+			const existing = rowByTypeId.get(r.typeId);
+			if (existing) rows[rows.indexOf(existing)] = row;
+			else rows.push(row);
+			rowByTypeId.set(r.typeId, row);
 		}
+		rowBuffer = [];
+		scheduleRender();
+	};
 
-		// Step 4: accumulate
-		bucket.totalVolume += tradeVolume;
-		bucket.weightedPriceSum += averagePrice * tradeVolume;
-	}
-
-	// Step 5: find dominant bucket
-	let dominantBucket = null;
-	for (const bucket of Object.values(bucketByKey)) {
-		if (
-			dominantBucket === null ||
-			bucket.totalVolume > dominantBucket.totalVolume
-		) {
-			dominantBucket = bucket;
+	//--- progress
+	const fmtElapsed = (ms) => {
+		const s = Math.floor(ms / 1000);
+		const m = Math.floor(s / 60);
+		return m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
+	};
+	let lastProgress = null;
+	const showProgress = (p) => {
+		lastProgress = p;
+		const q = p.queue || {};
+		const parts = [];
+		if (p.phase === 'typeIds') parts.push('loading type ids');
+		else {
+			parts.push(`triage ${p.triaged}/${p.typesTotal}`);
+			parts.push(`reports ${p.reportsDone}/${p.triagePassed} done`);
+			if (p.reportsFailed) parts.push(`${p.reportsFailed} failed`);
 		}
-	}
+		parts.push(`in flight ${q.inFlight ?? 0}`);
+		parts.push(`queued ${q.queued ?? 0}`);
+		if (q.pausedUntil && q.pausedUntil > Date.now()) parts.push(`paused ${Math.ceil((q.pausedUntil - Date.now()) / 1000)}s`);
+		parts.push(fmtElapsed(p.elapsedMs));
+		parts.push(`rows ${p.rowsShown}` + (p.rowsFiltered ? ` (+${p.rowsFiltered} filtered)` : ''));
+		if (p.phase === 'done' || p.phase === 'stopped' || p.phase === 'error') parts.push(p.phase);
+		progressElem.textContent = parts.join(' · ');
+	};
 
-	// Step 6: volume-weighted price of dominant bucket
-	return dominantBucket.weightedPriceSum / dominantBucket.totalVolume;
-}
+	//--- run / stop
+	const setRunning = (running) => {
+		runBtn.disabled = running;
+		stopBtn.disabled = !running;
+		startSel.disabled = running;
+		endSel.disabled = running;
+	};
 
+	const run = async () => {
+		if (currentRun) return;
+		if (startSel.value === endSel.value) return;
+		loadRouteState();
+		rows = [];
+		rowByTypeId = new Map();
+		rowBuffer = [];
+		reportGeneratedAt = moment().format('MMM. Do, h:mm a');
+		headerElem.innerHTML = `${esc(startSel.value)} &rarr; ${esc(endSel.value)} <span class="dim">${reportGeneratedAt}</span>`;
+		render();
 
+		const controller = new AbortController();
+		currentRun = { controller };
+		setRunning(true);
+		try {
+			await runReport({
+				startStationKey: startSel.value,
+				endStationKey: endSel.value,
+				signal: controller.signal,
+				onRow: addRow,
+				onProgress: showProgress
+			});
+		} finally {
+			flushRows();
+			currentRun = null;
+			setRunning(false);
+			// in-flight may still be draining after a stop; keep refreshing the stats briefly
+			if (lastProgress) {
+				const drain = setInterval(() => {
+					const q = util.queueStats();
+					showProgress({ ...lastProgress, queue: q });
+					if (q.inFlight === 0 && q.queued === 0) clearInterval(drain);
+				}, 500);
+				setTimeout(() => clearInterval(drain), 30000);
+			}
+		}
+	};
 
-//TODO: consider that it may not always take DAYS_TO_COMPLETE to sell hauled volume (could change dailyProfit perhaps)
+	runBtn.addEventListener('click', run);
+	stopBtn.addEventListener('click', () => {
+		if (currentRun) currentRun.controller.abort();
+	});
 
+	//--- controls
+	const onRouteChange = (changed) => {
+		const other = changed === startSel ? endSel : startSel;
+		if (startSel.value === endSel.value) {
+			// pick the first station that differs
+			other.value = stationNames.find(n => n !== changed.value);
+		}
+		lsSet('route', { start: startSel.value, end: endSel.value });
+		loadRouteState();
+		rows = [];
+		rowByTypeId = new Map();
+		headerElem.textContent = '';
+		render();
+	};
+	startSel.addEventListener('change', () => onRouteChange(startSel));
+	endSel.addEventListener('change', () => onRouteChange(endSel));
 
+	autoRunChk.checked = !!lsGet('autoRun', false);
+	autoRunChk.addEventListener('change', () => lsSet('autoRun', autoRunChk.checked));
 
+	globalFactorInput.value = globalFactor;
+	globalFactorInput.addEventListener('input', () => {
+		const f = parseFloat(globalFactorInput.value);
+		if (!(f >= 0)) return;
+		globalFactor = f;
+		lsSet('globalFactor', f);
+		for (const row of rows) {
+			if (row.hasOverride) continue;
+			row.factor = f;
+			row.qtyManual = null;
+		}
+		render();
+	});
 
+	showFilteredChk.checked = showFiltered;
+	showFilteredChk.addEventListener('change', () => {
+		showFiltered = showFilteredChk.checked;
+		lsSet('showFiltered', showFiltered);
+		render();
+	});
 
+	//--- copy orders
+	const buildOrdersText = () => sortedVisibleRows()
+		.filter(r => selected.has(r.typeId))
+		.map(r => `${r.name}\t${orderQty(r)}`)
+		.join('\n');
+	window.getOrdersText = buildOrdersText; // for debugging / tests
 
-// const day = {
-// 	average:6.74,
-// 	date:"2021-01-04",
-// 	highest:6.96,
-// 	lowest:6.45,
-// 	order_count:2177,
-// 	volume:4974822193
-// };
+	let copyTimer = null;
+	copyBtn.addEventListener('click', async () => {
+		copyBtn.classList.add('pending');
+		try {
+			await navigator.clipboard.writeText(buildOrdersText());
+			copyBtn.textContent = 'Copied';
+			clearTimeout(copyTimer);
+			copyTimer = setTimeout(() => { copyBtn.textContent = 'Copy orders'; }, 1000);
+		} catch (e) {
+			console.error('clipboard write failed', e);
+			copyBtn.textContent = 'Copy failed';
+			clearTimeout(copyTimer);
+			copyTimer = setTimeout(() => { copyBtn.textContent = 'Copy orders'; }, 1500);
+		} finally {
+			copyBtn.classList.remove('pending');
+		}
+	});
+
+	//--- init
+	loadRouteState();
+	setRunning(false);
+	render();
+	if (autoRunChk.checked) run();
+})();
