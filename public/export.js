@@ -52,24 +52,24 @@ const ignoreOneActiveSellerForTypeIds = [
 ];
 
 const alwaysShowNames = [
-	'10000MN Monopropellant Enduring Afterburner',
-	'Arch Angel EMP XL',
-	'Blood Brass Tag',
-	'Blood Crystal Tag',
+	// '10000MN Monopropellant Enduring Afterburner',
+	// 'Arch Angel EMP XL',
+	// 'Blood Brass Tag',
+	// 'Blood Crystal Tag',
 	// 'Blood Silver Tag',
-	'Corelum B-Type Thermal Energized Membrane',
-	'Gravid Ice Harvester Mutaplasmid',
-	'Large Projectile Metastasis Adjuster II',
-	'Lattice Locked Dekaisogen',
-	'Mobile Phase Anchor',
-	'Small Pulse Laser Battery',
-	'Standup Ballistic Control System I',
-	'Standup Radar ECM Script',
-	'Trinary State Processor',
-	'Void XL',
+	// 'Corelum B-Type Thermal Energized Membrane',
+	// 'Gravid Ice Harvester Mutaplasmid',
+	// 'Large Projectile Metastasis Adjuster II',
+	// 'Lattice Locked Dekaisogen',
+	// 'Mobile Phase Anchor',
+	// 'Small Pulse Laser Battery',
+	// 'Standup Ballistic Control System I',
+	// 'Standup Radar ECM Script',
+	// 'Trinary State Processor',
+	// 'Void XL',
 
-	'Domination Torpedo Launcher',
-	'Variegated Asteroid Mining Crystal Type B I',
+	// 'Domination Torpedo Launcher',
+	// 'Variegated Asteroid Mining Crystal Type B I',
 ];
 
 const isAbort = (e) => !!e && e.name === 'AbortError';
