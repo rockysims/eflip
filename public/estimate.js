@@ -158,8 +158,15 @@
 			const highFrac = 1 - lowFrac;
 			const highVolume = highFrac * day.volume;
 
-			//calc profitPerItem
-			const sellPrice = Math.min(day.highest, ordinaryPrice);
+			//calc profitPerItem. The day's sell price is capped at the ordinary price or, when the
+			//market has moved up recently, at the trailing RECENT_THRESHOLD_DAYS average high, so a
+			//rising price counts within a couple of weeks while one-day spikes are still blocked.
+			//Days whose high sits below the recent middle are buy-order-fill days (same rule as lowFrac
+			//below); their "highs" are buy prices and must not drag the sell-side average down.
+			const recentSellSideHighs = recentDays.filter(d => d.highest >= recentMiddlePrice).map(d => d.highest);
+			const recentSellHighPrice = recentSellSideHighs.length > 0 ? avg(recentSellSideHighs) : recentHighPrice;
+			const priceCap = Math.max(ordinaryPrice, recentSellHighPrice);
+			const sellPrice = Math.min(day.highest, priceCap);
 			const sellRevenue = sellPrice * (1 - c.SELL_TAX);
 			const haulCost = c.HAULING_REWARD_FRACTION * srcBestSellPrice;
 			const profitPerItem = sellRevenue - (srcBestSellPrice + haulCost);
@@ -338,8 +345,12 @@
 					...common
 				};
 			} else {
-				// Nothing worth buying: show the raw best prices, like the old page did.
-				const destBest = destBestSellPrice === null ? 0 : destBestSellPrice;
+				// Nothing worth buying: show the raw best prices, like the old page did. With no dest
+				// orders fall back to what history says buyers paid (recent profitable-day average, else
+				// the ordinary price) so ROI is still informative.
+				const destBest = destBestSellPrice !== null
+					? destBestSellPrice
+					: (destRecentAverageSellPrice !== null ? destRecentAverageSellPrice : ordinaryPrice);
 				report = {
 					volume: 0,
 					costPerItemMil: milsNum(Math.ceil(srcBestSellPrice), 3),

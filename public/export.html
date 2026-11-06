@@ -99,16 +99,34 @@
 		td input.factor {
 			width: 4.5em;
 		}
-		#footer {
+		#totals {
 			position: sticky;
-			bottom: 0;
-			display: flex;
-			justify-content: space-between;
-			gap: 12px;
-			padding: 6px 0;
+			top: 0;
+			z-index: 2;
+			padding: 8px 0;
+			margin: 4px 0;
 			background: #fff;
 			border-top: 1px solid #bbb;
-			margin-top: 4px;
+			border-bottom: 1px solid #bbb;
+		}
+		thead th {
+			top: var(--sticky-offset, 0px);
+		}
+		#alwaysShowDetails {
+			margin: 4px 0;
+		}
+		#alwaysShowDetails summary {
+			cursor: pointer;
+		}
+		#alwaysShowText {
+			width: 100%;
+			max-width: 600px;
+			height: 120px;
+			font: inherit;
+			font-size: 12px;
+		}
+		#alwaysShowNote {
+			margin-top: 2px;
 		}
 	</style>
 	<script src="util.js"></script>
@@ -128,13 +146,16 @@
 		<button id="copy">Copy orders</button>
 	</div>
 	<div id="progress" class="dim">idle</div>
+	<details id="alwaysShowDetails">
+		<summary class="dim">always show (one item name per line)</summary>
+		<textarea id="alwaysShowText" spellcheck="false"></textarea>
+		<div id="alwaysShowNote" class="dim"></div>
+	</details>
 	<div id="reportHeader"></div>
+	<div id="totals"><span id="sums"></span></div>
 	<table id="table">
 		<thead></thead>
 		<tbody></tbody>
 	</table>
-	<div id="footer">
-		<div id="sums"></div>
-	</div>
 </body>
 </html>

@@ -48,19 +48,23 @@ test('getOrdinaryPrice returns dominant bucket price; null for no days', () => {
 });
 
 test('ordinary price ignores days older than ORDINARY_PRICE_DAYS', () => {
-	// Recent 90 days: high 2M, low 1M, average 1.5M. Older days: 10M with huge volume.
+	// Recent 90 days: high 2M, low 1M, average 1.5M, except a spike to 8M yesterday.
+	// Older days: 10M with huge volume.
 	const recent = [];
-	for (let age = 90; age >= 1; age--) recent.push({ date: dateForAge(age), average: 1.5 * M, highest: 2 * M, lowest: 1 * M, volume: 10 });
+	for (let age = 90; age >= 1; age--) recent.push({ date: dateForAge(age), average: 1.5 * M, highest: age === 1 ? 8 * M : 2 * M, lowest: 1 * M, volume: 10 });
 	const old = flatHistory(91, 200, 10 * M, 100000);
-	// No dest orders, so sellPrice = recent average of min(day.highest, ordinaryPrice).
-	// With old days included ordinaryPrice ~10M -> 2M; with the 90-day window it is 1.5M.
+	// No dest orders, so sellPrice = average of the last 5 profitable days' capped highs, where the
+	// cap is max(ordinaryPrice, trailing 10-day average high). With the 90-day window the ordinary
+	// price is 1.5M, so the spike day is capped at the trailing average (9*2M + 8M)/10 = 2.6M and
+	// the last five days average (4*2M + 2.6M)/5 = 2.12M. With old days included the ordinary price
+	// would be ~10M and the spike would count in full (3.2M).
 	const report = computeItemReport({
 		srcOrders: [sellOrder(0.5 * M, 1000)],
 		destOrders: [],
 		destDays: [...old, ...recent],
 		now: NOW
 	});
-	assert.equal(report.revenuePerItemMil, Number(roundMils(Math.floor(1.5 * M * (1 - defaultConfig.SELL_TAX)), 3)));
+	assert.equal(report.revenuePerItemMil, Number(roundMils(Math.floor(2.12 * M * (1 - defaultConfig.SELL_TAX)), 3)));
 });
 
 test('recency weight: a day 30 days old counts half', () => {
@@ -317,4 +321,50 @@ test('regression: realistic fixture produces the full report shape', () => {
 		filteredReason: null
 	});
 	assert.ok(report.roi >= defaultConfig.MIN_ROI);
+});
+
+test('rising recent prices count even when the ordinary price is lower', () => {
+	// 20 days at 10M (10/day) dominate volume, so ordinaryPrice is 10M. The last 10 days sold at 20M.
+	// Jita 9M + 10% haul = 9.9M needs an 11.05M sell price, so the 10M cap alone would give zero
+	// profitable days. The trailing 10-day average high reaches 12M once two of the ten days are
+	// at 20M (ages 9..1), so nine days count.
+	const days = [...flatHistory(11, 30, 10 * M, 10), ...flatHistory(1, 10, 20 * M, 1)];
+	const report = computeItemReport({
+		srcOrders: [sellOrder(9 * M, 1000)],
+		destOrders: [],
+		destDays: days,
+		now: NOW
+	});
+	assert.ok(report.volume > 0, `volume ${report.volume}`);
+	assert.equal(report.activeDaysFraction, 0.3);
+});
+
+test('zero-volume fallback with no dest orders uses the history price', () => {
+	// Jita 100M, Amarr history flat at 10M: nothing is profitable and there are no dest orders.
+	const report = computeItemReport({
+		srcOrders: [sellOrder(100 * M, 10)],
+		destOrders: [],
+		destDays: flatHistory(1, 30, 10 * M, 10),
+		now: NOW
+	});
+	assert.equal(report.volume, 0);
+	assert.equal(report.revenuePerItemMil, 10);
+	assert.equal(report.roi, 0.1);
+});
+
+test('buy-order-fill days do not drag the recent high cap down', () => {
+	// Like the rising-price case, but every other recent day is a buy-order fill at 2M
+	// (highest === lowest === 2M, below the recent middle). Those days must be ignored when
+	// averaging recent highs. With them included the cap for the last five profitable days
+	// averages ~10.6M (revenue ~9.5M); excluded, it averages ~14.9M (revenue ~13.3M).
+	const days = [...flatHistory(11, 30, 10 * M, 10)];
+	for (let age = 10; age >= 1; age--) days.push(flatDay(age, age % 2 === 0 ? 2 * M : 20 * M, 1));
+	const report = computeItemReport({
+		srcOrders: [sellOrder(7 * M, 1000)],
+		destOrders: [],
+		destDays: days,
+		now: NOW
+	});
+	assert.ok(report.volume > 0, `volume ${report.volume}`);
+	assert.ok(report.revenuePerItemMil > 12, `revenuePerItemMil ${report.revenuePerItemMil}`);
 });
