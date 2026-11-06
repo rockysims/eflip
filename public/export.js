@@ -276,6 +276,7 @@ const runReport = async ({ startStationKey, endStationKey, signal, onRow = () =>
 	const autoRunChk = $('#autoRun');
 	const globalFactorInput = $('#globalFactor');
 	const showFilteredChk = $('#showFiltered');
+	const searchInput = $('#search');
 	const copyBtn = $('#copy');
 	const progressElem = $('#progress');
 	const headerElem = $('#reportHeader');
@@ -324,41 +325,38 @@ const runReport = async ({ startStationKey, endStationKey, signal, onRow = () =>
 	const fmtRoi = (v) => v === null || v === undefined ? '' : nf2.format(v);
 	const num = (v) => v === null || v === undefined ? null : +v;
 
-	const orderQty = (row) => row.qtyManual ?? Math.ceil(row.report.volume * row.factor);
+	// quantity = what the Copy button writes (equals the recommended volume when factor is 1)
+	const orderQty = (row) => Math.ceil(row.report.volume * row.factor);
 	const orderCost = (row) => row.report.costPerItemMil * orderQty(row);
 	const orderRevenue = (row) => row.report.revenuePerItemMil * orderQty(row);
 	const km3Of = (row) => Math.ceil(orderQty(row) * (row.m3 || 0)) / 1000;
 
-	// kind: 'text' | 'num' ; cell: custom html renderer (else fmt(value))
+	// text: left aligned, sorts ascending first ; sort: custom sort value ; val/fmt: displayed number
 	const COLUMNS = [
 		{ key: 'select', label: '', sort: (r) => selected.has(r.typeId) ? 1 : 0 },
 		{ key: 'name', label: 'name', sort: (r) => r.name.toLowerCase(), text: true },
 		{ key: 'dailyProfitMil', label: 'daily profit', val: (r) => num(r.report.dailyProfitMil), fmt: fmtMil },
-		{ key: 'profitPerItemMil', label: 'profit/item', val: (r) => num(r.report.profitPerItemMil), fmt: fmtMil },
+		{ key: 'roi', label: 'ROI', val: (r) => num(r.report.roi), fmt: fmtRoi },
+		{ key: 'factor', label: 'factor', val: (r) => r.factor },
+		{ key: 'qty', label: 'quantity', val: orderQty, fmt: fmtNum },
+		{ key: 'daysOfSupply', label: 'days of supply', val: (r) => num(r.report.daysOfSupply), fmt: fmtRoi },
+		{ key: 'activeSellers', label: 'active sellers', val: (r) => num(r.report.activeSellers), fmt: fmtNum },
+		{ key: 'daysSinceSellerUpdate', label: 'days idle', val: (r) => num(r.report.daysSinceSellerUpdate), fmt: fmtRoi },
+		{ key: 'km3', label: 'km3', val: km3Of, fmt: fmtNum },
+		{ key: 'activeDaysFraction', label: 'active days', val: (r) => num(r.report.activeDaysFraction), fmt: fmtRoi },
 		{ key: 'costPerItemMil', label: 'cost/item', val: (r) => num(r.report.costPerItemMil), fmt: fmtMil },
 		{ key: 'revenuePerItemMil', label: 'revenue/item', val: (r) => num(r.report.revenuePerItemMil), fmt: fmtMil },
-		{ key: 'roi', label: 'ROI', val: (r) => num(r.report.roi), fmt: fmtRoi },
-		{ key: 'daysToClear', label: 'days to clear', val: (r) => num(r.report.daysToClear), fmt: fmtRoi },
-		{ key: 'volume', label: 'volume', val: (r) => r.report.volume, fmt: fmtNum },
-		{ key: 'factor', label: 'factor', val: (r) => r.factor },
-		{ key: 'qty', label: 'order qty', val: orderQty },
-		{ key: 'orderCost', label: 'order cost', val: orderCost, fmt: (v) => roundNonZero(v, 3) },
-		{ key: 'orderRevenue', label: 'order revenue', val: orderRevenue, fmt: (v) => roundNonZero(v) },
-		{ key: 'km3', label: 'km3', val: km3Of, fmt: fmtNum },
-		{ key: 'competingVolume', label: 'competing volume', val: (r) => num(r.report.competingVolume), fmt: fmtNum },
-		{ key: 'activeSellers', label: 'active sellers', val: (r) => num(r.report.activeSellers), fmt: fmtNum },
-		{ key: 'daysSinceSellerUpdate', label: 'days since update', val: (r) => num(r.report.daysSinceSellerUpdate), fmt: fmtRoi },
-		{ key: 'activeDaysFraction', label: 'active days', val: (r) => num(r.report.activeDaysFraction), fmt: fmtRoi },
-		{ key: 'dailyProfitOldMil', label: 'daily profit (old)', val: (r) => num(r.report.dailyProfitOldMil), fmt: fmtMil },
-		{ key: 'reason', label: 'reason', sort: (r) => r.report.filteredReason || '', text: true, filteredOnly: true }
+		{ key: 'daysToClear', label: 'days to clear', val: (r) => num(r.report.daysToClear), fmt: fmtRoi }
 	];
-	const visibleColumns = () => COLUMNS.filter(c => !c.filteredOnly || showFiltered);
 	const sortValue = (col, row) => col.sort ? col.sort(row) : col.val(row);
+	if (!COLUMNS.some(c => c.key === sort.key) || (sort.dir !== 'asc' && sort.dir !== 'desc')) {
+		sort = { key: 'dailyProfitMil', dir: 'desc' };
+	}
 
 	const esc = (s) => String(s).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
 
 	const renderHead = () => {
-		theadElem.innerHTML = '<tr>' + visibleColumns().map(col => {
+		theadElem.innerHTML = '<tr>' + COLUMNS.map(col => {
 			const active = sort.key === col.key;
 			const arrow = active ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : '';
 			const cls = (col.text ? 'text ' : 'numeric ') + (active ? 'sorted' : '');
@@ -366,33 +364,90 @@ const runReport = async ({ startStationKey, endStationKey, signal, onRow = () =>
 		}).join('') + '</tr>';
 	};
 
-	const rowHtml = (row) => {
-		const cls = [];
-		if (row.report.filteredReason) cls.push('filtered', 'dim');
-		if (row.isAlwaysShow) cls.push('alwaysShowItem');
-		const cells = visibleColumns().map(col => {
+	//--- rows: one persistent <tr> per type id; created once, updated in place, moved/detached but never rebuilt
+	const trByTypeId = new Map();
+
+	const clearRows = () => {
+		rows = [];
+		rowByTypeId = new Map();
+		trByTypeId.clear();
+		tbodyElem.innerHTML = '';
+	};
+
+	const updateRowEl = (tr, row) => {
+		const filtered = !!row.report.filteredReason;
+		tr.classList.toggle('filtered', filtered);
+		tr.classList.toggle('dim', filtered);
+		tr.classList.toggle('alwaysShowItem', !!row.isAlwaysShow);
+		const nameCell = tr.querySelector('td.nameCell');
+		nameCell.title = row.report.filteredReason || '';
+		for (const cell of tr.querySelectorAll('td[data-col]')) {
+			const col = COLUMNS.find(c => c.key === cell.dataset.col);
+			cell.textContent = col.fmt(col.val(row));
+		}
+		const factorInput = tr.querySelector('input.factor');
+		if (document.activeElement !== factorInput && factorInput.value !== String(row.factor)) factorInput.value = row.factor;
+	};
+
+	const createRowEl = (row) => {
+		const tr = document.createElement('tr');
+		tr.dataset.typeId = row.typeId;
+		for (const col of COLUMNS) {
+			const td = document.createElement('td');
 			switch (col.key) {
-				case 'select':
-					return `<td class="sel"><input type="checkbox" class="selbox" ${selected.has(row.typeId) ? 'checked' : ''}></td>`;
-				case 'name':
-					return `<td class="text"><span class="name">${esc(row.name)}</span> <span class="dim">${row.typeId}</span></td>`;
-				case 'factor':
-					return `<td class="numeric"><input type="number" class="factor" step="0.1" min="0" value="${row.factor}"></td>`;
-				case 'qty':
-					return `<td class="numeric"><input type="number" class="qty" step="1" min="0" value="${orderQty(row)}"></td>`;
-				case 'reason':
-					return `<td class="text">${esc(row.report.filteredReason || '')}</td>`;
+				case 'select': {
+					td.className = 'sel';
+					const box = document.createElement('input');
+					box.type = 'checkbox';
+					box.className = 'selbox';
+					box.checked = selected.has(row.typeId);
+					td.appendChild(box);
+					break;
+				}
+				case 'name': {
+					td.className = 'text nameCell';
+					const nameSpan = document.createElement('span');
+					nameSpan.className = 'name';
+					nameSpan.textContent = row.name;
+					const idSpan = document.createElement('span');
+					idSpan.className = 'dim';
+					idSpan.textContent = row.typeId;
+					td.append(nameSpan, ' ', idSpan);
+					break;
+				}
+				case 'factor': {
+					td.className = 'numeric';
+					const input = document.createElement('input');
+					input.type = 'number';
+					input.className = 'factor';
+					input.step = '0.1';
+					input.min = '0';
+					td.appendChild(input);
+					break;
+				}
 				default:
-					return `<td class="numeric" data-col="${col.key}">${col.fmt(col.val(row))}</td>`;
+					td.className = 'numeric';
+					td.dataset.col = col.key;
 			}
-		});
-		return `<tr class="${cls.join(' ')}" data-type-id="${row.typeId}">${cells.join('')}</tr>`;
+			tr.appendChild(td);
+		}
+		trByTypeId.set(row.typeId, tr);
+		updateRowEl(tr, row);
+		return tr;
+	};
+
+	// selected rows are always visible; else a search matches every row (filtered ones too); else the estimate filter applies
+	const isRowVisible = (row, query) => {
+		if (selected.has(row.typeId)) return true;
+		if (query) return row.name.toLowerCase().includes(query);
+		return showFiltered || !row.report.filteredReason;
 	};
 
 	const sortedVisibleRows = () => {
-		const col = COLUMNS.find(c => c.key === sort.key) || COLUMNS[2];
+		const col = COLUMNS.find(c => c.key === sort.key);
 		const dir = sort.dir === 'asc' ? 1 : -1;
-		const list = rows.filter(r => showFiltered || !r.report.filteredReason);
+		const query = searchInput.value.trim().toLowerCase();
+		const list = rows.filter(r => isRowVisible(r, query));
 		const keyed = list.map(r => ({ r, v: sortValue(col, r) }));
 		keyed.sort((a, b) => {
 			const an = a.v === null || a.v === undefined || Number.isNaN(a.v);
@@ -414,7 +469,6 @@ const runReport = async ({ startStationKey, endStationKey, signal, onRow = () =>
 		let cost = 0, revenue = 0, km3 = 0, count = 0;
 		for (const row of rows) {
 			if (!selected.has(row.typeId)) continue;
-			if (!showFiltered && row.report.filteredReason) continue;
 			cost += orderCost(row);
 			revenue += orderRevenue(row);
 			km3 += km3Of(row);
@@ -431,21 +485,44 @@ const runReport = async ({ startStationKey, endStationKey, signal, onRow = () =>
 		lastRenderAt = Date.now();
 		renderHead();
 		const scrollY = window.scrollY;
-		tbodyElem.innerHTML = sortedVisibleRows().map(rowHtml).join('');
+		const ordered = sortedVisibleRows();
+		const orderedIds = new Set(ordered.map(r => r.typeId));
+		// detach hidden rows (kept in trByTypeId so they can come back)
+		for (const [typeId, tr] of trByTypeId) {
+			if (tr.parentNode && !orderedIds.has(typeId)) tr.remove();
+		}
+		// put visible rows in order, moving only the nodes that are out of place
+		let cursor = tbodyElem.firstChild;
+		for (const row of ordered) {
+			const tr = trByTypeId.get(row.typeId) || createRowEl(row);
+			if (tr === cursor) cursor = cursor.nextSibling;
+			else tbodyElem.insertBefore(tr, cursor);
+		}
 		if (window.scrollY !== scrollY) window.scrollTo(window.scrollX, scrollY);
 		updateSums();
 	};
 
-	// Throttled: at most one render per 500ms; suspended while a row input is focused.
+	// Throttled: at most one render per 500ms. Suspended while a row input is focused or while the
+	// pointer is over the table (so rows never re-sort under a click); resumes on blur / mouseleave.
+	let pointerInTable = false;
+	let renderHeld = false;
 	const scheduleRender = () => {
 		if (pendingRender) return;
 		pendingRender = true;
 		const wait = Math.max(0, 500 - (Date.now() - lastRenderAt));
 		renderTimer = setTimeout(() => {
-			if (isEditing()) { pendingRender = false; return; } // resumes on blur
+			if (isEditing() || pointerInTable) { pendingRender = false; renderHeld = true; return; }
 			render(); // (not requestAnimationFrame: it never fires in a hidden tab)
 		}, wait);
 	};
+	const resumeRender = () => {
+		if (renderHeld && !isEditing() && !pointerInTable) {
+			renderHeld = false;
+			scheduleRender();
+		}
+	};
+	tableElem.addEventListener('mouseenter', () => { pointerInTable = true; });
+	tableElem.addEventListener('mouseleave', () => { pointerInTable = false; resumeRender(); });
 
 	//--- row events
 	const rowFromEvent = (e) => {
@@ -453,42 +530,18 @@ const runReport = async ({ startStationKey, endStationKey, signal, onRow = () =>
 		return tr ? { tr, row: rowByTypeId.get(+tr.dataset.typeId) } : null;
 	};
 
-	const refreshRowCells = (tr, row, skip) => {
-		for (const cell of tr.querySelectorAll('td[data-col]')) {
-			const col = COLUMNS.find(c => c.key === cell.dataset.col);
-			cell.textContent = col.fmt(col.val(row));
-		}
-		const factorInput = tr.querySelector('input.factor');
-		const qtyInput = tr.querySelector('input.qty');
-		if (factorInput && skip !== 'factor') factorInput.value = row.factor;
-		if (qtyInput && skip !== 'qty') qtyInput.value = orderQty(row);
-	};
-
 	tbodyElem.addEventListener('input', (e) => {
+		if (!e.target.classList.contains('factor')) return;
 		const hit = rowFromEvent(e);
 		if (!hit || !hit.row) return;
 		const { tr, row } = hit;
-		if (e.target.classList.contains('factor')) {
-			const f = parseFloat(e.target.value);
-			if (!(f >= 0)) return;
-			row.factor = f;
-			row.qtyManual = null;
-			row.hasOverride = true;
-			factorOverrides[row.typeId] = f;
-			saveFactors();
-			refreshRowCells(tr, row, 'factor');
-		} else if (e.target.classList.contains('qty')) {
-			const q = parseInt(e.target.value, 10);
-			if (!(q >= 0)) return;
-			row.qtyManual = q;
-			if (row.report.volume > 0) {
-				row.factor = Math.round(q / row.report.volume * 100) / 100;
-				row.hasOverride = true;
-				factorOverrides[row.typeId] = row.factor;
-				saveFactors();
-			}
-			refreshRowCells(tr, row, 'qty');
-		} else return;
+		const f = parseFloat(e.target.value);
+		if (!(f >= 0)) return;
+		row.factor = f;
+		row.hasOverride = true;
+		factorOverrides[row.typeId] = f;
+		saveFactors();
+		updateRowEl(tr, row);
 		updateSums();
 	});
 
@@ -499,12 +552,12 @@ const runReport = async ({ startStationKey, endStationKey, signal, onRow = () =>
 		if (e.target.checked) selected.add(hit.row.typeId);
 		else selected.delete(hit.row.typeId);
 		saveSelected();
-		updateSums();
+		updateSums(); // no re-render here: the row node stays put, hiding (if now unselected) happens on the next render
 	});
 
 	tbodyElem.addEventListener('focusout', () => {
 		// let focus settle (tabbing between inputs of a row), then resume if not editing
-		setTimeout(() => { if (!isEditing()) scheduleRender(); }, 0);
+		setTimeout(resumeRender, 0);
 	});
 
 	theadElem.addEventListener('click', (e) => {
@@ -537,13 +590,14 @@ const runReport = async ({ startStationKey, endStationKey, signal, onRow = () =>
 			const row = {
 				...r,
 				factor: override !== undefined ? override : globalFactor,
-				hasOverride: override !== undefined,
-				qtyManual: null
+				hasOverride: override !== undefined
 			};
 			const existing = rowByTypeId.get(r.typeId);
 			if (existing) rows[rows.indexOf(existing)] = row;
 			else rows.push(row);
 			rowByTypeId.set(r.typeId, row);
+			const tr = trByTypeId.get(r.typeId);
+			if (tr) updateRowEl(tr, row);
 		}
 		rowBuffer = [];
 		scheduleRender();
@@ -587,8 +641,7 @@ const runReport = async ({ startStationKey, endStationKey, signal, onRow = () =>
 		if (currentRun) return;
 		if (startSel.value === endSel.value) return;
 		loadRouteState();
-		rows = [];
-		rowByTypeId = new Map();
+		clearRows();
 		rowBuffer = [];
 		reportGeneratedAt = moment().format('MMM. Do, h:mm a');
 		headerElem.innerHTML = `${esc(startSel.value)} &rarr; ${esc(endSel.value)} <span class="dim">${reportGeneratedAt}</span>`;
@@ -635,8 +688,7 @@ const runReport = async ({ startStationKey, endStationKey, signal, onRow = () =>
 		}
 		lsSet('route', { start: startSel.value, end: endSel.value });
 		loadRouteState();
-		rows = [];
-		rowByTypeId = new Map();
+		clearRows();
 		headerElem.textContent = '';
 		render();
 	};
@@ -655,7 +707,8 @@ const runReport = async ({ startStationKey, endStationKey, signal, onRow = () =>
 		for (const row of rows) {
 			if (row.hasOverride) continue;
 			row.factor = f;
-			row.qtyManual = null;
+			const tr = trByTypeId.get(row.typeId);
+			if (tr) updateRowEl(tr, row);
 		}
 		render();
 	});
@@ -666,6 +719,8 @@ const runReport = async ({ startStationKey, endStationKey, signal, onRow = () =>
 		lsSet('showFiltered', showFiltered);
 		render();
 	});
+
+	searchInput.addEventListener('input', () => render());
 
 	//--- copy orders
 	const buildOrdersText = () => sortedVisibleRows()

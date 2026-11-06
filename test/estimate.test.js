@@ -96,6 +96,19 @@ test('competing volume counts only dest orders within the band', () => {
 	assert.equal(wider.competingVolume, 12);
 });
 
+test('days of supply counts dest orders within SUPPLY_BAND of sellPrice; null without demand or sellPrice', () => {
+	const destOrders = [sellOrder(1 * M, 4), sellOrder(1.2 * M, 6), sellOrder(1.3 * M, 50)];
+	const report = computeItemReport({ srcOrders: [sellOrder(0.1 * M, 1000)], destOrders, destDays: baseDays(), now: NOW });
+	assert.equal(report.dailyDemand, 10);
+	assert.equal(report.daysOfSupply, 1); // (4 + 6) / 10; the 1.3M order is outside the 25% band
+
+	const noDemand = computeItemReport({ srcOrders: [sellOrder(0.1 * M, 1000)], destOrders, destDays: [], now: NOW });
+	assert.equal(noDemand.daysOfSupply, null);
+
+	const noSellPrice = computeItemReport({ srcOrders: [sellOrder(0.1 * M, 1000)], destOrders: [], destDays: [], now: NOW });
+	assert.equal(noSellPrice.daysOfSupply, null);
+});
+
 test('buy cap without overhang = demand * horizon - competing volume', () => {
 	const report = computeItemReport({ srcOrders: [sellOrder(1 * M, 1000)], destOrders: baseDest(), destDays: baseDays(), now: NOW });
 	assert.equal(report.volume, 10 * 5 - 7);
@@ -270,6 +283,7 @@ test('regression: realistic fixture produces the full report shape', () => {
 		'dailyDemand',
 		'dailyProfitMil',
 		'dailyProfitOldMil',
+		'daysOfSupply',
 		'daysSinceSellerUpdate',
 		'daysToClear',
 		'filteredReason',
@@ -294,6 +308,7 @@ test('regression: realistic fixture produces the full report shape', () => {
 		dailyProfitMil: 11.3,
 		dailyProfitOldMil: 11.1, // roundNonZero truncates
 		daysToClear: 4.94, // (5 + 9) / 2.83
+		daysOfSupply: 3.17, // 9 within 25% of sellPrice (31.0M is outside) / ~2.834
 		competingVolume: 9, // 24.5M x6 and 26.0M x3 are within 10% of 24.5M - 0.01
 		dailyDemand: 2.83,
 		activeSellers: 2,
