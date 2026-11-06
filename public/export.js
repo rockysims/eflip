@@ -292,31 +292,27 @@ document.addEventListener('DOMContentLoaded', async () => {
 	const typeIds = (await getTypeIds(END_REGION_ID));
 	// const typeIds = (await getTypeIds(END_REGION_ID)).slice(0, 1000);
 	// const typeIds = [35947, 61207, 90459, 54754, 49099, 34306, 12221, 34290, 4348, 16272];
-	// const typeIds = [33900];
+	// const typeIds = [91570, 31390];
 
 
 
 
 	
 	const alwaysShowNames = [
-		'10000MN Monopropellant Enduring Afterburner',
-		'Arch Angel EMP XL',
 		'Blood Brass Tag',
-		'Blood Crystal Tag',
-		// 'Blood Silver Tag',
+		'Capital Compact Pb-Acid Cap Battery',
+		'Corelum A-Type Kinetic Energized Membrane',
 		'Corelum B-Type Thermal Energized Membrane',
-		'Gravid Ice Harvester Mutaplasmid',
-		'Large Projectile Metastasis Adjuster II',
-		'Lattice Locked Dekaisogen',
-		'Mobile Phase Anchor',
-		'Small Pulse Laser Battery',
-		'Standup Ballistic Control System I',
+		'Decayed Damage Control Mutaplasmid',
+		'Information Command Burst I',
+		'Ladar Sensor Cluster',
+		'Large Polycarbon Engine Housing II',
+		'Noctis Refined Resourcer SKIN',
+		'Reaction-Orienting Neurolink Stabilizer',
+		'Republic Fleet Rocket Launcher',
+		'Standup Flak Round I',
+		'Standup M-Set Energy Neutralizer Economy I',
 		'Standup Radar ECM Script',
-		'Trinary State Processor',
-		'Void XL',
-
-		'Domination Torpedo Launcher',
-		'Variegated Asteroid Mining Crystal Type B I',
 	];
 	const alwaysShowTypeIds = await Promise.all(alwaysShowNames.map(name => getTypeIdByName(name)));
 	for (let typeId of alwaysShowTypeIds) {
@@ -324,9 +320,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 			typeIds.push(typeId);
 		}
 	}
-
-
-
 
 	outputElem.innerHTML = `Processing`;
 
