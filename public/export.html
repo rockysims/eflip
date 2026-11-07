@@ -20,6 +20,9 @@
 			font-family: system-ui, sans-serif;
 			font-size: 13px;
 			margin: 8px;
+			/* span the (wide) table so sticky children can pin to the viewport's left edge */
+			width: max-content;
+			min-width: calc(100vw - 16px);
 		}
 		.dim {
 			color: rgb(150, 150, 150);
@@ -106,11 +109,16 @@
 			width: 3em;
 		}
 		#totals {
+			/* sticky on both axes: stays at the top, and spans the viewport even when the wide table
+			   has scrolled the page horizontally (body margin is 8px, hence the -8px / +16px) */
 			position: sticky;
 			top: 0;
+			left: 0;
 			z-index: 2;
-			padding: 8px 0;
-			margin: 4px 0;
+			box-sizing: border-box;
+			width: 100vw;
+			margin: 4px 0 4px -8px;
+			padding: 8px 8px;
 			background: #fff;
 			border-top: 1px solid #bbb;
 			border-bottom: 1px solid #bbb;
