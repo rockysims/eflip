@@ -408,12 +408,11 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 
 	// quantity = what the Copy button writes (equals the recommended volume when factor is 1)
 	const orderQty = (row) => Math.ceil(row.report.volume * row.factor);
-	// Order totals, in millions. The broker (listing) fee sits on the cost side; revenue is net of
-	// sales tax only. revenue − cost = quantity × profit/item, the same as the per-item figures.
+	// Order totals, in millions. Revenue is net of sales tax and the broker (listing) fee; cost is
+	// buy price plus hauling. revenue − cost = quantity × profit/item, the same as the per-item figures.
 	const sellPriceOf = (row) => row.report.sellPriceMil ?? (row.report.revenuePerItemMil / (1 - SELL_TAX));
-	const brokerFeePerItem = (row) => sellPriceOf(row) * BROKER_FEE;
-	const orderCost = (row) => (row.report.costPerItemMil + brokerFeePerItem(row)) * orderQty(row);
-	const orderRevenue = (row) => sellPriceOf(row) * (1 - SALES_TAX) * orderQty(row);
+	const orderCost = (row) => row.report.costPerItemMil * orderQty(row);
+	const orderRevenue = (row) => row.report.revenuePerItemMil * orderQty(row);
 	const orderProfit = (row) => orderRevenue(row) - orderCost(row);
 	const fmtTotal = (v) => v === null || v === undefined ? '' : roundNonZero(Math.round(v * 1000) / 1000, 3);
 	const km3Of = (row) => Math.ceil(orderQty(row) * (row.m3 || 0)) / 1000;
@@ -457,11 +456,11 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			help: `sell price − ${pct(SELL_TAX)} broker fee and sales tax. Sell price = the lower of (cheapest destination listing − 0.01) and the recent sell-side trade average`,
 			tip: (r) => `sell price ${mil(r.report.sellPriceMil)} − ${pct(SELL_TAX)} tax (cheapest listing ${mil(r.report.destBestSellPriceMil)})` },
 		{ key: 'orderCost', label: 'order cost', val: orderCost, fmt: fmtTotal,
-			help: `quantity × (cost/item + ${pct(BROKER_FEE)} listing fee on the sell price), in millions`,
-			tip: (r) => `${nf.format(orderQty(r))} × (${mil(r.report.costPerItemMil)} + ${mil(Math.round(brokerFeePerItem(r) * 1000) / 1000)} listing fee)` },
+			help: `quantity × cost/item (buy price + ${pct(HAULING_REWARD_FRACTION)} hauling), in millions`,
+			tip: (r) => `${nf.format(orderQty(r))} × ${mil(r.report.costPerItemMil)}` },
 		{ key: 'orderRevenue', label: 'order revenue', val: orderRevenue, fmt: fmtTotal,
-			help: `quantity × sell price − ${pct(SALES_TAX)} sales tax, in millions`,
-			tip: (r) => `${nf.format(orderQty(r))} × ${mil(sellPriceOf(r))} − ${pct(SALES_TAX)}` },
+			help: `quantity × (sell price − ${pct(SALES_TAX)} sales tax − ${pct(BROKER_FEE)} listing fee), in millions`,
+			tip: (r) => `${nf.format(orderQty(r))} × (${mil(sellPriceOf(r))} − ${pct(SALES_TAX)} − ${pct(BROKER_FEE)})` },
 		{ key: 'daysToClear', label: 'days to clear', val: (r) => num(r.report.daysToClear), fmt: fmtRoi,
 			help: `(recommended quantity + competing stock within ${pct(cfg.COMPETE_BAND)} above the sell price) ÷ demand per day`,
 			tip: (r) => `(${nf.format(r.report.volume)} + ${nf.format(r.report.competingVolume)} competing) ÷ ${r.report.dailyDemand}/day` },
