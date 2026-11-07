@@ -20,7 +20,7 @@
 		MIN_ROI: 1.5,
 		SELL_TAX: 0.08 + 0.024,
 		COMPETE_BAND: 0.10,
-		SUPPLY_BAND: 0.25,
+		SUPPLY_BAND: 0.75,
 		ORDINARY_PRICE_DAYS: 90,
 		RECENCY_HALF_LIFE_DAYS: 30,
 		RECENT_THRESHOLD_DAYS: 10,
@@ -232,7 +232,6 @@
 			const ordinaryPrice = getOrdinaryPrice(ordinaryDays) || 0;
 
 			const { dailyDemand, activeDays, destSellPrices } = calcDemand(daysAsc, ordinaryPrice, srcBestSellPrice, now, c);
-			const destSellers = calcDestSellers(destSellOrders, now, c);
 
 			//calc sellPrice (undercut the best dest order, but never above the recent average)
 			const destRecentAverageSellPrice = destSellPrices.length > 0
@@ -252,12 +251,19 @@
 					.filter(order => order.price <= sellPrice * (1 + c.COMPETE_BAND))
 					.reduce((acc, order) => acc + order.volume_remain, 0);
 
-			//calc supplyVolume (dest stock priced close enough to our sellPrice to matter for how long the market takes to absorb it)
+			//dest orders priced close enough to our sellPrice to matter (within SUPPLY_BAND above it). Sellers
+			//parked far above the market are neither supply nor competition. Without a sellPrice, all orders.
+			const inBandDestSellOrders = sellPrice === null
+				? destSellOrders
+				: destSellOrders.filter(order => order.price <= sellPrice * (1 + c.SUPPLY_BAND));
+
+			//calc supplyVolume (dest stock we'd have to sell through, or alongside, before the price steps up)
 			const supplyVolume = sellPrice === null
 				? 0
-				: destSellOrders
-					.filter(order => order.price <= sellPrice * (1 + c.SUPPLY_BAND))
-					.reduce((acc, order) => acc + order.volume_remain, 0);
+				: inBandDestSellOrders.reduce((acc, order) => acc + order.volume_remain, 0);
+
+			//calc active sellers / days idle among in-band orders only
+			const destSellers = calcDestSellers(inBandDestSellOrders, now, c);
 
 			//calc buy cap over the horizon
 			const cap = Math.max(0, dailyDemand * c.DAYS_TO_COMPLETE - competingVolume);

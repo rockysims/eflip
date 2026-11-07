@@ -101,10 +101,10 @@ test('competing volume counts only dest orders within the band', () => {
 });
 
 test('days of supply counts dest orders within SUPPLY_BAND of sellPrice; null without demand or sellPrice', () => {
-	const destOrders = [sellOrder(1 * M, 4), sellOrder(1.2 * M, 6), sellOrder(1.3 * M, 50)];
+	const destOrders = [sellOrder(1 * M, 4), sellOrder(1.6 * M, 6), sellOrder(1.8 * M, 50)];
 	const report = computeItemReport({ srcOrders: [sellOrder(0.1 * M, 1000)], destOrders, destDays: baseDays(), now: NOW });
 	assert.equal(report.dailyDemand, 10);
-	assert.equal(report.daysOfSupply, 1); // (4 + 6) / 10; the 1.3M order is outside the 25% band
+	assert.equal(report.daysOfSupply, 1); // (4 + 6) / 10; the 1.8M order is outside the 75% band (edge 1.7325M)
 
 	const noDemand = computeItemReport({ srcOrders: [sellOrder(0.1 * M, 1000)], destOrders, destDays: [], now: NOW });
 	assert.equal(noDemand.daysOfSupply, null);
@@ -312,7 +312,7 @@ test('regression: realistic fixture produces the full report shape', () => {
 		dailyProfitMil: 11.3,
 		dailyProfitOldMil: 11.1, // roundNonZero truncates
 		daysToClear: 4.94, // (5 + 9) / 2.83
-		daysOfSupply: 3.17, // 9 within 25% of sellPrice (31.0M is outside) / ~2.834
+		daysOfSupply: 6.7, // 19 within 75% of sellPrice (31.0M is inside) / ~2.834
 		competingVolume: 9, // 24.5M x6 and 26.0M x3 are within 10% of 24.5M - 0.01
 		dailyDemand: 2.83,
 		activeSellers: 2,
@@ -367,4 +367,20 @@ test('buy-order-fill days do not drag the recent high cap down', () => {
 	});
 	assert.ok(report.volume > 0, `volume ${report.volume}`);
 	assert.ok(report.revenuePerItemMil > 12, `revenuePerItemMil ${report.revenuePerItemMil}`);
+});
+
+test('active sellers and days idle only count dest orders within SUPPLY_BAND of sellPrice', () => {
+	// Best dest order 1M (fresh) plus a joke order at 10M (fresher still). sellPrice ~1M, band edge 1.75M,
+	// so the 10M order is neither supply nor a seller.
+	const destOrders = [sellOrder(1 * M, 4, 48), sellOrder(10 * M, 6, 1)];
+	const report = computeItemReport({ srcOrders: [sellOrder(0.1 * M, 1000)], destOrders, destDays: baseDays(), now: NOW });
+	assert.equal(report.activeSellers, 1);
+	assert.equal(report.daysSinceSellerUpdate, 2);
+	assert.equal(report.daysOfSupply, 0.4);
+
+	// Only the joke order, with history at 1M so the sell price stays ~1M: no in-band sellers at all.
+	const onlyJoke = computeItemReport({ srcOrders: [sellOrder(0.1 * M, 1000)], destOrders: [sellOrder(10 * M, 6, 1)], destDays: flatHistory(1, 30, 1 * M, 10), now: NOW });
+	assert.equal(onlyJoke.activeSellers, null);
+	assert.equal(onlyJoke.daysSinceSellerUpdate, null);
+	assert.equal(onlyJoke.daysOfSupply, 0);
 });
