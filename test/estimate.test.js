@@ -36,7 +36,7 @@ const baseDays = () => flatHistory(1, 30, 10 * M, 10);
 const baseDest = () => [
 	sellOrder(9 * M, 3),
 	sellOrder(9.8 * M, 4), // inside the 10% band
-	sellOrder(10 * M, 5)   // outside
+	sellOrder(10 * M, 5, 60 * 24) // outside the 10% band, and 60 days idle so it carries no rival weight
 ];
 const SELL_PRICE = 9 * M - 0.01;
 const REVENUE_PER_ITEM = SELL_PRICE * (1 - defaultConfig.SELL_TAX);
@@ -241,7 +241,7 @@ test('applyFilters reasons', () => {
 	assert.equal(applyFilters({ ...ok, dailyProfitMil: 2, daysSinceSellerUpdate: 0.5 }, {}), 'seller updated too recently');
 	assert.equal(applyFilters({ ...ok, dailyProfitMil: 2, daysSinceSellerUpdate: 1.01 }, {}), null);
 	// 5 sellers updated 2 days ago => adjusted 4.55; 5.55 > ROI 3 and dailyProfit 10 < 13.65
-	assert.equal(applyFilters({ ...ok, revenuePerItemMil: 3, dailyProfitMil: 10, activeSellers: 5, daysSinceSellerUpdate: 2 }, {}), 'too much competition');
+	assert.equal(applyFilters({ ...ok, revenuePerItemMil: 3, dailyProfitMil: 10, activeSellers: 5, daysSinceSellerUpdate: 2, rivals: 5 }, {}), 'too much competition');
 	assert.equal(applyFilters({ ...ok, revenuePerItemMil: 3, dailyProfitMil: 20, activeSellers: 5, daysSinceSellerUpdate: 2 }, {}), null);
 	// every reason is bypassed for always-show
 	assert.equal(applyFilters({ ...ok, activeDaysFraction: 0 }, { isAlwaysShow: true }), null);
@@ -295,6 +295,7 @@ test('regression: realistic fixture produces the full report shape', () => {
 		'profitPerItemMil',
 		'revenuePerItemMil',
 		'roi',
+		'rivals',
 		'volume',
 		...CONTEXT_KEYS
 	].sort());
@@ -323,11 +324,12 @@ test('regression: realistic fixture produces the full report shape', () => {
 		revenuePerItemMil: 21.95,
 		profitPerItemMil: 11.17,
 		roi: 2.04,
-		dailyProfitMil: 11.3,
+		dailyProfitMil: 11.2, // 55.85 / 4.97
 		dailyProfitOldMil: 11.1, // roundNonZero truncates
-		daysToClear: 4.94, // (5 + 9) / 2.83
+		daysToClear: 4.97, // (5 + 9.08) / 2.83
 		daysOfSupply: 6.7, // 19 within 75% of sellPrice (31.0M is inside) / ~2.834
-		competingVolume: 9, // 24.5M x6 and 26.0M x3 are within 10% of 24.5M - 0.01
+		competingVolume: 9.08, // 24.5M x6 and 26.0M x3 within 10% of 24.5M - 0.01, plus 31.0M x10 at its rival weight 0.75^16.7
+		rivals: 1.26, // 0.75^1.25 + 0.75^2.08 + 0.75^16.7 (all within the 75% band)
 		dailyDemand: 2.83,
 		activeSellers: 2,
 		daysSinceSellerUpdate: 1.25,
@@ -414,4 +416,32 @@ test('days priced at or below the best dest buy order are buy-order fills and ad
 	// A buy order well below the traded price (0.02M vs 0.05M) does not reclassify the days.
 	const lowBuy = computeItemReport({ srcOrders: [sellOrder(0.01 * M, 100000)], destOrders: [{ ...buyOrder, price: 0.02 * M }], destDays: days, now: NOW });
 	assert.equal(lowBuy.dailyDemand, 1000);
+});
+
+test('rivals: recency decays 0.75 per idle day, proximity falls as 1/multiple^2 beyond the band edge', () => {
+	// sellPrice ~1M (best dest order 1M), band edge 1.75M.
+	const day = 24;
+	// A fresh 1M order anchors the sell price in every case and itself counts 1 (or 0.75^2 when 2 days idle).
+	const cases = [
+		{ orders: [sellOrder(1 * M, 1, 0)], expect: 1 },
+		{ orders: [sellOrder(1 * M, 1, 2 * day)], expect: 0.5625 },
+		{ orders: [sellOrder(1 * M, 1, 0), sellOrder(3.5 * M, 1, 0)], expect: 1.25 },        // twice the band edge: 1/2^2
+		{ orders: [sellOrder(1 * M, 1, 0), sellOrder(17.5 * M, 1, 0)], expect: 1.01 },       // ten times the edge
+		{ orders: [sellOrder(1 * M, 1, 0), sellOrder(3.5 * M, 1, 2 * day)], expect: 1.1406 } // 1 + 0.25 * 0.75^2
+	];
+	for (const { orders, expect } of cases) {
+		const report = computeItemReport({ srcOrders: [sellOrder(0.1 * M, 1000)], destOrders: orders, destDays: baseDays(), now: NOW });
+		approx(report.rivals, expect, 0.011);
+	}
+});
+
+test('out-of-band stock counts toward competing volume only by its rival weight', () => {
+	// best dest order 1M x 3 (fresh): in the 10% band => counts fully.
+	// 3.5M x 100 fresh: outside the band, weight 0.25 => 25 units.
+	const destOrders = [sellOrder(1 * M, 3, 0), sellOrder(3.5 * M, 100, 0)];
+	const report = computeItemReport({ srcOrders: [sellOrder(0.1 * M, 1000)], destOrders, destDays: baseDays(), now: NOW });
+	assert.equal(report.competingVolume, 28);
+	// the same 100 units twelve days idle contribute ~0.25 * 0.75^12 * 100 = 0.79
+	const stale = computeItemReport({ srcOrders: [sellOrder(0.1 * M, 1000)], destOrders: [sellOrder(1 * M, 3, 0), sellOrder(3.5 * M, 100, 12 * 24)], destDays: baseDays(), now: NOW });
+	approx(stale.competingVolume, 3.79, 0.02);
 });

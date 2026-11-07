@@ -22,6 +22,8 @@
 		COMPETE_BAND: 0.10,
 		SUPPLY_BAND: 0.75,
 		BUY_SIDE_MARGIN: 0.10, // a day priced at or below best dest buy order * (1 + this) is a buy-order-fill day
+		RIVAL_RECENCY_DECAY: 0.75, // a seller's chance of undercutting us multiplies by this per day since they touched their order
+		RIVAL_PROXIMITY_POWER: 2,  // ...and falls off as 1 / (price multiple above the SUPPLY_BAND edge) ^ this
 		ORDINARY_PRICE_DAYS: 90,
 		RECENCY_HALF_LIFE_DAYS: 30,
 		RECENT_THRESHOLD_DAYS: 10,
@@ -252,12 +254,30 @@
 			const sellPrice = sellPriceCandidates.length > 0 ? Math.min(...sellPriceCandidates) : null;
 			const revenuePerItem = sellPrice === null ? 0 : sellPrice * (1 - c.SELL_TAX);
 
-			//calc competingVolume (dest stock we'd have to sell through first, or alongside)
+			//rivals: each dest sell order's chance of undercutting us = recency (decays per idle day: an
+			//active seller notices quickly) × proximity (1 within SUPPLY_BAND above our sellPrice, then
+			//1 / multiple^POWER beyond the band edge: a seller parked far above is unlikely to chase us).
+			//Sums to an expected number of competitors; an active seller at 10x our price still counts a little.
+			const rivalWeight = (order) => {
+				if (sellPrice === null) return 0;
+				const idleDays = Math.max(0, now.getTime() - new Date(order.issued).getTime()) / DAY_MS;
+				const recency = Math.pow(c.RIVAL_RECENCY_DECAY, idleDays);
+				const multiple = order.price / (sellPrice * (1 + c.SUPPLY_BAND));
+				const proximity = multiple <= 1 ? 1 : Math.pow(1 / multiple, c.RIVAL_PROXIMITY_POWER);
+				const weight = recency * proximity;
+				return weight < 0.001 ? 0 : weight; // noise cutoff
+			};
+			const rivals = destSellOrders.reduce((acc, order) => acc + rivalWeight(order), 0);
+
+			//calc competingVolume: dest stock priced within COMPETE_BAND of our sellPrice sells before or
+			//alongside ours whatever its age; stock priced above that joins in only if its seller undercuts
+			//us, so it counts weighted by that chance (rivalWeight).
 			const competingVolume = sellPrice === null
 				? 0
-				: destSellOrders
-					.filter(order => order.price <= sellPrice * (1 + c.COMPETE_BAND))
-					.reduce((acc, order) => acc + order.volume_remain, 0);
+				: destSellOrders.reduce((acc, order) => {
+					const inBand = order.price <= sellPrice * (1 + c.COMPETE_BAND);
+					return acc + order.volume_remain * (inBand ? 1 : rivalWeight(order));
+				}, 0);
 
 			//dest orders priced close enough to our sellPrice to matter (within SUPPLY_BAND above it). Sellers
 			//parked far above the market are neither supply nor competition. Without a sellPrice, all orders.
@@ -338,7 +358,8 @@
 			const common = {
 				daysToClear: daysToClearRaw === null ? null : round2(daysToClearRaw),
 				daysOfSupply: daysOfSupplyRaw === null ? null : round2(daysOfSupplyRaw),
-				competingVolume,
+				competingVolume: round2(competingVolume),
+				rivals: round2(rivals),
 				dailyDemand: round2(dailyDemand),
 				activeSellers: destSellers.sellerCount,
 				daysSinceSellerUpdate: destSellers.daysSinceSellerUpdate,
@@ -415,10 +436,11 @@
 			return 'seller updated too recently';
 		}
 
-		const adjustedActiveSellers = report.activeSellers * (0.1 + Math.pow(0.9, Math.max(1, report.daysSinceSellerUpdate)));
+		//rivals = expected number of sellers who will undercut us (recency × proximity weighted)
+		const rivals = report.rivals || 0;
 		if (
-			adjustedActiveSellers + 1 > report.revenuePerItemMil / report.costPerItemMil //poor percentage profit (relative to competition)
-			&& report.dailyProfitMil < adjustedActiveSellers * 3 //poor absolute profit (relative to competition)
+			rivals + 1 > report.revenuePerItemMil / report.costPerItemMil //poor percentage profit (relative to competition)
+			&& report.dailyProfitMil < rivals * 3 //poor absolute profit (relative to competition)
 		) {
 			return 'too much competition';
 		}

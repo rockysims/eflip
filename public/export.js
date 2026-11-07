@@ -434,7 +434,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			tip: (r) => `${mil(r.report.revenuePerItemMil)} ÷ ${mil(r.report.costPerItemMil)}` },
 		{ key: 'factor', label: 'factor', val: (r) => r.factor, help: 'multiplier on the recommended quantity; quantity = ceil(recommended × factor)' },
 		{ key: 'qty', label: 'quantity', val: orderQty, fmt: fmtNum,
-			help: `ceil(recommended × factor). Recommended = ${DAYS_TO_COMPLETE} days of demand minus competing stock within ${pct(cfg.COMPETE_BAND)} above the sell price, bought up the source book while each order still clears ${cfg.MIN_ROI}x ROI`,
+			help: `ceil(recommended × factor). Recommended = ${DAYS_TO_COMPLETE} days of demand minus competing stock (within ${pct(cfg.COMPETE_BAND)} above the sell price in full, dearer stock by its seller's rival weight), bought up the source book while each order still clears ${cfg.MIN_ROI}x ROI`,
 			tip: (r) => `${nf.format(r.report.volume)} recommended × factor ${r.factor} (demand ${r.report.dailyDemand}/day × ${DAYS_TO_COMPLETE} days − ${nf.format(r.report.competingVolume)} competing)` },
 		{ key: 'daysOfSupply', label: 'days of supply', val: (r) => num(r.report.daysOfSupply), fmt: fmtRoi,
 			help: `units listed at the destination ${SUPPLY_BAND_TXT} ÷ demand per day: how long until the cheap stock is gone and the price steps up`,
@@ -442,6 +442,9 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		{ key: 'activeSellers', label: 'active sellers', val: (r) => num(r.report.activeSellers), fmt: fmtNum,
 			help: `destination sell orders ${SUPPLY_BAND_TXT} that were placed or changed within 24h of the newest such order; empty when none are in range`,
 			tip: (r) => `${nf.format(r.report.destSellOrderCount)} sell orders at the station, cheapest ${mil(r.report.destBestSellPriceMil)}; ${r.report.activeSellers ?? 0} active ${SUPPLY_BAND_TXT} (${mil(r.report.sellPriceMil)}); best buy order ${mil(r.report.destBestBuyPriceMil)}` },
+		{ key: 'rivals', label: 'rivals', val: (r) => num(r.report.rivals), fmt: fmtRoi,
+			help: `expected number of sellers who will undercut you: every sell order at the station counts its chance = ${cfg.RIVAL_RECENCY_DECAY} per idle day since it was touched × 1 within ${pct(cfg.SUPPLY_BAND)} above the sell price, falling as 1/multiple² beyond that. Drives the "too much competition" filter and weights out-of-band stock in competing volume`,
+			tip: (r) => `${r.report.rivals ?? '?'} expected rivals among ${nf.format(r.report.destSellOrderCount)} sell orders (sell price ${mil(r.report.sellPriceMil)})` },
 		{ key: 'daysSinceSellerUpdate', label: 'days idle', val: (r) => num(r.report.daysSinceSellerUpdate), fmt: fmtRoi,
 			help: `days since the newest in-range destination sell order (${SUPPLY_BAND_TXT}) was placed or changed` },
 		{ key: 'km3', label: 'km3', val: km3Of, fmt: fmtNum, help: 'packaged volume of the order quantity, in thousands of m3',
@@ -465,7 +468,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			help: 'order revenue − order cost, in millions',
 			tip: (r) => `${fmtTotal(orderRevenue(r))} − ${fmtTotal(orderCost(r))}` },
 		{ key: 'daysToClear', label: 'days to clear', val: (r) => num(r.report.daysToClear), fmt: fmtRoi,
-			help: `(recommended quantity + competing stock within ${pct(cfg.COMPETE_BAND)} above the sell price) ÷ demand per day`,
+			help: `(recommended quantity + competing stock: within ${pct(cfg.COMPETE_BAND)} above the sell price in full, dearer stock by its seller's rival weight) ÷ demand per day`,
 			tip: (r) => `(${nf.format(r.report.volume)} + ${nf.format(r.report.competingVolume)} competing) ÷ ${r.report.dailyDemand}/day` }
 	];
 	const sortValue = (col, row) => col.sort ? col.sort(row) : col.val(row);
