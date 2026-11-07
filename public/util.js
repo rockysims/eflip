@@ -256,7 +256,18 @@ const util = (() => {
 	};
 	
 	// Resolves {data, headers}; headers is null when data came from the local cache.
-	const getOrFetchRaw = async (url, hoursStaleLimit = -1, accessToken = null, options = {}) => {
+	// Concurrent calls for the same URL share one in-flight request.
+	const inFlightByUrl = new Map();
+	const getOrFetchRaw = (url, hoursStaleLimit = -1, accessToken = null, options = {}) => {
+		const existing = inFlightByUrl.get(url);
+		if (existing) return existing;
+		const promise = getOrFetchRawUncached(url, hoursStaleLimit, accessToken, options)
+			.finally(() => { if (inFlightByUrl.get(url) === promise) inFlightByUrl.delete(url); });
+		inFlightByUrl.set(url, promise);
+		if (options && options.onEach) promise.then(() => options.onEach(), () => options.onEach());
+		return promise;
+	};
+	const getOrFetchRawUncached = async (url, hoursStaleLimit = -1, accessToken = null, options = {}) => {
 		const signal = signalOf(options);
 		throwIfAborted(signal);
 		const path = `${url.replace(/[^a-zA-Z0-9]+/g, '')}.json`;
@@ -281,31 +292,50 @@ const util = (() => {
 	
 	//---
 	
-	const getTypeIds = async (regionId, options = {}) => {
-		const urlForPage = p => `https://esi.evetech.net/latest/markets/${regionId}/types/?datasource=tranquility&page=${p}`;
-		const pagesPath = `marketTypesPages${regionId}.json`;
-		
-		const first = await getOrFetchRaw(urlForPage(1), 8, null, options);
-		let pages = 16;
+	// Fetches every page of a paginated ESI resource. Page 1's X-Pages header decides the page
+	// count; when page 1 comes from the local cache the count saved alongside it is used (else
+	// fallbackPages). Resolves the array of page bodies (null for a failed page).
+	const getAllPages = async (urlForPage, hoursStaleLimit, pagesPath, fallbackPages, options = {}) => {
+		const first = await getOrFetchRaw(urlForPage(1), hoursStaleLimit, null, options);
+		let pages = fallbackPages;
 		const headerPages = first.headers ? parseInt(first.headers.get('X-Pages'), 10) : NaN;
 		if (!isNaN(headerPages) && headerPages > 0) {
 			pages = headerPages;
 			await saveJson(pagesPath, { pages });
 		} else if (!first.headers) {
-			// Page 1 came from the local cache; use the page count saved alongside it (else 16).
-			const saved = await loadJson(pagesPath, 8).catch(() => null);
+			const saved = await loadJson(pagesPath, hoursStaleLimit).catch(() => null);
 			if (saved && saved.pages > 0) pages = saved.pages;
 		}
-		
+		if (options && options.onTotal) options.onTotal(pages);
 		const promises = [Promise.resolve(first.data)];
 		for (let p = 2; p <= pages; p++) {
-			promises.push(getOrFetch(urlForPage(p), 8, null, options));
+			promises.push(getOrFetch(urlForPage(p), hoursStaleLimit, null, options));
 		}
-		return Promise.all(promises).then(results => {
-			return results
-				.filter(result => Array.isArray(result))
-				.flat()//.slice(0, 1000);
-		});
+		return Promise.all(promises);
+	};
+	
+	const getTypeIds = async (regionId, options = {}) => {
+		const urlForPage = p => `https://esi.evetech.net/latest/markets/${regionId}/types/?datasource=tranquility&page=${p}`;
+		const pages = await getAllPages(urlForPage, 8, `marketTypesPages${regionId}.json`, 16, options);
+		return pages.filter(result => Array.isArray(result)).flat();
+	};
+	
+	// Every order in a region (both sides unless orderType is 'buy'/'sell'), as one flat array.
+	// A few hundred requests for a big region, versus one per type: use this when many types are
+	// needed, since ESI's market-order rate limit (12000 per 15 min per IP) counts requests.
+	// Pages are a snapshot taken over a few seconds; orders can shift between pages meanwhile.
+	// onPage(doneCount, totalCount) reports progress (totalCount is null until page 1 has answered).
+	const getRegionOrders = async (regionId, orderType = 'all', hoursStaleLimit = 0.5, options = {}, onPage = null) => {
+		const urlForPage = p => `https://esi.evetech.net/latest/markets/${regionId}/orders/?datasource=tranquility&order_type=${orderType}&page=${p}`;
+		let done = 0;
+		let total = null;
+		const wrapped = onPage
+			? { ...options, onEach: () => onPage(++done, total), onTotal: (t) => { total = t; onPage(done, total); } }
+			: options;
+		const pages = await getAllPages(urlForPage, hoursStaleLimit, `marketOrdersPages${regionId}${orderType}.json`, 1, wrapped);
+		const failed = pages.filter(page => !Array.isArray(page)).length;
+		if (failed > 0) console.warn(`getRegionOrders(${regionId}): ${failed} of ${pages.length} pages failed`);
+		return pages.filter(page => Array.isArray(page)).flat();
 	};
 	
 	const getDays = async (regionId, typeId, options = {}) => {
@@ -432,6 +462,7 @@ const util = (() => {
 	
 	return {
 		getTypeIds,
+		getRegionOrders,
 		getDays,
 		getOrders,
 		getCharacterWalletTransactions,

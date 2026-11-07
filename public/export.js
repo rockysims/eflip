@@ -75,13 +75,46 @@ const isAbort = (e) => !!e && e.name === 'AbortError';
 
 // Runs one report. Calls onRow({typeId, name, m3, report, isAlwaysShow}) for every report (filtered ones too).
 // Calls onProgress at least every 500ms.
+// Loads both regions' order books once (a few hundred paginated requests instead of two per type:
+// ESI's market-order rate limit counts requests) and indexes them by type, station-filtered.
+// Resolves {src: Map typeId -> sell orders at the start station, dest: Map typeId -> all orders at
+// the end station}. onProgress(done, total) reports pages fetched.
+const loadBooks = async ({ start, end, options = {}, onProgress = () => {} }) => {
+	const counts = [{ done: 0, total: null }, { done: 0, total: null }];
+	const report = () => onProgress(
+		counts[0].done + counts[1].done,
+		counts[0].total === null || counts[1].total === null ? null : counts[0].total + counts[1].total
+	);
+	const onPage = (i) => (done, total) => { counts[i] = { done, total }; report(); };
+	const [srcAll, destAll] = await Promise.all([
+		util.getRegionOrders(start.regionId, 'sell', 0.5, options, onPage(0)),
+		util.getRegionOrders(end.regionId, 'all', 0.5, options, onPage(1))
+	]);
+	const index = (orders, stationId) => {
+		const byType = new Map();
+		for (const order of orders) {
+			if (order.location_id !== stationId) continue;
+			let list = byType.get(order.type_id);
+			if (!list) byType.set(order.type_id, list = []);
+			list.push(order);
+		}
+		return byType;
+	};
+	return { src: index(srcAll, start.stationId), dest: index(destAll, end.stationId) };
+};
+
 // Fetches the ESI data for one type and computes its report.
 // Resolves {typeId, name, m3, report, isAlwaysShow}; report is null when there is nothing to buy.
 // options ({signal, queue}) is passed through to util so callers can use their own request queue.
-const buildRow = async ({ start, end, typeId, isAlwaysShow, options = {} }) => {
+// With `books` (from loadBooks) the orders come from memory; otherwise one request per station.
+const buildRow = async ({ start, end, typeId, isAlwaysShow, books = null, options = {} }) => {
 	// 'all' returns buy and sell orders in one request; the estimate uses dest buy orders to spot buy-fill days.
-	const srcOrders = (await util.getOrders(start.regionId, typeId, 'all', 0.5, options)).filter(o => o.location_id === start.stationId);
-	const destOrders = (await util.getOrders(end.regionId, typeId, 'all', 0.5, options)).filter(o => o.location_id === end.stationId);
+	const srcOrders = books
+		? (books.src.get(typeId) || [])
+		: (await util.getOrders(start.regionId, typeId, 'all', 0.5, options)).filter(o => o.location_id === start.stationId);
+	const destOrders = books
+		? (books.dest.get(typeId) || [])
+		: (await util.getOrders(end.regionId, typeId, 'all', 0.5, options)).filter(o => o.location_id === end.stationId);
 	const destDays = await util.getDays(end.regionId, typeId, options);
 	const m3 = await util.getTypeM3(typeId, options);
 	const name = await util.getTypeName(typeId, options);
@@ -118,7 +151,7 @@ const resolveTypeNames = async (names, options = {}) => {
 
 // alwaysShowIds: already-resolved type ids to report regardless of triage/filters. isAlwaysShow(typeId) is
 // consulted when each report is built, so the caller may change the set while the run is going.
-const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new Set(), isAlwaysShow = (id) => alwaysShowIds.has(id), signal, onRow = () => {}, onProgress = () => {} }) => {
+const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new Set(), isAlwaysShow = (id) => alwaysShowIds.has(id), signal, onRow = () => {}, onProgress = () => {}, onBooks = () => {} }) => {
 	const start = STATIONS[startStationKey];
 	const end = STATIONS[endStationKey];
 	if (!start || !end) throw new Error(`unknown station (${startStationKey} -> ${endStationKey})`);
@@ -133,6 +166,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		rowsShown: 0,
 		rowsFiltered: 0,
 		noReport: 0,
+		books: { done: 0, total: null, loaded: false },
 		phase: 'typeIds'
 	};
 	const emit = () => onProgress({
@@ -146,6 +180,17 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	util.setAbortSignal(signal);
 	try {
 		emit();
+		// Order books load alongside the type list and triage; report tasks wait for them.
+		const booksPromise = loadBooks({
+			start,
+			end,
+			onProgress: (done, total) => { progress.books.done = done; progress.books.total = total; }
+		}).then(books => {
+			progress.books.loaded = true;
+			onBooks(books);
+			return books;
+		});
+		booksPromise.catch(() => {}); // surfaced where awaited
 		const typeIds = (await util.getTypeIds(end.regionId)).slice();
 
 		const alwaysShowIdSet = new Set(alwaysShowIds);
@@ -178,7 +223,9 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 				await acquire();
 				try {
 					if (aborted()) return;
-					const row = await buildRow({ start, end, typeId, isAlwaysShow: isAlwaysShow(typeId) });
+					const books = await booksPromise;
+					if (aborted()) return;
+					const row = await buildRow({ start, end, typeId, isAlwaysShow: isAlwaysShow(typeId), books });
 					progress.reportsDone++;
 					if (!row.report) {
 						progress.noReport++;
@@ -336,6 +383,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	let renderTimer = null;
 	let lastRenderAt = 0;
 	let currentRun = null; // {controller}
+	let currentBooks = null; // order books from the latest run (used by live always-show edits)
 	let reportGeneratedAt = null;
 
 	const route = () => `${startSel.value}-${endSel.value}`;
@@ -763,6 +811,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		const parts = [];
 		if (p.phase === 'typeIds') parts.push('loading type ids');
 		else {
+			if (p.books && !p.books.loaded) parts.push(`order books ${p.books.done}/${p.books.total ?? '?'} pages`);
 			parts.push(`triage ${p.triaged}/${p.typesTotal}`);
 			parts.push(`reports ${p.reportsDone}/${p.triagePassed} done`);
 			if (p.reportsFailed) parts.push(`${p.reportsFailed} failed`);
@@ -799,6 +848,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		setRunning(true);
 		try {
 			await syncAlwaysShow({ refreshRows: false });
+			currentBooks = null;
 			await runReport({
 				startStationKey: startSel.value,
 				endStationKey: endSel.value,
@@ -806,7 +856,8 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 				isAlwaysShow: (id) => alwaysShowIds.has(id),
 				signal: controller.signal,
 				onRow: addRow,
-				onProgress: showProgress
+				onProgress: showProgress,
+				onBooks: (books) => { currentBooks = books; }
 			});
 		} finally {
 			flushRows();
@@ -838,6 +889,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		}
 		lsSet('route', { start: startSel.value, end: endSel.value });
 		loadRouteState();
+		currentBooks = null; // books belong to a route
 		clearRows();
 		headerElem.textContent = '';
 		render();
@@ -937,7 +989,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			const end = STATIONS[endSel.value];
 			await Promise.all([...added, ...removed].map(async (typeId) => {
 				try {
-					const row = await buildRow({ start, end, typeId, isAlwaysShow: alwaysShowIds.has(typeId), options: liveOptions });
+					const row = await buildRow({ start, end, typeId, isAlwaysShow: alwaysShowIds.has(typeId), books: currentBooks, options: liveOptions });
 					if (row.report) addRow(row);
 				} catch (e) {
 					if (!isAbort(e)) console.error(`always-show refresh failed (typeId: ${typeId})`, e);
