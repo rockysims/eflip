@@ -16,7 +16,9 @@ const {
 		RENS_STATION_ID,
 		STACMON_STATION_ID,
 
-		SELL_TAX
+		SELL_TAX,
+		SALES_TAX,
+		BROKER_FEE
 	}
 } = util;
 
@@ -86,9 +88,12 @@ const loadBooks = async ({ start, end, options = {}, onProgress = () => {} }) =>
 		counts[0].total === null || counts[1].total === null ? null : counts[0].total + counts[1].total
 	);
 	const onPage = (i) => (done, total) => { counts[i] = { done, total }; report(); };
+	// Own queue, so the pages are not stuck behind the triage requests already queued; ESI's
+	// market-order limit (~13/s per IP) is the real pace.
+	const bookOptions = { ...options, queue: options.queue || util.createQueue({ concurrency: 12 }) };
 	const [srcAll, destAll] = await Promise.all([
-		util.getRegionOrders(start.regionId, 'sell', 0.5, options, onPage(0)),
-		util.getRegionOrders(end.regionId, 'all', 0.5, options, onPage(1))
+		util.getRegionOrders(start.regionId, 'sell', 0.5, bookOptions, onPage(0)),
+		util.getRegionOrders(end.regionId, 'all', 0.5, bookOptions, onPage(1))
 	]);
 	const index = (orders, stationId) => {
 		const byType = new Map();
@@ -403,8 +408,14 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 
 	// quantity = what the Copy button writes (equals the recommended volume when factor is 1)
 	const orderQty = (row) => Math.ceil(row.report.volume * row.factor);
-	const orderCost = (row) => row.report.costPerItemMil * orderQty(row);
-	const orderRevenue = (row) => row.report.revenuePerItemMil * orderQty(row);
+	// Order totals, in millions. The broker (listing) fee sits on the cost side; revenue is net of
+	// sales tax only. revenue − cost = quantity × profit/item, the same as the per-item figures.
+	const sellPriceOf = (row) => row.report.sellPriceMil ?? (row.report.revenuePerItemMil / (1 - SELL_TAX));
+	const brokerFeePerItem = (row) => sellPriceOf(row) * BROKER_FEE;
+	const orderCost = (row) => (row.report.costPerItemMil + brokerFeePerItem(row)) * orderQty(row);
+	const orderRevenue = (row) => sellPriceOf(row) * (1 - SALES_TAX) * orderQty(row);
+	const orderProfit = (row) => orderRevenue(row) - orderCost(row);
+	const fmtTotal = (v) => v === null || v === undefined ? '' : roundNonZero(Math.round(v * 1000) / 1000, 3);
 	const km3Of = (row) => Math.ceil(orderQty(row) * (row.m3 || 0)) / 1000;
 
 	// text: left aligned, sorts ascending first ; sort: custom sort value ; val/fmt: displayed number
@@ -445,9 +456,18 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		{ key: 'revenuePerItemMil', label: 'revenue/item', val: (r) => num(r.report.revenuePerItemMil), fmt: fmtMil,
 			help: `sell price − ${pct(SELL_TAX)} broker fee and sales tax. Sell price = the lower of (cheapest destination listing − 0.01) and the recent sell-side trade average`,
 			tip: (r) => `sell price ${mil(r.report.sellPriceMil)} − ${pct(SELL_TAX)} tax (cheapest listing ${mil(r.report.destBestSellPriceMil)})` },
+		{ key: 'orderCost', label: 'order cost', val: orderCost, fmt: fmtTotal,
+			help: `quantity × (cost/item + ${pct(BROKER_FEE)} listing fee on the sell price), in millions`,
+			tip: (r) => `${nf.format(orderQty(r))} × (${mil(r.report.costPerItemMil)} + ${mil(Math.round(brokerFeePerItem(r) * 1000) / 1000)} listing fee)` },
+		{ key: 'orderRevenue', label: 'order revenue', val: orderRevenue, fmt: fmtTotal,
+			help: `quantity × sell price − ${pct(SALES_TAX)} sales tax, in millions`,
+			tip: (r) => `${nf.format(orderQty(r))} × ${mil(sellPriceOf(r))} − ${pct(SALES_TAX)}` },
 		{ key: 'daysToClear', label: 'days to clear', val: (r) => num(r.report.daysToClear), fmt: fmtRoi,
 			help: `(recommended quantity + competing stock within ${pct(cfg.COMPETE_BAND)} above the sell price) ÷ demand per day`,
-			tip: (r) => `(${nf.format(r.report.volume)} + ${nf.format(r.report.competingVolume)} competing) ÷ ${r.report.dailyDemand}/day` }
+			tip: (r) => `(${nf.format(r.report.volume)} + ${nf.format(r.report.competingVolume)} competing) ÷ ${r.report.dailyDemand}/day` },
+		{ key: 'orderProfit', label: 'order profit', val: orderProfit, fmt: fmtTotal,
+			help: 'order revenue − order cost, in millions',
+			tip: (r) => `${fmtTotal(orderRevenue(r))} − ${fmtTotal(orderCost(r))}` }
 	];
 	const sortValue = (col, row) => col.sort ? col.sort(row) : col.val(row);
 	if (!COLUMNS.some(c => c.key === sort.key) || (sort.dir !== 'asc' && sort.dir !== 'desc')) {

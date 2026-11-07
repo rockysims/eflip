@@ -494,6 +494,8 @@ const util = (() => {
 			RENS_STATION_ID: 60004588,
 			STACMON_STATION_ID: 60011893,
 	
+			SALES_TAX: 0.08,   // on the sale
+			BROKER_FEE: 0.024, // on listing
 			SELL_TAX: 0.08 + 0.024,
 			BUY_TAX: 0.024
 		}
