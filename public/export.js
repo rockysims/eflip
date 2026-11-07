@@ -502,6 +502,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		for (const cell of tr.querySelectorAll('td[data-col]')) {
 			const col = COLUMNS.find(c => c.key === cell.dataset.col);
 			cell.textContent = col.fmt(col.val(row));
+			if (col.key === 'km3') cell.title = `${nf.format(row.m3 || 0)} m3 packaged per unit × ${nf.format(orderQty(row))}`;
 		}
 		const factorInput = tr.querySelector('input.factor');
 		if (document.activeElement !== factorInput && factorInput.value !== String(row.factor)) factorInput.value = row.factor;
@@ -556,7 +557,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 
 	// selected rows are always visible; else a search matches every row (filtered ones too); else the estimate filter applies
 	const isRowVisible = (row, query) => {
-		if (selected.has(row.typeId)) return true;
+		if (selected.has(row.typeId) || row.isAlwaysShow) return true;
 		if (query) return row.name.toLowerCase().includes(query);
 		return (showFiltered || !row.report.filteredReason) && passesColFilters(row);
 	};
@@ -586,7 +587,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	const updateSums = () => {
 		let cost = 0, revenue = 0, km3 = 0, count = 0, hiddenByColFilters = 0;
 		for (const row of rows) {
-			if (!selected.has(row.typeId) && !row.report.filteredReason && !passesColFilters(row)) hiddenByColFilters++;
+			if (!selected.has(row.typeId) && !row.isAlwaysShow && !row.report.filteredReason && !passesColFilters(row)) hiddenByColFilters++;
 			if (!selected.has(row.typeId)) continue;
 			cost += orderCost(row);
 			revenue += orderRevenue(row);
