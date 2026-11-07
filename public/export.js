@@ -506,6 +506,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		for (const cell of tr.querySelectorAll('td[data-col]')) {
 			const col = COLUMNS.find(c => c.key === cell.dataset.col);
 			cell.textContent = col.fmt(col.val(row));
+			if (col.key === 'km3') cell.title = `${nf.format(row.m3 || 0)} m3 packaged per unit × ${nf.format(orderQty(row))}`;
 		}
 		const factorInput = tr.querySelector('input.factor');
 		if (document.activeElement !== factorInput && factorInput.value !== String(row.factor)) factorInput.value = row.factor;
