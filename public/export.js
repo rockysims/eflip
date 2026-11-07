@@ -424,7 +424,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	const mil = (v) => v === null || v === undefined ? '?' : `${v}M`;
 	const SUPPLY_BAND_TXT = `within ${pct(cfg.SUPPLY_BAND)} above the sell price`;
 	const COLUMNS = [
-		{ key: 'select', label: '', sort: (r) => selected.has(r.typeId) ? 1 : 0, help: 'checked rows are always shown, summed in the totals and included in Copy orders' },
+		{ key: 'select', label: '', sort: (r) => selected.has(r.typeId) ? 1 : 0, help: 'checked rows are always shown, summed in the totals and included in Copy orders. Greyed rows are marked items.' },
 		{ key: 'name', label: 'name', sort: (r) => r.name.toLowerCase(), text: true, help: 'dim rows were filtered out; hover the name for the reason' },
 		{ key: 'dailyProfitMil', label: 'daily profit', val: (r) => num(r.report.dailyProfitMil), fmt: fmtMil,
 			help: 'profit on the recommended quantity ÷ max(days to clear, 1), in millions',

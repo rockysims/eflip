@@ -30,8 +30,8 @@
 		.pending {
 			color: red;
 		}
-		.alwaysShowItem .name {
-			text-decoration: line-through;
+		tr.alwaysShowItem td {
+			opacity: 0.7; /* marked items: greyed a little, whole row */
 		}
 		#controls {
 			display: flex;
@@ -189,8 +189,8 @@
 	</div>
 	<div id="progress" class="dim">idle</div>
 	<details id="alwaysShowDetails">
-		<summary class="dim">always show (one item name per line)</summary>
-		<textarea id="alwaysShowText" spellcheck="false"></textarea>
+		<summary class="dim">marked items</summary>
+		<textarea id="alwaysShowText" spellcheck="false" placeholder="One item name per line, exactly as shown in game, e.g.&#10;Griffin&#10;Small Pulse Laser Battery&#10;// lines starting with // are ignored&#10;&#10;Marked items always get a report and are never hidden by the filters, the min/max ranges or the search box."></textarea>
 		<div id="alwaysShowNote" class="dim"></div>
 	</details>
 	<div id="reportHeader"></div>
