@@ -79,8 +79,9 @@ const isAbort = (e) => !!e && e.name === 'AbortError';
 // Resolves {typeId, name, m3, report, isAlwaysShow}; report is null when there is nothing to buy.
 // options ({signal, queue}) is passed through to util so callers can use their own request queue.
 const buildRow = async ({ start, end, typeId, isAlwaysShow, options = {} }) => {
-	const srcOrders = (await util.getOrders(start.regionId, typeId, 'sell', 0.5, options)).filter(o => o.location_id === start.stationId);
-	const destOrders = (await util.getOrders(end.regionId, typeId, 'sell', 0.5, options)).filter(o => o.location_id === end.stationId);
+	// 'all' returns buy and sell orders in one request; the estimate uses dest buy orders to spot buy-fill days.
+	const srcOrders = (await util.getOrders(start.regionId, typeId, 'all', 0.5, options)).filter(o => o.location_id === start.stationId);
+	const destOrders = (await util.getOrders(end.regionId, typeId, 'all', 0.5, options)).filter(o => o.location_id === end.stationId);
 	const destDays = await util.getDays(end.regionId, typeId, options);
 	const m3 = await util.getTypeM3(typeId, options);
 	const name = await util.getTypeName(typeId, options);
@@ -359,21 +360,46 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	const km3Of = (row) => Math.ceil(orderQty(row) * (row.m3 || 0)) / 1000;
 
 	// text: left aligned, sorts ascending first ; sort: custom sort value ; val/fmt: displayed number
+	// Tooltip text. `help` is the column definition (on the header); `tip(row)` is the per-cell working.
+	const cfg = estimate.defaultConfig;
+	const pct = (f) => (Math.round(f * 1000) / 10) + '%';
+	const mil = (v) => v === null || v === undefined ? '?' : `${v}M`;
+	const SUPPLY_BAND_TXT = `within ${pct(cfg.SUPPLY_BAND)} above the sell price`;
 	const COLUMNS = [
-		{ key: 'select', label: '', sort: (r) => selected.has(r.typeId) ? 1 : 0 },
-		{ key: 'name', label: 'name', sort: (r) => r.name.toLowerCase(), text: true },
-		{ key: 'dailyProfitMil', label: 'daily profit', val: (r) => num(r.report.dailyProfitMil), fmt: fmtMil },
-		{ key: 'roi', label: 'ROI', val: (r) => num(r.report.roi), fmt: fmtRoi },
-		{ key: 'factor', label: 'factor', val: (r) => r.factor },
-		{ key: 'qty', label: 'quantity', val: orderQty, fmt: fmtNum },
-		{ key: 'daysOfSupply', label: 'days of supply', val: (r) => num(r.report.daysOfSupply), fmt: fmtRoi },
-		{ key: 'activeSellers', label: 'active sellers', val: (r) => num(r.report.activeSellers), fmt: fmtNum },
-		{ key: 'daysSinceSellerUpdate', label: 'days idle', val: (r) => num(r.report.daysSinceSellerUpdate), fmt: fmtRoi },
-		{ key: 'km3', label: 'km3', val: km3Of, fmt: fmtNum },
-		{ key: 'activeDaysFraction', label: 'active days', val: (r) => num(r.report.activeDaysFraction), fmt: fmtRoi },
-		{ key: 'costPerItemMil', label: 'cost/item', val: (r) => num(r.report.costPerItemMil), fmt: fmtMil },
-		{ key: 'revenuePerItemMil', label: 'revenue/item', val: (r) => num(r.report.revenuePerItemMil), fmt: fmtMil },
-		{ key: 'daysToClear', label: 'days to clear', val: (r) => num(r.report.daysToClear), fmt: fmtRoi }
+		{ key: 'select', label: '', sort: (r) => selected.has(r.typeId) ? 1 : 0, help: 'checked rows are always shown, summed in the totals and included in Copy orders' },
+		{ key: 'name', label: 'name', sort: (r) => r.name.toLowerCase(), text: true, help: 'dim rows were filtered out; hover the name for the reason' },
+		{ key: 'dailyProfitMil', label: 'daily profit', val: (r) => num(r.report.dailyProfitMil), fmt: fmtMil,
+			help: 'profit on the recommended quantity ÷ max(days to clear, 1), in millions',
+			tip: (r) => `${mil(r.report.profitPerItemMil)} profit/item × ${nf.format(r.report.volume)} recommended = ${mil(Math.round(r.report.profitPerItemMil * r.report.volume * 100) / 100)}, over max(${r.report.daysToClear ?? '?'} days to clear, 1)` },
+		{ key: 'roi', label: 'ROI', val: (r) => num(r.report.roi), fmt: fmtRoi,
+			help: `revenue/item ÷ cost/item (items below ${cfg.MIN_ROI}x are filtered)`,
+			tip: (r) => `${mil(r.report.revenuePerItemMil)} ÷ ${mil(r.report.costPerItemMil)}` },
+		{ key: 'factor', label: 'factor', val: (r) => r.factor, help: 'multiplier on the recommended quantity; quantity = ceil(recommended × factor)' },
+		{ key: 'qty', label: 'quantity', val: orderQty, fmt: fmtNum,
+			help: `ceil(recommended × factor). Recommended = ${DAYS_TO_COMPLETE} days of demand minus competing stock within ${pct(cfg.COMPETE_BAND)} above the sell price, bought up the source book while each order still clears ${cfg.MIN_ROI}x ROI`,
+			tip: (r) => `${nf.format(r.report.volume)} recommended × factor ${r.factor} (demand ${r.report.dailyDemand}/day × ${DAYS_TO_COMPLETE} days − ${nf.format(r.report.competingVolume)} competing)` },
+		{ key: 'daysOfSupply', label: 'days of supply', val: (r) => num(r.report.daysOfSupply), fmt: fmtRoi,
+			help: `units listed at the destination ${SUPPLY_BAND_TXT} ÷ demand per day: how long until the cheap stock is gone and the price steps up`,
+			tip: (r) => `${nf.format(r.report.supplyVolume)} units listed ${SUPPLY_BAND_TXT} (${mil(r.report.sellPriceMil)}) ÷ ${r.report.dailyDemand}/day` },
+		{ key: 'activeSellers', label: 'active sellers', val: (r) => num(r.report.activeSellers), fmt: fmtNum,
+			help: `destination sell orders ${SUPPLY_BAND_TXT} that were placed or changed within 24h of the newest such order; empty when none are in range`,
+			tip: (r) => `${nf.format(r.report.destSellOrderCount)} sell orders at the station, cheapest ${mil(r.report.destBestSellPriceMil)}; ${r.report.activeSellers ?? 0} active ${SUPPLY_BAND_TXT} (${mil(r.report.sellPriceMil)}); best buy order ${mil(r.report.destBestBuyPriceMil)}` },
+		{ key: 'daysSinceSellerUpdate', label: 'days idle', val: (r) => num(r.report.daysSinceSellerUpdate), fmt: fmtRoi,
+			help: `days since the newest in-range destination sell order (${SUPPLY_BAND_TXT}) was placed or changed` },
+		{ key: 'km3', label: 'km3', val: km3Of, fmt: fmtNum, help: 'packaged volume of the order quantity, in thousands of m3',
+			tip: (r) => `${nf.format(r.m3 || 0)} m3 packaged per unit × ${nf.format(orderQty(r))}` },
+		{ key: 'activeDaysFraction', label: 'active days', val: (r) => num(r.report.activeDaysFraction), fmt: fmtRoi,
+			help: `fraction of the last ${DAYS_CONSIDERED} days with sell-side trades at the destination that would have been profitable (below 0.2 is filtered)`,
+			tip: (r) => `${r.report.activeDays} of ${DAYS_CONSIDERED} days` },
+		{ key: 'costPerItemMil', label: 'cost/item', val: (r) => num(r.report.costPerItemMil), fmt: fmtMil,
+			help: `average source price over the orders bought, plus ${pct(HAULING_REWARD_FRACTION)} hauling reward`,
+			tip: (r) => `cheapest source order ${mil(r.report.srcBestSellPriceMil)} + ${pct(HAULING_REWARD_FRACTION)} haul (averaged up the book)` },
+		{ key: 'revenuePerItemMil', label: 'revenue/item', val: (r) => num(r.report.revenuePerItemMil), fmt: fmtMil,
+			help: `sell price − ${pct(SELL_TAX)} broker fee and sales tax. Sell price = the lower of (cheapest destination listing − 0.01) and the recent sell-side trade average`,
+			tip: (r) => `sell price ${mil(r.report.sellPriceMil)} − ${pct(SELL_TAX)} tax (cheapest listing ${mil(r.report.destBestSellPriceMil)})` },
+		{ key: 'daysToClear', label: 'days to clear', val: (r) => num(r.report.daysToClear), fmt: fmtRoi,
+			help: `(recommended quantity + competing stock within ${pct(cfg.COMPETE_BAND)} above the sell price) ÷ demand per day`,
+			tip: (r) => `(${nf.format(r.report.volume)} + ${nf.format(r.report.competingVolume)} competing) ÷ ${r.report.dailyDemand}/day` }
 	];
 	const sortValue = (col, row) => col.sort ? col.sort(row) : col.val(row);
 	if (!COLUMNS.some(c => c.key === sort.key) || (sort.dir !== 'asc' && sort.dir !== 'desc')) {
@@ -389,7 +415,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			const active = sort.key === col.key;
 			const arrow = active ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : '';
 			const cls = (col.text ? 'text ' : 'numeric ') + (active ? 'sorted' : '');
-			return `<th class="${cls}" data-key="${col.key}">${esc(col.label)}${arrow}</th>`;
+			return `<th class="${cls}" data-key="${col.key}" title="${esc(col.help || '')}">${esc(col.label)}${arrow}</th>`;
 		}).join('');
 	};
 
@@ -502,7 +528,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		for (const cell of tr.querySelectorAll('td[data-col]')) {
 			const col = COLUMNS.find(c => c.key === cell.dataset.col);
 			cell.textContent = col.fmt(col.val(row));
-			if (col.key === 'km3') cell.title = `${nf.format(row.m3 || 0)} m3 packaged per unit × ${nf.format(orderQty(row))}`;
+			if (col.tip) cell.title = col.tip(row);
 		}
 		const factorInput = tr.querySelector('input.factor');
 		if (document.activeElement !== factorInput && factorInput.value !== String(row.factor)) factorInput.value = row.factor;

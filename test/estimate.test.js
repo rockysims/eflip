@@ -279,6 +279,7 @@ test('regression: realistic fixture produces the full report shape', () => {
 	const report = computeItemReport({ srcOrders, destOrders, destDays, typeId: 12345, now: NOW });
 	assert.equal(JSON.stringify(srcOrders), before);
 
+	const CONTEXT_KEYS = ['activeDays', 'supplyVolume', 'sellPriceMil', 'srcBestSellPriceMil', 'destBestSellPriceMil', 'destBestBuyPriceMil', 'destSellOrderCount'];
 	assert.deepEqual(Object.keys(report).sort(), [
 		'activeDaysFraction',
 		'activeSellers',
@@ -294,13 +295,26 @@ test('regression: realistic fixture produces the full report shape', () => {
 		'profitPerItemMil',
 		'revenuePerItemMil',
 		'roi',
-		'volume'
-	]);
+		'volume',
+		...CONTEXT_KEYS
+	].sort());
 	for (const [key, val] of Object.entries(report)) {
 		if (key === 'filteredReason') continue;
 		assert.equal(typeof val, 'number', `${key} should be a number`);
 		assert.ok(Number.isFinite(val), `${key} should be finite`);
 	}
+
+	const context = {};
+	for (const key of CONTEXT_KEYS) { context[key] = report[key]; delete report[key]; }
+	assert.deepEqual(context, {
+		activeDays: 26,
+		supplyVolume: 19,
+		sellPriceMil: 24.49, // 24.5M - 0.01, truncated
+		srcBestSellPriceMil: 9.8,
+		destBestSellPriceMil: 24.5,
+		destBestBuyPriceMil: 15,
+		destSellOrderCount: 3
+	});
 
 	assert.deepEqual(report, {
 		// demand 2.83/day * 5 days - 9 competing => cap 5, all from the 9.8M order
@@ -383,4 +397,21 @@ test('active sellers and days idle only count dest orders within SUPPLY_BAND of 
 	assert.equal(onlyJoke.activeSellers, null);
 	assert.equal(onlyJoke.daysSinceSellerUpdate, null);
 	assert.equal(onlyJoke.daysOfSupply, 0);
+});
+
+test('days priced at or below the best dest buy order are buy-order fills and add no demand', () => {
+	// 30 flat days at 0.05M, 1000/day. With a dest buy order at 0.05M those are buy fills: no demand.
+	const days = flatHistory(1, 30, 0.05 * M, 1000);
+	const buyOrder = { price: 0.05 * M, volume_remain: 5000, is_buy_order: true, issued: isoHoursAgo(1) };
+	const withBuy = computeItemReport({ srcOrders: [sellOrder(0.01 * M, 100000)], destOrders: [buyOrder], destDays: days, now: NOW });
+	assert.equal(withBuy.dailyDemand, 0);
+	assert.equal(withBuy.volume, 0);
+	assert.equal(withBuy.destBestBuyPriceMil, 0.05);
+	// Without buy orders the same days count as sell-side demand.
+	const without = computeItemReport({ srcOrders: [sellOrder(0.01 * M, 100000)], destOrders: [], destDays: days, now: NOW });
+	assert.equal(without.dailyDemand, 1000);
+	assert.ok(without.volume > 0);
+	// A buy order well below the traded price (0.02M vs 0.05M) does not reclassify the days.
+	const lowBuy = computeItemReport({ srcOrders: [sellOrder(0.01 * M, 100000)], destOrders: [{ ...buyOrder, price: 0.02 * M }], destDays: days, now: NOW });
+	assert.equal(lowBuy.dailyDemand, 1000);
 });

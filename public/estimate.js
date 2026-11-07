@@ -21,6 +21,7 @@
 		SELL_TAX: 0.08 + 0.024,
 		COMPETE_BAND: 0.10,
 		SUPPLY_BAND: 0.75,
+		BUY_SIDE_MARGIN: 0.10, // a day priced at or below best dest buy order * (1 + this) is a buy-order-fill day
 		ORDINARY_PRICE_DAYS: 90,
 		RECENCY_HALF_LIFE_DAYS: 30,
 		RECENT_THRESHOLD_DAYS: 10,
@@ -128,7 +129,9 @@
 	// "Considered days" are ages 1..DAYS_CONSIDERED (age 0, today's partial day,
 	// is counted as age 1). Days missing from history count as zero demand, so
 	// the denominator sums the weight of every calendar day in the window.
-	const calcDemand = (daysAsc, ordinaryPrice, srcBestSellPrice, now, c) => {
+	const calcDemand = (daysAsc, ordinaryPrice, srcBestSellPrice, destBestBuyPrice, now, c) => {
+		//days priced no higher than the current best dest buy order (plus a margin) were buy-order fills
+		const isBuySideDay = (d) => destBestBuyPrice !== null && d.highest <= destBestBuyPrice * (1 + c.BUY_SIDE_MARGIN);
 		let activeDays = 0;
 		let weightedVolume = 0;
 		const destSellPrices = [];
@@ -150,6 +153,7 @@
 				: recentLowPrice + (recentHighPrice - recentLowPrice) * 0.5;
 
 			if (day.highest > recentMiddlePrice * 10) continue; //crazy over priced so skip day
+			if (isBuySideDay(day)) continue; //buy-order fills: no sell-side demand that day
 
 			//calc highVolume
 			const lowFrac = day.highest === day.lowest
@@ -163,7 +167,7 @@
 			//rising price counts within a couple of weeks while one-day spikes are still blocked.
 			//Days whose high sits below the recent middle are buy-order-fill days (same rule as lowFrac
 			//below); their "highs" are buy prices and must not drag the sell-side average down.
-			const recentSellSideHighs = recentDays.filter(d => d.highest >= recentMiddlePrice).map(d => d.highest);
+			const recentSellSideHighs = recentDays.filter(d => d.highest >= recentMiddlePrice && !isBuySideDay(d)).map(d => d.highest);
 			const recentSellHighPrice = recentSellSideHighs.length > 0 ? avg(recentSellSideHighs) : recentHighPrice;
 			const priceCap = Math.max(ordinaryPrice, recentSellHighPrice);
 			const sellPrice = Math.min(day.highest, priceCap);
@@ -220,7 +224,11 @@
 
 			const srcSellOrders = srcOrders.filter(order => order.is_buy_order !== true);
 			const destSellOrders = destOrders.filter(order => order.is_buy_order !== true);
+			const destBuyOrders = destOrders.filter(order => order.is_buy_order === true);
 			if (srcSellOrders.length === 0) return null;
+			const destBestBuyPrice = destBuyOrders.length > 0
+				? Math.max(...destBuyOrders.map(order => order.price))
+				: null;
 
 			const srcBestSellPrice = Math.min(...srcSellOrders.map(order => order.price));
 			const destBestSellPrice = destSellOrders.length > 0
@@ -231,7 +239,7 @@
 			const ordinaryDays = daysAsc.filter(day => dayAge(day.date, now) <= c.ORDINARY_PRICE_DAYS);
 			const ordinaryPrice = getOrdinaryPrice(ordinaryDays) || 0;
 
-			const { dailyDemand, activeDays, destSellPrices } = calcDemand(daysAsc, ordinaryPrice, srcBestSellPrice, now, c);
+			const { dailyDemand, activeDays, destSellPrices } = calcDemand(daysAsc, ordinaryPrice, srcBestSellPrice, destBestBuyPrice, now, c);
 
 			//calc sellPrice (undercut the best dest order, but never above the recent average)
 			const destRecentAverageSellPrice = destSellPrices.length > 0
@@ -334,7 +342,15 @@
 				dailyDemand: round2(dailyDemand),
 				activeSellers: destSellers.sellerCount,
 				daysSinceSellerUpdate: destSellers.daysSinceSellerUpdate,
-				activeDaysFraction: nonZeroNum(activeDays / c.DAYS_CONSIDERED)
+				activeDaysFraction: nonZeroNum(activeDays / c.DAYS_CONSIDERED),
+				//context for tooltips
+				activeDays,
+				supplyVolume,
+				sellPriceMil: sellPrice === null ? null : milsNum(sellPrice, 3),
+				srcBestSellPriceMil: milsNum(srcBestSellPrice, 3),
+				destBestSellPriceMil: destBestSellPrice === null ? null : milsNum(destBestSellPrice, 3),
+				destBestBuyPriceMil: destBestBuyPrice === null ? null : milsNum(destBestBuyPrice, 3),
+				destSellOrderCount: destSellOrders.length
 			};
 
 			let report;
