@@ -1,8 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
-const moment = require('moment');
-const fs = require('fs');
+const path = require('path');
 // const { scrapeRegion } = require('./scraper');
 
 //express setup
@@ -24,32 +23,7 @@ app.use(express.static('public'));
 // 	}
 // });
 
-app.get('/file/:path', async (req, res) => {
-	const path = 'cache/' + req.params.path;
-	const hoursStaleLimit = +req.query.hoursStaleLimit;
-
-	if (fs.existsSync(path)) {
-		const hoursStale = moment().diff(fs.statSync(path).mtime, 'minutes') / 60;
-		if (hoursStale >= hoursStaleLimit && hoursStaleLimit >= 0) {
-			// console.log('found (stale) ' + path);
-			res.sendStatus(404);
-		} else {
-			// console.log('found ' + path);
-			res.json(JSON.parse(fs.readFileSync(path)));
-		}
-	} else {
-		// console.log('not found ' + path);
-		res.sendStatus(404);
-	}
-});
-
-app.post('/file/:path', async (req, res) => {
-	if (!fs.existsSync('cache')) fs.mkdirSync('cache');
-
-	const path = 'cache/' + req.params.path;
-	fs.writeFileSync(path, JSON.stringify(req.body), {flag: 'w'});
-	res.sendStatus(200);
-});
+require('./lib/cache-files').mountCacheRoutes(app, path.join(__dirname, 'cache'));
 
 //---
 
