@@ -215,13 +215,14 @@
 </head>
 <body>
 	<div id="controls">
+		<!-- left of Run: read when Run is pressed; right of Run: take effect at once -->
 		<label>From <select id="startStation"></select></label>
 		<label>To <select id="endStation"></select></label>
+		<label title="horizon for the recommended quantity: this many days of demand minus competing stock. Read when you press Run; changing it mid-run applies to the next Run">days to clear <input id="daysToClear" type="number" step="1" min="1" value="5" /></label>
 		<button id="run">Run</button>
 		<button id="stop" disabled>Stop</button>
 		<label><input id="autoRun" type="checkbox" /> auto-run on load</label>
 		<label>global factor <input id="globalFactor" type="number" step="0.1" min="0" value="1" /></label>
-		<label title="horizon for the recommended quantity: this many days of demand minus competing stock. Read when you press Run; changing it mid-run applies to the next Run">days to clear <input id="daysToClear" type="number" step="1" min="1" value="5" /></label>
 		<label><input id="showFiltered" type="checkbox" /> show filtered</label>
 		<label>search <input id="search" type="search" /> <span id="searchNote" class="dim" aria-live="polite"></span></label>
 		<button id="copy">Copy orders</button>
