@@ -7,12 +7,13 @@ Changed: `server.js`, `.gitignore`, `package.json`, `public/export.js` (Copy per
 `README.md`. Retired at the end: `public/exportAndSold.*`, `public/env.js`, util.js wallet
 getters. Out of scope: `index.*`, `jack.js`, `missing.*`, `resell.*`, `reprocess.js`.
 
-Goal and principle: after an export run (Copy orders → multibuy at the source → haul → list at
-the destination), show what really happened: bought, hauled, sold, at what prices and fees, what
-is still unsold, realized profit, and how each figure compares with the export page's
-prediction. Every figure comes from the user's own ESI data (wallet, orders, assets, contracts),
-or from ESI market data for current prices. EVE tokens never reach `public/`, the browser, git or
-`cache/`: the Express server holds them, and pages call a few `/api/...` routes.
+Goal and principle: after an export run (Copy orders → multibuy at the source → item-exchange
+hand-off from buyer to seller → courier → list at the destination), show what really happened:
+bought, hauled, sold, at what prices and fees, what is still unsold, realized profit, and how each
+figure compares with the export page's prediction. Every figure comes from the user's own ESI data
+(wallet, orders, assets, contracts), or from ESI market data for current prices. EVE tokens never
+reach `public/`, the browser, git or `cache/`: the Express server holds them, and pages call a few
+`/api/...` routes.
 
 ## Recommendation
 
@@ -57,7 +58,7 @@ or from ESI market data for current prices. EVE tokens never reach `public/`, th
    let anything that can reach localhost act as the character: other local processes, DNS
    rebinding, today's open CORS relay.
 6. **Hardening first.** Three verified problems in today's server must be fixed before any token
-   touches disk:
+   touches disk (the first is already fixed on this branch, see Phase 1):
    - `GET /file/..%2F.env` resolves to `cache/../.env`. Express decodes `%2F` in `:path` (tested
      with the installed express 4.22.3), so any file can be read or overwritten through `POST`.
    - The unused `cors-anywhere` on :4000 relays any web page's requests to `localhost:5001` with
@@ -93,7 +94,27 @@ or from ESI market data for current prices. EVE tokens never reach `public/`, th
 | `orders` | orders | none (error limit) | 1200 s | none | open orders |
 | `orders/history` | orders | none (error limit) | 3600 s | `page` + `X-Pages` | 90 days, cancelled/expired |
 | `assets` | assets | `char-asset` 1800 | 3600 s | `page` + `X-Pages` | snapshot |
-| `contracts`, `contracts/{cid}/items` | contracts | `char-contract` 600 | 300 / 3600 s | `page` | 30 days or in progress |
+| `contracts`, `contracts/{cid}/items` | contracts | `char-contract` 600 | 300 / 3600 s | `page` + `X-Pages` (list only) | 30 days or `in_progress` (spec) |
+
+**Contracts.** Batches and couriers (rules 2, 6, 7) rely on these:
+- `/characters/{id}/contracts` (`esi-contracts.read_character_contracts.v1`) returns a contract
+  only if the character is its issuer, acceptor or assignee, and only if it is no older than 30
+  days or `in_progress` (spec). A hand-off between two linked characters is in both ledgers:
+  merge by `contract_id`.
+- Fields used: `contract_id, type, status, issuer_id, assignee_id, acceptor_id, start_location_id,
+  end_location_id, date_issued, date_accepted, date_completed, reward, collateral, volume`.
+  - `type` includes `item_exchange` and `courier`. `status` has `finished`, `finished_issuer` and
+    `finished_contractor` besides `outstanding`, `in_progress`, `failed` and others.
+  - The spec marks `reward`, `collateral` and both locations "for Couriers"; `date_accepted` and
+    `date_completed` are optional.
+- `/characters/{id}/contracts/{cid}/items` has no paging. Fields used: `type_id, quantity,
+  is_included, is_singleton, record_id`. `is_included: true` means the issuer put the item in;
+  `false` means the issuer asks for it.
+- Journal: `player_donation` and the `contract_*` ref_types are in the spec's enum, but the spec
+  says `first_party_id`/`second_party_id` have no consistency across ref_types.
+- To confirm in Phase 2 sample capture: that a completed hand-off and a delivered courier both
+  read `finished`; which party of a `player_donation` is the payer; whether items stay readable
+  once a contract drops off the 30-day list (sync fetches them on first sight either way).
 
 **Gotchas.**
 - `is_personal: false` marks a corporation-wallet trade: excluded.
@@ -149,17 +170,29 @@ below 20 % pauses until `Retry-After` or the window passes.
 ## Profit accounting rules (`public/results-calc.js`, pure, UMD like `estimate.js`)
 
 Inputs: the merged ledgers of the selected characters (set L), the route (source station S,
-destination station D), the runs, packaged m3 per type, and the window.
+destination station D), the runs, packaged m3 per type, the window, and the bonus toggle.
 
 1. **Scope.** Count transactions of L with `is_personal: true` and `client_id` ∉ L.
-   - Buy: `is_buy && location_id === S`. Sell: `!is_buy && location_id === D`.
-   - Anything else shows as "elsewhere: n trades" and stays out of P&L.
-2. **Lots.** Each buy becomes `{typeId, qty, unitPrice, date, characterId, runId, haulPerUnit,
-   buyFeePerUnit}`.
+   - Every buy, at any location, becomes a lot. Batches (rule 2) decide what counts as exported;
+     a run without one falls back to its time window (Comparison, rule 2).
+   - Sell: `!is_buy && location_id === D`. Other sells show as a count and stay out of P&L.
+   - Each lot keeps an informational "elsewhere" tag: at S, same region, or other.
+2. **Lots and batches.** Each buy becomes `{typeId, qty, unitPrice, date, characterId, locationId,
+   batchId, runId, courierId, haulPerUnit, buyFeePerUnit}`.
    - Buying from sell orders carries no broker fee and no tax.
    - Fills of the user's own buy orders at S take that order's attributed `brokers_fee` (rule 5).
-3. **FIFO per type, pooled across L.** Order lots by `date`, then `transaction_id`. Each sell
+   - A **batch** is a `finished` `item_exchange` contract whose issuer and assignee or acceptor are
+     both in L: the buyer handing the goods to the seller. Its items with `is_included: true` give
+     `{typeId, qty}` per type.
+   - Batches are taken in `date_issued` order. For each type, a batch consumes the oldest
+     not-yet-batched lots of that type bought by L before its `date_issued` (any location),
+     splitting a lot if needed; consumed lots get its `batchId`. Units the lots cannot cover are
+     the batch's `unsourcedQty`: shown, flagged `unsourced`.
+   - Lots no batch consumes stay unbatched and show as a count, not as P&L exclusions.
+3. **FIFO per type, pooled across L.** Order lots by `date`, then `transaction_id`. Each sell at D
    consumes the oldest units and records `{sellTxId, lotId, qty}`.
+   - Lots that have arrived go first: carried by a `finished` courier (rule 6), through their
+     batch or, in a window-attributed run, directly. Then any lot of that type, flagged `unarrived`.
    - Sold units with no lot left are `uncoveredQty`: shown, but kept out of realized profit.
    - FIFO is preferred over average cost because each run's lots stay distinct, which gives
      per-run profit and sell-out time directly. Averaging would blur back-to-back runs bought at
@@ -174,19 +207,28 @@ destination station D), the runs, packaged m3 per type, and the window.
      at D in the window, flagged `est`.
 
    Sell orders at D add to the type's sell fees; buy orders at S add to `buyFeePerUnit`.
-6. **Hauling.** Counts courier contracts (`type === 'courier'`) issued by L from S to D.
+6. **Hauling.** Counts courier contracts (`type === 'courier'`) issued by L from S (or S's solar
+   system) to D (or D's system), taken in `date_issued` order. A courier carries each batch with
+   no courier yet whose `date_issued` ≤ its own and whose types overlap its items.
    - Cost = −Σ journal rows of L with `context_id === contract_id` and ref_type in
      `contract_reward_deposited`, `contract_reward_refund`, `contract_brokers_fee`,
-     `contract_deposit`, `contract_deposit_refund`.
-   - Split by packaged volume over the contract's items (`included: true`):
-     `share_T = qty_T × m3_T / Σ qty × m3`. The per-unit cost goes to the oldest not-yet-hauled
-     lots of T bought before `date_issued`.
-   - With no item list, spread per m3 over the issuer's unhauled lots at S.
+     `contract_deposit`, `contract_deposit_refund`, plus its bonuses when counted (rule 7).
+   - Split by packaged volume over the courier's items (`is_included: true`), else over its
+     batches' items: `share_T = qty_T × m3_T / Σ qty × m3`. The per-unit cost goes to the lots of
+     the batches it carries, so several batches in one courier share it by m3.
+   - A courier with no batch works as before: the per-unit cost goes to the oldest
+     not-yet-hauled lots of T bought before `date_issued`; with no item list, it is spread per m3
+     over the issuer's unhauled lots at S.
    - A `failed` contract shows a banner; losses are out of scope.
-7. **Internal flows.** Ignore `player_donation` between L characters and the price of
-   item-exchange contracts within L; their fees count as haul cost, as in rule 6. Donations from L
-   to outsiders count as hauling (as `exportAndSold.js` does), spread per m3 over lots bought at
-   S in the window, behind a toggle.
+7. **Internal flows and hauler bonuses.** Ignore `player_donation` between L characters and the
+   price of item-exchange contracts within L; their fees are haul cost on that batch's lots, split
+   by m3 as in rule 6.
+   - A **bonus** is a `player_donation` from L to a character not in L whose `second_party_id` is
+     the `acceptor_id` of one of L's courier contracts, dated from its `date_accepted` to
+     `date_completed` + 7 days (open while in progress). It adds to that courier's cost; if
+     several couriers qualify, the most recently accepted one takes it.
+   - The results-page toggle "count hauler bonuses" (default on) includes them.
+   - Other donations to outsiders are listed as "other donations" and never counted.
 8. **Realized**, per type, over sells in the window:
    - `gross = Σ unit_price × qty`, plus `tax`, and `broker` (the type's sell fees dated in the
      window).
@@ -222,14 +264,19 @@ destination station D), the runs, packaged m3 per type, and the window.
    - `id = <route>-<reportGeneratedAt ISO>`. Re-copying the same report overwrites it (keeps the
      first `copiedAt`, sets `lastCopiedAt`); a new Run makes a new id.
    - If the POST fails the button shows "Copied (run not saved)" and the clipboard still works.
-2. **Attribute buys.** A buy of T at the run's source within [`copiedAt` − 10 min, `copiedAt` +
-   24 h] belongs to the latest such run listing T. Other buys in that span join it as
-   `unplanned`. Everything else gets `runId: null`.
+2. **Batches to runs.** A batch (accounting rule 2) belongs to the latest persisted run with
+   `copiedAt` ≤ its `date_issued` and at most 7 days before it; otherwise it gets `runId: null`
+   and shows as an "unplanned batch". Its lots inherit its `runId`; batch types the run does not
+   list are flagged `unplanned`.
+   - Fallback: a run no batch maps to (one character does the whole export, or the hand-off is not
+     issued yet) is "window-attributed". An unbatched buy of T at the run's source within
+     [`copiedAt` − 10 min, `copiedAt` + 24 h] belongs to the latest such run listing T. Other
+     unbatched buys in that span join it as `unplanned`.
 3. **Per run, per type:**
 
    | predicted | actual |
    |---|---|
-   | `qty` | bought (fill %) |
+   | `qty` | batched (fill %); bought, if window-attributed |
    | `costPerItemMil` (includes the 10 % haul allowance) | landed cost/item (buy + haul + fee) |
    | `sellPriceMil` | average gross sell price |
    | `revenuePerItemMil` (net of `SELL_TAX`) | `netPerItem` |
@@ -250,10 +297,14 @@ lookups.
    failed: …" (retry).
    - Each chip has Sync and Remove. Remove asks to confirm and offers "also delete synced data".
    - The strip ends with "+ Add character" (link to `/sso/login`) and "Sync all".
-2. **Window bar.** Run dropdown (`copiedAt · route · n types · predicted profit`), or "since"
-   (7/30/90 days or a date) with a route selector, plus search and "show sold out".
+2. **Window bar.** Run dropdown (`copiedAt · route · n types · predicted profit`, marked
+   "window-attributed" when it is), or "since" (7/30/90 days or a date) with a route selector,
+   plus search, "show sold out" and "count hauler bonuses" (default on).
+   - In run mode, the run's batches are shown under it with their item-exchange and courier
+     contract ids and the courier's reward. Unplanned batches get their own dropdown entry.
 3. **Table, one row per type:**
-   - name + type id, with flags `unplanned` / `est` / `uncovered` / `mismatch`;
+   - name + type id, with flags `unplanned` / `unsourced` / `unarrived` / `est` / `uncovered` /
+     `mismatch`;
    - bought qty/avg, sold qty/avg gross, tax, broker, haul, COGS, realized profit, margin %;
    - remaining (source/transit/hangar/listed, broken down in the tooltip), unrealized at cost and
      at market, days on market, sell rate/day;
@@ -261,8 +312,9 @@ lookups.
      green (better) or red (worse).
 
    Default sort: realized profit, descending.
-4. **Totals strip.** Spent, gross sales, tax, broker, haul, realized profit and ROI, unrealized at
-   cost and at market, predicted profit (run mode), and the cross-check remainder.
+4. **Totals strip.** Spent, gross sales, tax, broker, haul (with bonuses if counted), realized
+   profit and ROI, unrealized at cost and at market, predicted profit (run mode), the cross-check
+   remainder, and the counts of unbatched lots and other donations.
 5. **States.**
    - Empty: SSO not configured (`GET /api/config`) shows the setup steps. No characters shows
      "Link the characters that buy and sell". No trades in the window offers "widen window".
@@ -270,7 +322,7 @@ lookups.
      visible.
    - Error: a token failure shows "Re-link Ivan" on the chip and the rest still renders. 429/420
      shows "rate-limited, retrying at hh:mm". ESI 5xx shows a "stale since" banner. If `syncedAt`
-     is older than 25 days, warn "older trades may be lost (ESI keeps 30 days)".
+     is older than 25 days, warn "older trades and contracts may be lost (ESI keeps 30 days)".
    - Overflow: sort, search, sold-out rows hidden by default, sticky header, no pagination.
 6. **Retire** `exportAndSold.*` once the 30-day totals match it.
 
@@ -299,8 +351,8 @@ lookups.
    - `/api` and `/sso` reject a `Host` other than `localhost:<port>` or `127.0.0.1:<port>`, and
      an `Origin` that is present but not same-origin. No CORS headers are sent.
    - Listen on `process.env.HOST || '127.0.0.1'`.
-   - `/file/:path` accepts only `^[A-Za-z0-9._-]+$` without `..`, and the resolved path must stay
-     inside `cache/`.
+   - `/file/:path` (done, `lib/cache-files.js`) answers 400 unless the name matches
+     `^[A-Za-z0-9][A-Za-z0-9._-]*$` and resolves inside `cache/`.
    - Remove `cors-anywhere` (no page uses :4000).
 5. **`.env` keys** (documented in a committed `.env.example`): `EVE_CLIENT_ID`,
    `EVE_CLIENT_SECRET`, `EVE_CALLBACK_URL=http://localhost:5001/sso/callback`, `ESI_USER_AGENT`
@@ -312,19 +364,26 @@ lookups.
    "eFlip (local)" with connection type "Authentication & API Access". Add the four scopes and the
    callback `http://localhost:5001/sso/callback`, then copy the Client ID and Secret into `.env`.
    Adding a scope later means re-linking every character.
-8. **Localhost only.** Heroku is legacy: its disk is ephemeral and the server has no user auth. So
-   `/api` and `/sso` answer 404 when `NODE_ENV=production` or the `Host` is not local.
+8. **Localhost only** (assumed; decision 6 is open). Heroku is legacy: its disk is ephemeral and
+   the server has no user auth. So `/api` and `/sso` answer 404 when `NODE_ENV=production` or the
+   `Host` is not local.
 
 ## Phases
 
 ### Phase 1 — server hardening (sonnet: small, exact spec)
-Scope: `server.js`, `lib/api.js` (empty router + guards), `.gitignore`, `package.json` (drop
-`cors-anywhere`), `test/server-file.test.js`. No `public/` edits.
+Landed (commit 1dd687d): the `/file/:path` guard, as
+`lib/cache-files.js` (`safeCachePath` + `mountCacheRoutes`), with `test/server-file.test.js`.
+
+Remaining scope: `lib/api.js` (empty router + Host/Origin guards), the `HOST` bind to 127.0.0.1,
+dropping `cors-anywhere` from `server.js` and `package.json`, and `data/` in `.gitignore`. No
+`public/` edits.
 
 Gate:
 - `node --test 'test/*.test.js'` passes.
-- `curl -i localhost:5001/file/..%2F.env` returns 400, and normal cache reads still work.
-- The export page still runs, and `lsof -i :5001` shows 127.0.0.1 only.
+- Regression check: `curl -i localhost:5001/file/..%2F.env` still returns 400, and normal cache
+  reads still work.
+- `/api` rejects a foreign `Host` or `Origin`.
+- The export page still runs, `lsof -i :5001` shows 127.0.0.1 only, and nothing listens on :4000.
 
 ### Phase 2 — SSO and token store (opus: security-sensitive, verify live)
 Scope: `lib/sso.js`, `lib/tokenStore.js`, `/sso/*`, `/api/config`, `/api/characters` (GET and
@@ -338,9 +397,10 @@ Gate:
   Remove it (revoke returns 200), then re-link.
 - Sample capture: an uncommitted script writes anonymized `brokers_fee`, `transaction_tax`,
   `market_transaction` and `contract_*` rows, plus matching transactions and orders, to
-  `data/samples/`.
-- Fable writes the observed `context_id_type` values into this doc before Phase 4 freezes rules
-  4–6.
+  `data/samples/`. Also a hand-off `item_exchange` and its `courier` contract, both with items,
+  and a `player_donation` to that courier's hauler.
+- Fable writes the observed `context_id_type` values and the Contracts "to confirm" answers into
+  this doc before Phase 4 freezes rules 2 and 4–7.
 
 ### Phase 3 — ESI client, sync, ledger (sonnet)
 Scope: `lib/esi.js`, `lib/ledger.js`, `lib/sync.js`, `/api/sync`, `/api/ledger`,
@@ -353,11 +413,15 @@ only by new ids.
 ### Phase 4 — accounting (opus: semantics need care; writes the tests), parallel with 2–3
 Scope: `public/results-calc.js`, `test/results-calc.test.js`. Hand-written fixtures, shaped like
 the Phase 2 samples, cover:
-- FIFO across two characters; uncovered sells;
+- FIFO across two characters; uncovered sells; arrived lots first, the `unarrived` fallback;
 - tax match and fallback; broker time-match, buy-side fees and the pro-rata remainder;
-- courier split by m3, with and without an item list;
-- internal flows ignored; the outsider-donation toggle;
-- run attribution: window edges, two runs, unplanned;
+- batches from item-exchange contracts: lot assignment per type, a split lot, `unsourcedQty`;
+- batch → run mapping: the 7-day edge, two runs, an unplanned batch;
+- courier matching to batches; one courier split by m3 over two batches; a courier with no batch,
+  with and without an item list;
+- hauler bonus matched by acceptor, inside and outside its dates; other donations; the toggle;
+  internal flows ignored;
+- window fallback for a run with no batch: window edges, two runs, unplanned;
 - remaining in both views, days on market and projection, and the cross-check.
 
 Gate: `node --test 'test/*.test.js'`.
@@ -400,7 +464,8 @@ Gate: grep is clean and the tests pass.
 ## Out of scope
 
 - Corporation wallets, orders and assets.
-- Citadel markets and structure names (`esi-universe.read_structures.v1`).
+- Citadel markets and structure names (`esi-universe.read_structures.v1`); a buy in a structure
+  gets the lot tag "other".
 - Background or cron sync.
 - Lost or failed courier accounting beyond a banner.
 - Selling through contracts.
@@ -409,23 +474,25 @@ Gate: grep is clean and the tests pass.
 - Heroku deployment of SSO.
 - Charts.
 
-## Open questions (recommended default in brackets)
+## Decisions (2026-11-12)
 
-1. Cost basis: FIFO or average? [FIFO, pooled across linked characters]
-2. Broker fees: time-match to orders and spread the rest pro rata by sales, or spread all of them
-   pro rata? [time-match + pro-rata remainder, flagged `est`]
-3. Which characters: buyer and seller (Ivan, Grant) only, or others too? Are any of their trades to
-   be excluded? [link both, pooled]
-4. Do you also pay haulers by player donation? [yes: donations to non-linked characters count as
-   hauling, behind a toggle]
-5. Count buys only at the source station (Jita 4-4), or anywhere in the region (Perimeter
-   citadels)? [station only, plus an "elsewhere" count]
-6. Keep the Heroku deploy? [keep for public pages; SSO/results local-only; drop cors-anywhere]
-7. Default window, and how long after Copy do buys count toward the run? [latest run; 24 h]
-8. When a character is removed, keep or delete its synced history? [revoke the token, keep the
-   history]
-9. What contact goes in `ESI_USER_AGENT` (CCP asks for email or EVE character)? [app name + your
-   main character name]
+1. Cost basis: FIFO, pooled across linked characters.
+2. Broker fees: time-match to orders, pro-rata remainder flagged `est`.
+3. Characters: link Ivan and Grant, pooled.
+4. Hauler donations: yes, bonuses on the matching courier, behind "count hauler bonuses" (rule 7).
+5. Which buys count: superseded by 7; buys anywhere make lots, the hand-off contract decides.
+6. Heroku: open: the user asked what local-only means; plan assumes local-only until answered.
+7. Runs: Ivan → Grant item exchange = batch, then a courier; 24 h window only as fallback.
+   Default view: latest run.
+8. Removed character: revoke the token, keep the history.
+9. `ESI_USER_AGENT` contact: app name + main character name.
+
+### Still open
+
+1. Heroku (decision 6). "Local-only" means SSO, tokens and results.html work only when the server
+   runs on your own machine; the Heroku app keeps serving the public pages, with `/api` and
+   `/sso` answering 404 there. Keep Heroku that way, or drop it? [keep for public pages;
+   SSO/results local-only; drop cors-anywhere]
 
 ## Sources
 
@@ -441,5 +508,5 @@ Gate: grep is clean and the tests pass.
 - Versions merged: https://developers.eveonline.com/blog/changing-versions-v42-was-getting-out-of-hand
 - Rate limiting: https://developers.eveonline.com/docs/services/esi/rate-limiting/
 - Caching, User-Agent: https://developers.eveonline.com/docs/services/esi/best-practices/
-- OpenAPI (routes, scopes, groups, cache): https://esi.evetech.net/meta/openapi.json?compatibility_date=2026-08-18
+- OpenAPI (routes, scopes, groups, cache, contract and journal fields): https://esi.evetech.net/meta/openapi.json?compatibility_date=2026-08-18
 - 30-day transactions (community): https://forums.eveonline.com/t/wallet-transaction-route-limited-to-30-days/488424
