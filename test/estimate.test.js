@@ -212,6 +212,7 @@ test('seller count and days since update', () => {
 	const report = computeItemReport({ srcOrders: [sellOrder(1 * M, 10)], destOrders, destDays: baseDays(), now: NOW });
 	assert.equal(report.activeSellers, 3); // 12h, 20h, 30h are within 24h of the newest (12h); 100h is not
 	assert.equal(report.daysSinceSellerUpdate, 0.5);
+	assert.equal(report.daysSinceInBandSellerUpdate, 0.5); // all four orders are in band here, so the in-band figure matches
 
 	const ignored = computeItemReport({ srcOrders: [sellOrder(1 * M, 10)], destOrders, destDays: baseDays(), now: NOW, config: { ignoreOneActiveSeller: true } });
 	assert.equal(ignored.activeSellers, 2);
@@ -219,6 +220,7 @@ test('seller count and days since update', () => {
 	const none = computeItemReport({ srcOrders: [sellOrder(1 * M, 10)], destOrders: [], destDays: baseDays(), now: NOW });
 	assert.equal(none.activeSellers, null);
 	assert.equal(none.daysSinceSellerUpdate, null);
+	assert.equal(none.daysSinceInBandSellerUpdate, null);
 });
 
 test('applyFilters reasons', () => {
@@ -289,6 +291,7 @@ test('regression: realistic fixture produces the full report shape', () => {
 		'dailyProfitMil',
 		'dailyProfitOldMil',
 		'daysOfSupply',
+		'daysSinceInBandSellerUpdate',
 		'daysSinceSellerUpdate',
 		'daysToClear',
 		'filteredReason',
@@ -333,6 +336,7 @@ test('regression: realistic fixture produces the full report shape', () => {
 		dailyDemand: 2.83,
 		activeSellers: 2,
 		daysSinceSellerUpdate: 1.25,
+		daysSinceInBandSellerUpdate: 1.25, // every order is within the 75% band, so same as daysSinceSellerUpdate
 		activeDaysFraction: 0.86,
 		filteredReason: null
 	});
@@ -385,20 +389,62 @@ test('buy-order-fill days do not drag the recent high cap down', () => {
 	assert.ok(report.revenuePerItemMil > 12, `revenuePerItemMil ${report.revenuePerItemMil}`);
 });
 
-test('active sellers and days idle only count dest orders within SUPPLY_BAND of sellPrice', () => {
-	// Best dest order 1M (fresh) plus a joke order at 10M (fresher still). sellPrice ~1M, band edge 1.75M,
-	// so the 10M order is neither supply nor a seller.
+test('active sellers and days idle count every dest sell order; the in-band idle figure and days of supply stay in-band', () => {
+	// Best dest order 1M (48h old) plus a joke order at 10M (refreshed 1h ago). sellPrice ~1M, band edge 1.75M,
+	// so the 10M order is out of band: not supply, and not in the in-band idle figure. It is still a seller.
 	const destOrders = [sellOrder(1 * M, 4, 48), sellOrder(10 * M, 6, 1)];
 	const report = computeItemReport({ srcOrders: [sellOrder(0.1 * M, 1000)], destOrders, destDays: baseDays(), now: NOW });
+	// The 10M order (1h) is the newest; the 1M order (48h) is 47h older, outside the 24h window.
 	assert.equal(report.activeSellers, 1);
-	assert.equal(report.daysSinceSellerUpdate, 2);
-	assert.equal(report.daysOfSupply, 0.4);
+	assert.equal(report.daysSinceSellerUpdate, 0.04); // 1 whole hour / 24, 2dp
+	assert.equal(report.daysSinceInBandSellerUpdate, 2); // only the 1M order is in band: 48h / 24
+	assert.equal(report.daysOfSupply, 0.4); // 4 in-band units / 10 per day
 
-	// Only the joke order, with history at 1M so the sell price stays ~1M: no in-band sellers at all.
+	// A second order within 24h of the newest counts as an active seller whatever its price.
+	const two = computeItemReport({ srcOrders: [sellOrder(0.1 * M, 1000)], destOrders: [sellOrder(1 * M, 4, 20), sellOrder(10 * M, 6, 1)], destDays: baseDays(), now: NOW });
+	assert.equal(two.activeSellers, 2);
+	assert.equal(two.daysSinceSellerUpdate, 0.04);
+	assert.equal(two.daysSinceInBandSellerUpdate, 0.83); // 20h / 24
+	const twoIgnored = computeItemReport({ srcOrders: [sellOrder(0.1 * M, 1000)], destOrders: [sellOrder(1 * M, 4, 20), sellOrder(10 * M, 6, 1)], destDays: baseDays(), now: NOW, config: { ignoreOneActiveSeller: true } });
+	assert.equal(twoIgnored.activeSellers, 1);
+
+	// Only the joke order, with history at 1M so the sell price stays ~1M: it is the one seller, but nothing is in band.
 	const onlyJoke = computeItemReport({ srcOrders: [sellOrder(0.1 * M, 1000)], destOrders: [sellOrder(10 * M, 6, 1)], destDays: flatHistory(1, 30, 1 * M, 10), now: NOW });
-	assert.equal(onlyJoke.activeSellers, null);
-	assert.equal(onlyJoke.daysSinceSellerUpdate, null);
+	assert.equal(onlyJoke.activeSellers, 1);
+	assert.equal(onlyJoke.daysSinceSellerUpdate, 0.04);
+	assert.equal(onlyJoke.daysSinceInBandSellerUpdate, null);
 	assert.equal(onlyJoke.daysOfSupply, 0);
+});
+
+test('seller updated too recently looks only at in-band sellers: a refreshed far-above-market order does not hide an item', () => {
+	// Modest-profit item (history 1M, source 0.1M, dailyProfit ~6.5M) so the too-recent threshold is ~0.46 day
+	// rather than the 1/24 floor that high-profit items get. In-band order at 0.9M, joke order at 9M.
+	const run = (inBandHoursAgo, jokeHoursAgo) => computeItemReport({
+		srcOrders: [sellOrder(0.1 * M, 1000)],
+		destOrders: [sellOrder(0.9 * M, 3, inBandHoursAgo), sellOrder(9 * M, 5, jokeHoursAgo)],
+		destDays: flatHistory(1, 30, 1 * M, 10),
+		now: NOW
+	});
+
+	// In-band seller idle 2 days, joke order refreshed 1h ago: the all-orders figure is 0.04 but the filter ignores it.
+	const jokeFresh = run(48, 1);
+	assert.equal(jokeFresh.daysSinceSellerUpdate, 0.04);
+	assert.equal(jokeFresh.daysSinceInBandSellerUpdate, 2);
+	assert.ok(jokeFresh.dailyProfitMil < 10, `dailyProfitMil ${jokeFresh.dailyProfitMil}`); // threshold well above 0.04 day
+	assert.equal(jokeFresh.filteredReason, null);
+
+	// The same item with the in-band order refreshed 1h ago is filtered.
+	const inBandFresh = run(1, 1);
+	assert.equal(inBandFresh.daysSinceSellerUpdate, 0.04);
+	assert.equal(inBandFresh.daysSinceInBandSellerUpdate, 0.04);
+	assert.equal(inBandFresh.filteredReason, 'seller updated too recently');
+
+	// Hand-built reports without the in-band field fall back to daysSinceSellerUpdate.
+	const ok = { volume: 10, costPerItemMil: 1, revenuePerItemMil: 5, dailyProfitMil: 2, activeDaysFraction: 0.5, activeSellers: 0 };
+	assert.equal(applyFilters({ ...ok, daysSinceSellerUpdate: 0.5 }, {}), 'seller updated too recently');
+	assert.equal(applyFilters({ ...ok, daysSinceSellerUpdate: 0.5, daysSinceInBandSellerUpdate: 3 }, {}), null);
+	assert.equal(applyFilters({ ...ok, daysSinceSellerUpdate: 3, daysSinceInBandSellerUpdate: 0.5 }, {}), 'seller updated too recently');
+	assert.equal(applyFilters({ ...ok, daysSinceSellerUpdate: 0.5, daysSinceInBandSellerUpdate: null }, {}), null);
 });
 
 test('days priced at or below the best dest buy order are buy-order fills and add no demand', () => {

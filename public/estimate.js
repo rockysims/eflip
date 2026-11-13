@@ -194,13 +194,15 @@
 		};
 	};
 
-	// sellerCount = dest sell orders issued within 24h of the most recent one
-	// (minus one if ignoreOneActiveSeller); daysSinceSellerUpdate = whole hours
-	// since the most recent order / 24, to 2dp.
-	const calcDestSellers = (destSellOrders, now, c) => {
-		if (destSellOrders.length === 0) return { sellerCount: null, daysSinceSellerUpdate: null };
+	// sellerCount = sell orders issued within 24h of the most recent one (minus one
+	// if ignoreOneActiveSeller); daysSinceSellerUpdate = whole hours since the most
+	// recent order / 24, to 2dp. Both are null when there are no orders. The caller
+	// picks the order set: every dest sell order for the displayed figures, or only
+	// the in-band ones for the 'seller updated too recently' filter.
+	const calcDestSellers = (sellOrders, now, c) => {
+		if (sellOrders.length === 0) return { sellerCount: null, daysSinceSellerUpdate: null };
 
-		const issuedMs = destSellOrders.map(order => new Date(order.issued).getTime());
+		const issuedMs = sellOrders.map(order => new Date(order.issued).getTime());
 		const mostRecentMs = Math.max(...issuedMs);
 		const recentCount = issuedMs.filter(ms => mostRecentMs - ms < 24 * HOUR_MS).length;
 		const sellerCount = Math.max(0, recentCount - (c.ignoreOneActiveSeller ? 1 : 0));
@@ -290,8 +292,11 @@
 				? 0
 				: inBandDestSellOrders.reduce((acc, order) => acc + order.volume_remain, 0);
 
-			//calc active sellers / days idle among in-band orders only
-			const destSellers = calcDestSellers(inBandDestSellOrders, now, c);
+			//calc active sellers / days idle over ALL dest sell orders (the displayed figures count every
+			//seller at any price). The 'seller updated too recently' filter instead uses the in-band idle
+			//figure, so a far-above-market order that was just refreshed can't hide an item.
+			const destSellers = calcDestSellers(destSellOrders, now, c);
+			const inBandSellers = calcDestSellers(inBandDestSellOrders, now, c);
 
 			//calc buy cap over the horizon
 			const cap = Math.max(0, dailyDemand * c.DAYS_TO_COMPLETE - competingVolume);
@@ -363,6 +368,7 @@
 				dailyDemand: round2(dailyDemand),
 				activeSellers: destSellers.sellerCount,
 				daysSinceSellerUpdate: destSellers.daysSinceSellerUpdate,
+				daysSinceInBandSellerUpdate: inBandSellers.daysSinceSellerUpdate,
 				activeDaysFraction: nonZeroNum(activeDays / c.DAYS_CONSIDERED),
 				//context for tooltips
 				activeDays,
@@ -432,7 +438,11 @@
 		const tooRecentThresholdMin = 1 / 24;
 		const tooRecentThresholdMax = 30 / 24;
 		const tooRecentlyThreshold = Math.floor((tooRecentThresholdMax - (tooRecentThresholdMax - tooRecentThresholdMin) * profitRating) * 100) / 100;
-		if (report.daysSinceSellerUpdate !== null && report.daysSinceSellerUpdate < tooRecentlyThreshold) {
+		//idle time of the in-band sellers (those priced near our sell price); far-above-market orders don't count here
+		const sellerIdleDays = report.daysSinceInBandSellerUpdate !== undefined
+			? report.daysSinceInBandSellerUpdate
+			: report.daysSinceSellerUpdate;
+		if (sellerIdleDays !== null && sellerIdleDays !== undefined && sellerIdleDays < tooRecentlyThreshold) {
 			return 'seller updated too recently';
 		}
 
