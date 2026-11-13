@@ -31,7 +31,7 @@ const STATIONS = {
 };
 
 const DAYS_CONSIDERED = 30;
-const DAYS_TO_COMPLETE = 5;
+const DEFAULT_DAYS_TO_COMPLETE = 5; // the page's "days to clear" input overrides it per run
 const HAULING_REWARD_FRACTION = 0.10;
 const COST_LIMIT = 10 * Math.pow(10, 9);
 const MIN_ROI = 1.5;
@@ -112,7 +112,8 @@ const loadBooks = async ({ start, end, options = {}, onProgress = () => {} }) =>
 // Resolves {typeId, name, m3, report, isAlwaysShow}; report is null when there is nothing to buy.
 // options ({signal, queue}) is passed through to util so callers can use their own request queue.
 // With `books` (from loadBooks) the orders come from memory; otherwise one request per station.
-const buildRow = async ({ start, end, typeId, isAlwaysShow, books = null, options = {} }) => {
+// daysToComplete: the horizon the recommended quantity covers (days of demand minus competing stock).
+const buildRow = async ({ start, end, typeId, isAlwaysShow, books = null, options = {}, daysToComplete = DEFAULT_DAYS_TO_COMPLETE }) => {
 	// 'all' returns buy and sell orders in one request; the estimate uses dest buy orders to spot buy-fill days.
 	const srcOrders = books
 		? (books.src.get(typeId) || [])
@@ -130,7 +131,7 @@ const buildRow = async ({ start, end, typeId, isAlwaysShow, books = null, option
 		typeId,
 		config: {
 			DAYS_CONSIDERED,
-			DAYS_TO_COMPLETE,
+			DAYS_TO_COMPLETE: daysToComplete,
 			HAULING_REWARD_FRACTION,
 			COST_LIMIT,
 			MIN_ROI,
@@ -156,7 +157,7 @@ const resolveTypeNames = async (names, options = {}) => {
 
 // alwaysShowIds: already-resolved type ids to report regardless of triage/filters. isAlwaysShow(typeId) is
 // consulted when each report is built, so the caller may change the set while the run is going.
-const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new Set(), isAlwaysShow = (id) => alwaysShowIds.has(id), signal, onRow = () => {}, onProgress = () => {}, onBooks = () => {} }) => {
+const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new Set(), isAlwaysShow = (id) => alwaysShowIds.has(id), daysToComplete = DEFAULT_DAYS_TO_COMPLETE, signal, onRow = () => {}, onProgress = () => {}, onBooks = () => {} }) => {
 	const start = STATIONS[startStationKey];
 	const end = STATIONS[endStationKey];
 	if (!start || !end) throw new Error(`unknown station (${startStationKey} -> ${endStationKey})`);
@@ -230,7 +231,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 					if (aborted()) return;
 					const books = await booksPromise;
 					if (aborted()) return;
-					const row = await buildRow({ start, end, typeId, isAlwaysShow: isAlwaysShow(typeId), books });
+					const row = await buildRow({ start, end, typeId, isAlwaysShow: isAlwaysShow(typeId), books, daysToComplete });
 					progress.reportsDone++;
 					if (!row.report) {
 						progress.noReport++;
@@ -340,8 +341,10 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	const stopBtn = $('#stop');
 	const autoRunChk = $('#autoRun');
 	const globalFactorInput = $('#globalFactor');
+	const daysToClearInput = $('#daysToClear');
 	const showFilteredChk = $('#showFiltered');
 	const searchInput = $('#search');
+	const searchNote = $('#searchNote');
 	const copyBtn = $('#copy');
 	const progressElem = $('#progress');
 	const headerElem = $('#reportHeader');
@@ -382,6 +385,18 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	let factorOverrides = {}; // typeId -> factor (current route)
 	let globalFactor = +lsGet('globalFactor', 1);
 	if (!(globalFactor >= 0)) globalFactor = 1;
+	// "days to clear": an integer >= 1. daysToClear is the input's last valid value; runDaysToComplete is
+	// the horizon every row in the table shares (live always-show edits and search lookups included).
+	// Run reads it once, so changing the input mid-run applies to the next Run. Without a run's rows
+	// (none yet, or the route changed since) it follows the input while the table is empty, so rows
+	// a search fetched before any run never disagree with it.
+	const parseDaysToClear = (v) => {
+		const d = Number(v);
+		return Number.isInteger(d) && d >= 1 ? d : null;
+	};
+	let daysToClear = parseDaysToClear(lsGet('daysToClear', DEFAULT_DAYS_TO_COMPLETE)) ?? DEFAULT_DAYS_TO_COMPLETE;
+	let runDaysToComplete = daysToClear;
+	let horizonFromRun = false;
 	let sort = lsGet('sort', { key: 'dailyProfitMil', dir: 'desc' });
 	let showFiltered = !!lsGet('showFiltered', false);
 	let pendingRender = false;
@@ -390,6 +405,12 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	let currentRun = null; // {controller}
 	let currentBooks = null; // order books from the latest run (used by live always-show edits)
 	let reportGeneratedAt = null;
+	let searchGen = 0; // bumped when the query changes or the table is cleared; a lookup that sees it move drops its result
+	let searchNoteIsMiss = false; // the note says "no item named …"
+	const setSearchNote = (text, isMiss = false) => {
+		searchNote.textContent = text;
+		searchNoteIsMiss = isMiss;
+	};
 
 	const route = () => `${startSel.value}-${endSel.value}`;
 	const loadRouteState = () => {
@@ -423,8 +444,9 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	const pct = (f) => (Math.round(f * 1000) / 10) + '%';
 	const mil = (v) => v === null || v === undefined ? '?' : `${v}M`;
 	const SUPPLY_BAND_TXT = `within ${pct(cfg.SUPPLY_BAND)} above the sell price`;
+	// `help` is a string, or a function for text that depends on the run (read on every header render).
 	const COLUMNS = [
-		{ key: 'select', label: '', sort: (r) => selected.has(r.typeId) ? 1 : 0, help: 'checked rows are always shown, summed in the totals and included in Copy orders. Greyed rows are marked items.' },
+		{ key: 'select', label: '', sort: (r) => selected.has(r.typeId) ? 1 : 0, help: 'checked rows are always shown, summed in the totals and included in Copy orders. Greyed rows are stocked items.' },
 		{ key: 'name', label: 'name', sort: (r) => r.name.toLowerCase(), text: true, help: 'dim rows were filtered out; hover the name for the reason' },
 		{ key: 'dailyProfitMil', label: 'daily profit', val: (r) => num(r.report.dailyProfitMil), fmt: fmtMil,
 			help: 'profit on the recommended quantity ÷ max(days to clear, 1), in millions',
@@ -434,19 +456,23 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			tip: (r) => `${mil(r.report.revenuePerItemMil)} ÷ ${mil(r.report.costPerItemMil)}` },
 		{ key: 'factor', label: 'factor', val: (r) => r.factor, help: 'multiplier on the recommended quantity; quantity = ceil(recommended × factor)' },
 		{ key: 'qty', label: 'quantity', val: orderQty, fmt: fmtNum,
-			help: `ceil(recommended × factor). Recommended = ${DAYS_TO_COMPLETE} days of demand minus competing stock (within ${pct(cfg.COMPETE_BAND)} above the sell price in full, dearer stock by its seller's rival weight), bought up the source book while each order still clears ${cfg.MIN_ROI}x ROI`,
-			tip: (r) => `${nf.format(r.report.volume)} recommended × factor ${r.factor} (demand ${r.report.dailyDemand}/day × ${DAYS_TO_COMPLETE} days − ${nf.format(r.report.competingVolume)} competing)` },
-		{ key: 'daysOfSupply', label: 'days of supply', val: (r) => num(r.report.daysOfSupply), fmt: fmtRoi,
+			help: () => `ceil(recommended × factor). Recommended = ${runDaysToComplete} days of demand minus competing stock (within ${pct(cfg.COMPETE_BAND)} above the sell price in full, dearer stock by its seller's rival weight), bought up the source book while each order still clears ${cfg.MIN_ROI}x ROI`,
+			tip: (r) => `${nf.format(r.report.volume)} recommended × factor ${r.factor} (demand ${r.report.dailyDemand}/day × ${runDaysToComplete} days − ${nf.format(r.report.competingVolume)} competing)` },
+		{ key: 'daysOfSupply', label: 'days of supply left', val: (r) => num(r.report.daysOfSupply), fmt: fmtRoi,
 			help: `units listed at the destination ${SUPPLY_BAND_TXT} ÷ demand per day: how long until the cheap stock is gone and the price steps up`,
 			tip: (r) => `${nf.format(r.report.supplyVolume)} units listed ${SUPPLY_BAND_TXT} (${mil(r.report.sellPriceMil)}) ÷ ${r.report.dailyDemand}/day` },
 		{ key: 'activeSellers', label: 'active sellers', val: (r) => num(r.report.activeSellers), fmt: fmtNum,
-			help: `destination sell orders ${SUPPLY_BAND_TXT} that were placed or changed within 24h of the newest such order; empty when none are in range`,
-			tip: (r) => `${nf.format(r.report.destSellOrderCount)} sell orders at the station, cheapest ${mil(r.report.destBestSellPriceMil)}; ${r.report.activeSellers ?? 0} active ${SUPPLY_BAND_TXT} (${mil(r.report.sellPriceMil)}); best buy order ${mil(r.report.destBestBuyPriceMil)}` },
+			help: 'destination sell orders at any price that were placed or changed within 24h of the newest one; empty when the station has no sell orders. Rivals weights these by price and recency',
+			tip: (r) => `${nf.format(r.report.destSellOrderCount)} sell orders at the station, cheapest ${mil(r.report.destBestSellPriceMil)}; ${r.report.activeSellers ?? 0} active; best buy order ${mil(r.report.destBestBuyPriceMil)}` },
 		{ key: 'rivals', label: 'rivals', val: (r) => num(r.report.rivals), fmt: fmtRoi,
 			help: `expected number of sellers who will undercut you: every sell order at the station counts its chance = ${cfg.RIVAL_RECENCY_DECAY} per idle day since it was touched × 1 within ${pct(cfg.SUPPLY_BAND)} above the sell price, falling as 1/multiple² beyond that. Drives the "too much competition" filter and weights out-of-band stock in competing volume`,
 			tip: (r) => `${r.report.rivals ?? '?'} expected rivals among ${nf.format(r.report.destSellOrderCount)} sell orders (sell price ${mil(r.report.sellPriceMil)})` },
 		{ key: 'daysSinceSellerUpdate', label: 'days idle', val: (r) => num(r.report.daysSinceSellerUpdate), fmt: fmtRoi,
-			help: `days since the newest in-range destination sell order (${SUPPLY_BAND_TXT}) was placed or changed` },
+			help: `days since the newest destination sell order at any price was placed or changed. The 'seller updated too recently' filter looks only at orders ${SUPPLY_BAND_TXT} (see the cell tooltip)`,
+			tip: (r) => {
+				const idle = r.report.daysSinceInBandSellerUpdate;
+				return `${SUPPLY_BAND_TXT}: ${idle === null || idle === undefined ? 'no orders' : `${idle} days idle`}`;
+			} },
 		{ key: 'km3', label: 'km3', val: km3Of, fmt: fmtNum, help: 'packaged volume of the order quantity, in thousands of m3',
 			tip: (r) => `${nf.format(r.m3 || 0)} m3 packaged per unit × ${nf.format(orderQty(r))}` },
 		{ key: 'activeDaysFraction', label: 'active days', val: (r) => num(r.report.activeDaysFraction), fmt: fmtRoi,
@@ -485,7 +511,8 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			const active = sort.key === col.key;
 			const arrow = active ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : '';
 			const cls = (col.text ? 'text ' : 'numeric ') + (active ? 'sorted' : '');
-			return `<th class="${cls}" data-key="${col.key}" title="${esc(col.help || '')}">${esc(col.label)}${arrow}</th>`;
+			const help = typeof col.help === 'function' ? col.help() : col.help;
+			return `<th class="${cls}" data-key="${col.key}" title="${esc(help || '')}">${esc(col.label)}${arrow}</th>`;
 		}).join('');
 	};
 
@@ -586,7 +613,15 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		rowByTypeId = new Map();
 		trByTypeId.clear();
 		tbodyElem.innerHTML = '';
+		searchGen++; // a search lookup still in flight belongs to the old table
+		setSearchNote('');
 	};
+
+	// Copy-name button icons (12px, drawn in currentColor). The button swaps its icon to confirm.
+	const svgIcon = (body) => `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+	const COPY_ICON = svgIcon('<rect x="4.25" y="4.25" width="7" height="7" rx="1.5"/><path d="M7.75 3V2.25a1.5 1.5 0 0 0-1.5-1.5h-4a1.5 1.5 0 0 0-1.5 1.5v4a1.5 1.5 0 0 0 1.5 1.5H3"/>');
+	const COPIED_ICON = svgIcon('<path d="M2 6.5l2.5 2.5L10 3"/>');
+	const FAILED_ICON = svgIcon('<path d="M3 3l6 6M9 3l-6 6"/>');
 
 	const updateRowEl = (tr, row) => {
 		const filtered = !!row.report.filteredReason;
@@ -624,10 +659,16 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 					const nameSpan = document.createElement('span');
 					nameSpan.className = 'name';
 					nameSpan.textContent = row.name;
+					const copyName = document.createElement('button');
+					copyName.type = 'button';
+					copyName.className = 'copyName';
+					copyName.title = 'Copy name';
+					copyName.setAttribute('aria-label', 'Copy name');
+					copyName.innerHTML = COPY_ICON;
 					const idSpan = document.createElement('span');
 					idSpan.className = 'dim';
 					idSpan.textContent = row.typeId;
-					td.append(nameSpan, ' ', idSpan);
+					td.append(nameSpan, copyName, ' ', idSpan);
 					break;
 				}
 				case 'factor': {
@@ -658,10 +699,10 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		return (showFiltered || !row.report.filteredReason) && passesColFilters(row);
 	};
 
-	const sortedVisibleRows = () => {
+	const searchQuery = () => searchInput.value.trim().toLowerCase();
+	const sortedVisibleRows = (query = searchQuery()) => {
 		const col = COLUMNS.find(c => c.key === sort.key);
 		const dir = sort.dir === 'asc' ? 1 : -1;
-		const query = searchInput.value.trim().toLowerCase();
 		const list = rows.filter(r => isRowVisible(r, query));
 		const keyed = list.map(r => ({ r, v: sortValue(col, r) }));
 		keyed.sort((a, b) => {
@@ -702,7 +743,8 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		lastRenderAt = Date.now();
 		renderHead();
 		const scrollY = window.scrollY;
-		const ordered = sortedVisibleRows();
+		const query = searchQuery();
+		const ordered = sortedVisibleRows(query);
 		const orderedIds = new Set(ordered.map(r => r.typeId));
 		// detach hidden rows (kept in trByTypeId so they can come back)
 		for (const [typeId, tr] of trByTypeId) {
@@ -715,6 +757,16 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			if (tr === cursor) cursor = cursor.nextSibling;
 			else tbodyElem.insertBefore(tr, cursor);
 		}
+		// Bold the names the search matches; rows shown only because they are selected or stocked stay regular.
+		let anyHit = false;
+		for (const [typeId, tr] of trByTypeId) {
+			const row = rowByTypeId.get(typeId);
+			const hit = !!query && !!row && row.name.toLowerCase().includes(query);
+			tr.classList.toggle('searchHit', hit);
+			if (hit && orderedIds.has(typeId)) anyHit = true;
+		}
+		// rows stream in during a run: a "no item named" note goes once a name contains the query after all
+		if (anyHit && searchNoteIsMiss) setSearchNote('');
 		if (window.scrollY !== scrollY) window.scrollTo(window.scrollX, scrollY);
 		updateSums();
 	};
@@ -770,6 +822,35 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		else selected.delete(hit.row.typeId);
 		saveSelected();
 		updateSums(); // no re-render here: the row node stays put, hiding (if now unselected) happens on the next render
+	});
+
+	// Copy-name buttons confirm in place: a check mark for 1s, or a red cross for 1.5s when the clipboard refuses.
+	const copyNameTimers = new WeakMap();
+	const setCopyNameState = (btn, icon, label, cls = null) => {
+		btn.innerHTML = icon;
+		btn.title = label;
+		btn.setAttribute('aria-label', label);
+		btn.classList.remove('copied', 'failed');
+		if (cls) btn.classList.add(cls);
+	};
+	tbodyElem.addEventListener('click', async (e) => {
+		const btn = e.target.closest('button.copyName');
+		if (!btn) return;
+		const hit = rowFromEvent(e);
+		if (!hit || !hit.row) return;
+		clearTimeout(copyNameTimers.get(btn));
+		btn.classList.add('pending');
+		try {
+			await navigator.clipboard.writeText(hit.row.name);
+			setCopyNameState(btn, COPIED_ICON, 'Copied', 'copied');
+			copyNameTimers.set(btn, setTimeout(() => setCopyNameState(btn, COPY_ICON, 'Copy name'), 1000));
+		} catch (err) {
+			console.error('clipboard write failed', err);
+			setCopyNameState(btn, FAILED_ICON, 'Copy failed', 'failed');
+			copyNameTimers.set(btn, setTimeout(() => setCopyNameState(btn, COPY_ICON, 'Copy name'), 1500));
+		} finally {
+			btn.classList.remove('pending');
+		}
 	});
 
 	tbodyElem.addEventListener('focusout', () => {
@@ -861,21 +942,26 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		loadRouteState();
 		clearRows();
 		rowBuffer = [];
+		currentBooks = null; // (before the await below, so a search lookup in the meantime fetches fresh orders)
+		runDaysToComplete = daysToClear; // fixed for this run
+		horizonFromRun = true;
 		reportGeneratedAt = moment().format('MMM. Do, h:mm a');
-		headerElem.innerHTML = `${esc(startSel.value)} &rarr; ${esc(endSel.value)} <span class="dim">${reportGeneratedAt}</span>`;
+		const horizon = `${runDaysToComplete} day${runDaysToComplete === 1 ? '' : 's'} to clear`;
+		headerElem.innerHTML = `${esc(startSel.value)} &rarr; ${esc(endSel.value)} <span class="dim">&middot;</span> ${horizon} <span class="dim">&middot; ${reportGeneratedAt}</span>`;
 		render();
+		scheduleSearchLookup(); // a standing search keeps finding its item in the new table
 
 		const controller = new AbortController();
 		currentRun = { controller };
 		setRunning(true);
 		try {
 			await syncAlwaysShow({ refreshRows: false });
-			currentBooks = null;
 			await runReport({
 				startStationKey: startSel.value,
 				endStationKey: endSel.value,
 				alwaysShowIds,
 				isAlwaysShow: (id) => alwaysShowIds.has(id),
+				daysToComplete: runDaysToComplete,
 				signal: controller.signal,
 				onRow: addRow,
 				onProgress: showProgress,
@@ -914,7 +1000,11 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		currentBooks = null; // books belong to a route
 		clearRows();
 		headerElem.textContent = '';
+		// the table no longer holds a run's rows: the horizon follows the input again until the next Run
+		horizonFromRun = false;
+		runDaysToComplete = daysToClear;
 		render();
+		scheduleSearchLookup();
 	};
 	startSel.addEventListener('change', () => onRouteChange(startSel));
 	endSel.addEventListener('change', () => onRouteChange(endSel));
@@ -937,14 +1027,26 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		render();
 	});
 
+	daysToClearInput.value = daysToClear;
+	daysToClearInput.addEventListener('input', () => {
+		const d = parseDaysToClear(daysToClearInput.value);
+		if (d === null) return;
+		daysToClear = d;
+		lsSet('daysToClear', d);
+		if (!horizonFromRun && rows.length === 0) {
+			runDaysToComplete = d;
+			renderHead();
+		}
+	});
+	// on commit, an invalid entry (blank, 0, 2.5) snaps back to the last valid value
+	daysToClearInput.addEventListener('change', () => { daysToClearInput.value = daysToClear; });
+
 	showFilteredChk.checked = showFiltered;
 	showFilteredChk.addEventListener('change', () => {
 		showFiltered = showFilteredChk.checked;
 		lsSet('showFiltered', showFiltered);
 		render();
 	});
-
-	searchInput.addEventListener('input', () => render());
 
 	//--- copy orders
 	const buildOrdersText = () => sortedVisibleRows()
@@ -1011,7 +1113,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			const end = STATIONS[endSel.value];
 			await Promise.all([...added, ...removed].map(async (typeId) => {
 				try {
-					const row = await buildRow({ start, end, typeId, isAlwaysShow: alwaysShowIds.has(typeId), books: currentBooks, options: liveOptions });
+					const row = await buildRow({ start, end, typeId, isAlwaysShow: alwaysShowIds.has(typeId), books: currentBooks, options: liveOptions, daysToComplete: runDaysToComplete });
 					if (row.report) addRow(row);
 				} catch (e) {
 					if (!isAbort(e)) console.error(`always-show refresh failed (typeId: ${typeId})`, e);
@@ -1027,6 +1129,73 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	});
 	$('#alwaysShowDetails').open = !!lsGet('alwaysShowOpen', false);
 	$('#alwaysShowDetails').addEventListener('toggle', e => lsSet('alwaysShowOpen', e.target.open));
+
+	//--- search: filters the table as you type; a query that exactly names an item without a row (it
+	// failed triage, or there is no run yet) fetches that item's row after a pause.
+	// ESI /universe/ids matches exact names only (case-insensitive); util caches hits, not misses.
+	const searchMisses = new Set(); // lower-cased names ESI does not know
+	let searchTimer = null;
+	const lookUpSearch = async () => {
+		const typed = searchInput.value.trim();
+		const q = typed.toLowerCase();
+		if (!q || rows.some(r => r.name.toLowerCase() === q)) return;
+		const gen = searchGen;
+		const stale = () => gen !== searchGen;
+		const startKey = startSel.value;
+		const endKey = endSel.value;
+		// a miss stays quiet while the text is part of names already in the table (a partial query)
+		const noteMiss = () => {
+			if (rows.some(r => r.name.toLowerCase().includes(q))) setSearchNote('');
+			else setSearchNote(`no item named “${typed}”`, true);
+		};
+		if (searchMisses.has(q)) { noteMiss(); return; }
+		setSearchNote(`looking up ${typed}…`);
+		try {
+			const typeId = await util.getTypeIdByName(typed, liveOptions);
+			if (stale()) return;
+			if (typeId === null || typeId === undefined) {
+				searchMisses.add(q);
+				noteMiss();
+				return;
+			}
+			if (rowByTypeId.has(typeId)) { setSearchNote(''); return; }
+			const row = await buildRow({
+				start: STATIONS[startKey],
+				end: STATIONS[endKey],
+				typeId,
+				isAlwaysShow: alwaysShowIds.has(typeId),
+				books: currentBooks,
+				options: liveOptions,
+				daysToComplete: runDaysToComplete
+			});
+			if (stale()) return;
+			if (row.report) {
+				addRow(row); // the row appearing is the outcome
+				setSearchNote('');
+			} else {
+				setSearchNote(`${row.name}: no sell orders at ${startKey}`);
+			}
+		} catch (e) {
+			if (stale()) return;
+			if (isAbort(e)) { setSearchNote(''); return; } // Stop pressed mid-lookup
+			console.error(`search lookup failed (${typed})`, e);
+			setSearchNote(`lookup failed for “${typed}”`);
+		}
+	};
+	const scheduleSearchLookup = () => {
+		clearTimeout(searchTimer);
+		searchTimer = setTimeout(lookUpSearch, 400);
+	};
+	let lastSearchQuery = searchQuery();
+	searchInput.addEventListener('input', () => {
+		render();
+		const q = searchQuery();
+		if (q === lastSearchQuery) return; // (whitespace-only edits)
+		lastSearchQuery = q;
+		searchGen++; // drop the result of a lookup still in flight for the old query
+		setSearchNote('');
+		scheduleSearchLookup();
+	});
 
 	//--- init
 	loadRouteState();

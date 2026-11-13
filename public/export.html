@@ -31,7 +31,42 @@
 			color: red;
 		}
 		tr.alwaysShowItem td {
-			opacity: 0.3; /* marked items: greyed, whole row */
+			opacity: 0.3; /* stocked items: greyed, whole row */
+		}
+		tr.alwaysShowItem span.name {
+			text-decoration: line-through;
+		}
+		tr.searchHit span.name {
+			font-weight: bold;
+		}
+		/* Copy-name icon button. Its 18px hit area is well under the 44px touch guidance; fine for
+		   this dense desktop table, where a bigger target would stretch every row. */
+		button.copyName {
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			box-sizing: border-box;
+			min-width: 18px;
+			min-height: 18px;
+			border: none;
+			background: none;
+			color: rgb(150, 150, 150);
+			padding: 0 3px;
+			margin: 0 2px;
+			cursor: pointer;
+			vertical-align: middle;
+			font: inherit;
+			line-height: 1; /* after `font`, which resets it */
+		}
+		tr:hover .copyName, .copyName:focus-visible {
+			color: #111;
+		}
+		.copyName:focus-visible {
+			outline: 2px solid #4a72c4;
+			outline-offset: 1px;
+		}
+		button.copyName.pending, button.copyName.failed {
+			color: red;
 		}
 		#controls {
 			display: flex;
@@ -51,6 +86,9 @@
 		}
 		#globalFactor {
 			width: 4.5em;
+		}
+		#daysToClear {
+			width: 3.5em;
 		}
 		#progress {
 			font-variant-numeric: tabular-nums;
@@ -183,14 +221,15 @@
 		<button id="stop" disabled>Stop</button>
 		<label><input id="autoRun" type="checkbox" /> auto-run on load</label>
 		<label>global factor <input id="globalFactor" type="number" step="0.1" min="0" value="1" /></label>
+		<label title="horizon for the recommended quantity: this many days of demand minus competing stock. Read when you press Run; changing it mid-run applies to the next Run">days to clear <input id="daysToClear" type="number" step="1" min="1" value="5" /></label>
 		<label><input id="showFiltered" type="checkbox" /> show filtered</label>
-		<label>search <input id="search" type="search" /></label>
+		<label>search <input id="search" type="search" /> <span id="searchNote" class="dim" aria-live="polite"></span></label>
 		<button id="copy">Copy orders</button>
 	</div>
 	<div id="progress" class="dim">idle</div>
 	<details id="alwaysShowDetails">
-		<summary class="dim">marked items</summary>
-		<textarea id="alwaysShowText" spellcheck="false" placeholder="One item name per line, exactly as shown in game, e.g.&#10;Griffin&#10;Small Pulse Laser Battery&#10;// lines starting with // are ignored&#10;&#10;Marked items always get a report and are never hidden by the filters, the min/max ranges or the search box."></textarea>
+		<summary class="dim">stocked items</summary>
+		<textarea id="alwaysShowText" spellcheck="false" placeholder="One item name per line, exactly as shown in game, e.g.&#10;Griffin&#10;Small Pulse Laser Battery&#10;// lines starting with // are ignored&#10;&#10;Stocked items always get a report and are never hidden by the filters, the min/max ranges or the search box."></textarea>
 		<div id="alwaysShowNote" class="dim"></div>
 	</details>
 	<div id="reportHeader"></div>
