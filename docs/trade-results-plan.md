@@ -195,7 +195,11 @@ destination station D), the runs, packaged m3 per type, the window, and the bonu
      not-yet-batched lots of that type bought by L before its `date_issued`, newest first (any
      location), splitting a lot if needed: the buyer bought them for this hand-off, and older
      unbatched lots are something else. Consumed lots get its `batchId`. Units the lots cannot
-     cover are the batch's `unsourcedQty`: shown, flagged `unsourced`.
+     cover are the batch's `unsourcedQty`: shown, flagged `unsourced`, and warned about (UI 2).
+   - No unit is counted twice: once a batch has taken units of a lot, no later batch can take them,
+     so two hand-offs issued back to back split the lots between them. If both contain the same
+     type, newest-first may hand the first contract the later purchase; the totals are unchanged,
+     only the split of cost between the two batches.
    - Lots no batch consumes stay unbatched and show as a count, not as P&L exclusions.
 3. **FIFO per type, pooled across L.** Order lots by `date`, then `transaction_id`. Each sell at D
    consumes the oldest units and records `{sellTxId, lotId, qty}`.
@@ -309,6 +313,10 @@ lookups.
    bonuses" (default on).
    - In run mode, the run's batches are shown under it with their item-exchange and courier
      contract ids and the courier's reward. Unplanned batches get their own dropdown entry.
+   - A batch with `unsourcedQty` gets a warning line under it, one per type: "n × <type> in
+     contract <id> has no matching purchase (synced through <date>)", and the run's dropdown entry
+     carries a warning mark. Usual causes: a buy older than the synced history, a buy by a
+     character that is not linked, or stock that was never bought on the market.
 3. **Table, one row per type:**
    - name + type id, with flags `unplanned` / `unsourced` / `unarrived` / `est` / `uncovered` /
      `mismatch`;
@@ -321,7 +329,7 @@ lookups.
    Default sort: realized profit, descending.
 4. **Totals strip.** Spent, gross sales, tax, broker, haul (with bonuses if counted), realized
    profit and ROI, unrealized at cost and at market, predicted profit (run mode), the cross-check
-   remainder, and the counts of unbatched lots and other donations.
+   remainder, and the counts of unbatched lots, unsourced units and other donations.
 5. **States.**
    - Empty: SSO not configured (`GET /api/config`) shows the setup steps. No characters shows
      "Link the characters that buy and sell". No trades in the window offers "widen window".
