@@ -199,7 +199,7 @@ destination station D), the runs, packaged m3 per type, the window, and the bonu
    - No unit is counted twice: once a batch has taken units of a lot, no later batch can take them,
      so two hand-offs issued back to back split the lots between them. If both contain the same
      type, newest-first may hand the first contract the later purchase; the totals are unchanged,
-     only the split of cost between the two batches.
+     only the split of cost between the two batches. Accepted (decision 10).
    - Lots no batch consumes stay unbatched and show as a count, not as P&L exclusions.
 3. **FIFO per type, pooled across L.** Order lots by `date`, then `transaction_id`. Each sell at D
    consumes the oldest units and records `{sellTxId, lotId, qty}`.
@@ -502,6 +502,9 @@ Gate: grep is clean and the tests pass.
    No time-window attribution. Default view: latest run.
 8. Removed character: revoke the token, keep the history.
 9. `ESI_USER_AGENT` contact: app name + main character name.
+10. Newest-first stays (2026-11-13). When two hand-offs are issued back to back and share a type,
+    the lots may be mixed between them; Rocky: "in that kind of scenario where I double buy then
+    double create contract its ok for source items to be mixed."
 
 ### Still open
 
