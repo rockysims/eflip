@@ -24,24 +24,13 @@ app.use(express.static('public'));
 // });
 
 require('./lib/cache-files').mountCacheRoutes(app, path.join(__dirname, 'cache'));
+require('./lib/api').mountApi(app);
 
 //---
 
 const port = process.env.PORT || 5001;
-app.listen(port, () => console.log(`Listening on port ${port}...`));
-
-(() => {
-	const host = 'localhost';
-	const port = 4000;
-	const cors_proxy = require('cors-anywhere');
-	cors_proxy.createServer({
-		originWhitelist: [], // Allow all origins
-		requireHeader: [],
-		removeHeaders: ['cookie', 'cookie2']
-	}).listen(port, host, function() {
-		console.log('Running CORS Anywhere on ' + host + ':' + port);
-	});
-})();
+const host = process.env.HOST || '127.0.0.1';
+app.listen(port, host, () => console.log(`Listening on http://${host}:${port}`));
 
 // const csvToJson = require('convert-csv-to-json');
 // let fileInputName = 'public/invTypes.csv'; 

@@ -15,6 +15,14 @@ figure compares with the export page's prediction. Every figure comes from the u
 reach `public/`, the browser, git or `cache/`: the Express server holds them, and pages call a few
 `/api/...` routes.
 
+Terms used below:
+- **run**: the export report snapshot saved when the user presses "Copy orders" on the export
+  page; `copiedAt` is that moment.
+- **batch**: the finished item-exchange contract from the buying character to the selling
+  character, which says what was actually exported.
+- **courier**: the courier contract that carries a batch from S to D.
+- **bonus**: a player donation to that courier's hauler.
+
 ## Recommendation
 
 1. **Confidential client run by the Express server** (your prior, confirmed). CCP describes the
@@ -173,8 +181,7 @@ Inputs: the merged ledgers of the selected characters (set L), the route (source
 destination station D), the runs, packaged m3 per type, the window, and the bonus toggle.
 
 1. **Scope.** Count transactions of L with `is_personal: true` and `client_id` ∉ L.
-   - Every buy, at any location, becomes a lot. Batches (rule 2) decide what counts as exported;
-     a run without one falls back to its time window (Comparison, rule 2).
+   - Every buy, at any location, becomes a lot. Batches (rule 2) decide what counts as exported.
    - Sell: `!is_buy && location_id === D`. Other sells show as a count and stay out of P&L.
    - Each lot keeps an informational "elsewhere" tag: at S, same region, or other.
 2. **Lots and batches.** Each buy becomes `{typeId, qty, unitPrice, date, characterId, locationId,
@@ -184,15 +191,16 @@ destination station D), the runs, packaged m3 per type, the window, and the bonu
    - A **batch** is a `finished` `item_exchange` contract whose issuer and assignee or acceptor are
      both in L: the buyer handing the goods to the seller. Its items with `is_included: true` give
      `{typeId, qty}` per type.
-   - Batches are taken in `date_issued` order. For each type, a batch consumes the oldest
-     not-yet-batched lots of that type bought by L before its `date_issued` (any location),
-     splitting a lot if needed; consumed lots get its `batchId`. Units the lots cannot cover are
-     the batch's `unsourcedQty`: shown, flagged `unsourced`.
+   - Batches are taken in `date_issued` order. For each type, a batch consumes the **newest**
+     not-yet-batched lots of that type bought by L before its `date_issued`, newest first (any
+     location), splitting a lot if needed: the buyer bought them for this hand-off, and older
+     unbatched lots are something else. Consumed lots get its `batchId`. Units the lots cannot
+     cover are the batch's `unsourcedQty`: shown, flagged `unsourced`.
    - Lots no batch consumes stay unbatched and show as a count, not as P&L exclusions.
 3. **FIFO per type, pooled across L.** Order lots by `date`, then `transaction_id`. Each sell at D
    consumes the oldest units and records `{sellTxId, lotId, qty}`.
    - Lots that have arrived go first: carried by a `finished` courier (rule 6), through their
-     batch or, in a window-attributed run, directly. Then any lot of that type, flagged `unarrived`.
+     batch. Then any lot of that type, flagged `unarrived`.
    - Sold units with no lot left are `uncoveredQty`: shown, but kept out of realized profit.
    - FIFO is preferred over average cost because each run's lots stay distinct, which gives
      per-run profit and sell-out time directly. Averaging would blur back-to-back runs bought at
@@ -225,8 +233,9 @@ destination station D), the runs, packaged m3 per type, the window, and the bonu
    by m3 as in rule 6.
    - A **bonus** is a `player_donation` from L to a character not in L whose `second_party_id` is
      the `acceptor_id` of one of L's courier contracts, dated from its `date_accepted` to
-     `date_completed` + 7 days (open while in progress). It adds to that courier's cost; if
-     several couriers qualify, the most recently accepted one takes it.
+     `date_completed` + 48 h (the user pays within 24 h of completion; open-ended while in
+     progress). It adds to that courier's cost; if several couriers qualify, the most recently
+     accepted one takes it.
    - The results-page toggle "count hauler bonuses" (default on) includes them.
    - Other donations to outsiders are listed as "other donations" and never counted.
 8. **Realized**, per type, over sells in the window:
@@ -268,15 +277,13 @@ destination station D), the runs, packaged m3 per type, the window, and the bonu
    `copiedAt` ≤ its `date_issued` and at most 7 days before it; otherwise it gets `runId: null`
    and shows as an "unplanned batch". Its lots inherit its `runId`; batch types the run does not
    list are flagged `unplanned`.
-   - Fallback: a run no batch maps to (one character does the whole export, or the hand-off is not
-     issued yet) is "window-attributed". An unbatched buy of T at the run's source within
-     [`copiedAt` − 10 min, `copiedAt` + 24 h] belongs to the latest such run listing T. Other
-     unbatched buys in that span join it as `unplanned`.
+   - A run with no batch yet (the hand-off not issued, or not synced) shows "waiting for the
+     hand-off contract": its predicted rows, no actuals.
 3. **Per run, per type:**
 
    | predicted | actual |
    |---|---|
-   | `qty` | batched (fill %); bought, if window-attributed |
+   | `qty` | batched (fill %) |
    | `costPerItemMil` (includes the 10 % haul allowance) | landed cost/item (buy + haul + fee) |
    | `sellPriceMil` | average gross sell price |
    | `revenuePerItemMil` (net of `SELL_TAX`) | `netPerItem` |
@@ -297,9 +304,9 @@ lookups.
    failed: …" (retry).
    - Each chip has Sync and Remove. Remove asks to confirm and offers "also delete synced data".
    - The strip ends with "+ Add character" (link to `/sso/login`) and "Sync all".
-2. **Window bar.** Run dropdown (`copiedAt · route · n types · predicted profit`, marked
-   "window-attributed" when it is), or "since" (7/30/90 days or a date) with a route selector,
-   plus search, "show sold out" and "count hauler bonuses" (default on).
+2. **Window bar.** Run dropdown (`copiedAt · route · n types · predicted profit`), or "since"
+   (7/30/90 days or a date) with a route selector, plus search, "show sold out" and "count hauler
+   bonuses" (default on).
    - In run mode, the run's batches are shown under it with their item-exchange and courier
      contract ids and the courier's reward. Unplanned batches get their own dropdown entry.
 3. **Table, one row per type:**
@@ -364,9 +371,9 @@ lookups.
    "eFlip (local)" with connection type "Authentication & API Access". Add the four scopes and the
    callback `http://localhost:5001/sso/callback`, then copy the Client ID and Secret into `.env`.
    Adding a scope later means re-linking every character.
-8. **Localhost only** (assumed; decision 6 is open). Heroku is legacy: its disk is ephemeral and
-   the server has no user auth. So `/api` and `/sso` answer 404 when `NODE_ENV=production` or the
-   `Host` is not local.
+8. **Local only.** The tool runs on the user's machine only (decision 6): `Procfile` is deleted
+   and nothing depends on `NODE_ENV`. The Host and Origin guards (item 4) still apply, for DNS
+   rebinding and other local processes.
 
 ## Phases
 
@@ -375,11 +382,11 @@ Landed (commit 1dd687d): the `/file/:path` guard, as
 `lib/cache-files.js` (`safeCachePath` + `mountCacheRoutes`), with `test/server-file.test.js`.
 
 Remaining scope: `lib/api.js` (empty router + Host/Origin guards), the `HOST` bind to 127.0.0.1,
-dropping `cors-anywhere` from `server.js` and `package.json`, and `data/` in `.gitignore`. No
-`public/` edits.
+dropping `cors-anywhere` from `server.js` and `package.json`, deleting `Procfile`, `data/` in
+`.gitignore`, and a README note on `HOST`/`PORT` and local-only use. No `public/` edits.
 
 Gate:
-- `node --test 'test/*.test.js'` passes.
+- `node --test` passes.
 - Regression check: `curl -i localhost:5001/file/..%2F.env` still returns 400, and normal cache
   reads still work.
 - `/api` rejects a foreign `Host` or `Origin`.
@@ -416,12 +423,12 @@ the Phase 2 samples, cover:
 - FIFO across two characters; uncovered sells; arrived lots first, the `unarrived` fallback;
 - tax match and fallback; broker time-match, buy-side fees and the pro-rata remainder;
 - batches from item-exchange contracts: lot assignment per type, a split lot, `unsourcedQty`;
-- batch → run mapping: the 7-day edge, two runs, an unplanned batch;
+- batch → run mapping: the 7-day edge, two runs, an unplanned batch, a run with no batch yet
+  (waiting state);
 - courier matching to batches; one courier split by m3 over two batches; a courier with no batch,
   with and without an item list;
 - hauler bonus matched by acceptor, inside and outside its dates; other donations; the toggle;
   internal flows ignored;
-- window fallback for a run with no batch: window edges, two runs, unplanned;
 - remaining in both views, days on market and projection, and the cross-check.
 
 Gate: `node --test 'test/*.test.js'`.
@@ -471,28 +478,26 @@ Gate: grep is clean and the tests pass.
 - Selling through contracts.
 - Skill modeling: the journal gives the actual amounts.
 - Moving the public market URLs off `/latest/`.
-- Heroku deployment of SSO.
+- Any hosted deployment: Heroku is dropped. `cron.js` is dead code (it calls a Heroku URL and a
+  route that no longer exists) and is left alone.
 - Charts.
 
-## Decisions (2026-11-12)
+## Decisions (2026-11-12, updated 2026-11-13)
 
 1. Cost basis: FIFO, pooled across linked characters.
 2. Broker fees: time-match to orders, pro-rata remainder flagged `est`.
 3. Characters: link Ivan and Grant, pooled.
 4. Hauler donations: yes, bonuses on the matching courier, behind "count hauler bonuses" (rule 7).
 5. Which buys count: superseded by 7; buys anywhere make lots, the hand-off contract decides.
-6. Heroku: open: the user asked what local-only means; plan assumes local-only until answered.
-7. Runs: Ivan → Grant item exchange = batch, then a courier; 24 h window only as fallback.
-   Default view: latest run.
+6. Heroku: dropped (2026-11-13); the tool runs locally only.
+7. Runs: Ivan → Grant item exchange = batch, taking the newest buys before it, then a courier.
+   No time-window attribution. Default view: latest run.
 8. Removed character: revoke the token, keep the history.
 9. `ESI_USER_AGENT` contact: app name + main character name.
 
 ### Still open
 
-1. Heroku (decision 6). "Local-only" means SSO, tokens and results.html work only when the server
-   runs on your own machine; the Heroku app keeps serving the public pages, with `/api` and
-   `/sso` answering 404 there. Keep Heroku that way, or drop it? [keep for public pages;
-   SSO/results local-only; drop cors-anywhere]
+None.
 
 ## Sources
 
