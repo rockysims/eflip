@@ -53,22 +53,23 @@ const ignoreOneActiveSellerForTypeIds = [
 	// 34278, // Polarized Light Neutron Blaster (34278)
 ];
 
-// Seeds the always-show textarea the first time the page is opened; after that the list lives in the UI.
+// Seeds the stocked-items box the first time the page is opened (list from master3, 2026-11-06).
+// After that the box is the source of truth; this list is not consulted again.
 const DEFAULT_ALWAYS_SHOW_NAMES = [
-	// 'Blood Silver Tag',
-	// 'Corelum B-Type Thermal Energized Membrane',
-	// 'Gravid Ice Harvester Mutaplasmid',
-	// 'Large Projectile Metastasis Adjuster II',
-	// 'Lattice Locked Dekaisogen',
-	// 'Mobile Phase Anchor',
-	// 'Small Pulse Laser Battery',
-	// 'Standup Ballistic Control System I',
-	// 'Standup Radar ECM Script',
-	// 'Trinary State Processor',
-	// 'Void XL',
-
-	// 'Domination Torpedo Launcher',
-	// 'Variegated Asteroid Mining Crystal Type B I',
+	'Blood Brass Tag',
+	'Capital Compact Pb-Acid Cap Battery',
+	'Corelum A-Type Kinetic Energized Membrane',
+	'Corelum B-Type Thermal Energized Membrane',
+	'Decayed Damage Control Mutaplasmid',
+	'Information Command Burst I',
+	'Ladar Sensor Cluster',
+	'Large Polycarbon Engine Housing II',
+	'Noctis Refined Resourcer SKIN',
+	'Reaction-Orienting Neurolink Stabilizer',
+	'Republic Fleet Rocket Launcher',
+	'Standup Flak Round I',
+	'Standup M-Set Energy Neutralizer Economy I',
+	'Standup Radar ECM Script',
 ];
 
 const isAbort = (e) => !!e && e.name === 'AbortError';
