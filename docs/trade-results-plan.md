@@ -108,9 +108,8 @@ Terms used below:
   - Added 2026-11-13, because a scope added later means re-linking every character (Server
     changes 7): `esi-skills.read_skills.v1` (the trade skills explain the real broker and tax
     rates the export page assumes as constants), `esi-characters.read_standings.v1` (the broker
-    fee depends on standings) and `esi-universe.read_structures.v1` (structure names). The exact
-    scope strings are to verify against the OpenAPI spec in Phase 2; the spec could not be fetched
-    when this was written.
+    fee depends on standings) and `esi-universe.read_structures.v1` (structure names). All three
+    confirmed against the OpenAPI spec (compatibility date 2026-08-18) on 2026-11-13.
 
 | route `/characters/{id}/…` | scope | group, tokens/15 min | ESI cache | paging | retention |
 |---|---|---|---|---|---|
@@ -120,9 +119,9 @@ Terms used below:
 | `orders/history` | orders | none (error limit) | 3600 s | `page` + `X-Pages` | 90 days, cancelled/expired |
 | `assets` | assets | `char-asset` 1800 | 3600 s | `page` + `X-Pages` | snapshot |
 | `contracts`, `contracts/{cid}/items` | contracts | `char-contract` 600 | 300 / 3600 s | `page` + `X-Pages` (list only) | 30 days or `in_progress` (spec) |
-| `skills` | skills (to verify) | to fill in | to fill in | none | snapshot; refreshed daily |
-| `standings` | standings (to verify) | to fill in | to fill in | none | snapshot; refreshed daily |
-| `/universe/structures/{id}` (not under `/characters/`) | structures (to verify) | to fill in | to fill in | none | fetched once per structure id |
+| `skills` | skills | `char-detail` 600 | 60 s (event-based) | none | snapshot; refreshed daily |
+| `standings` | standings | `char-social` 600 | 3600 s | none | snapshot; refreshed daily |
+| `/universe/structures/{id}` (not under `/characters/`) | structures | none (error limit) | 3600 s | none | fetched once per structure id |
 
 **Contracts.** Batches and couriers (rules 2, 6, 7) rely on these:
 - `/characters/{id}/contracts` (`esi-contracts.read_character_contracts.v1`) returns a contract
@@ -213,7 +212,8 @@ so a long break does not lose a month of wallet history):
 **Budget.** One sync is about 3–5 `char-wallet` calls (≤ 10 of 150 tokens), 1–10 contract calls,
 1–3 asset pages, and once a day one skills and one standings call. The destination market
 snapshot adds up to 300 order calls (≤ 600 of the 12000 `market-order` tokens, 2 per call, which
-is why it waits for a run in progress) and up to 300 history calls (their group: to fill in).
+is why it waits for a run in progress) and up to 300 history calls (no bucket: the legacy error
+limit).
 Syncs are at most hourly, which matches the cache timers. Price lookups take 2 tokens per held
 type from the same market-order bucket. A group with `X-Ratelimit-Remaining` below 20 % pauses
 until `Retry-After` or the window passes.
@@ -648,10 +648,9 @@ run; empty, loading and error states looked at.
 ### Still open
 
 - Whether a fully filled sell order appears in `orders/history` as `state: expired` with
-  `volume_remain: 0` (community reading; ESI documents no "filled" state). Confirm in the Phase 2
+  `volume_remain: 0`. The spec's `state` enum is only `cancelled` and `expired`, so a sold-out
+  order can appear no other way, if at all (community reading: it does). Confirm in the Phase 2
   sample; sold-out detection and the relist view depend on it.
-- The rate-limit groups and cache timers of the skills, standings and structures routes, and the
-  exact scope strings (ESI facts table).
 
 ## Sources
 
