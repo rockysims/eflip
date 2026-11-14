@@ -1,11 +1,13 @@
 # Trade results (results.html) — plan
 
 Branch: a new `claude/trade-results-<hash>` off the `feature/*` branch that carries the export
-rework. New: `lib/` (server modules), `public/results.html`, `public/results.js`,
-`public/results-calc.js`, `test/{results-calc,sso,ledger,server-file}.test.js`, `.env.example`.
-Changed: `server.js`, `.gitignore`, `package.json`, `public/export.js` (Copy persists the run),
-`README.md`. Retired at the end: `public/exportAndSold.*`, `public/env.js`, util.js wallet
-getters. Out of scope: `index.*`, `jack.js`, `missing.*`, `resell.*`, `reprocess.js`.
+rework. New: `lib/` (server modules, including `lib/derive.js`), `scripts/sync.js`,
+`public/results.html`, `public/results.js`, `public/results-calc.js`, `public/insights.html`,
+`public/insights.js`, `test/{results-calc,sso,ledger,derive,server-file}.test.js`,
+`.env.example`. Changed: `server.js`, `.gitignore`, `package.json`, `public/export.js` (Copy
+persists the run and its market context), `README.md`. Retired at the end:
+`public/exportAndSold.*`, `public/env.js`, util.js wallet getters. Out of scope: `index.*`,
+`jack.js`, `missing.*`, `resell.*`, `reprocess.js`.
 
 Goal and principle: after an export run (Copy orders → multibuy at the source → item-exchange
 hand-off from buyer to seller → courier → list at the destination), show what really happened:
@@ -14,6 +16,15 @@ figure compares with the export page's prediction. Every figure comes from the u
 (wallet, orders, assets, contracts), or from ESI market data for current prices. EVE tokens never
 reach `public/`, the browser, git or `cache/`: the Express server holds them, and pages call a few
 `/api/...` routes.
+
+Data principle (2026-11-13): save raw first, derive later. Every ESI response is stored verbatim,
+with its fetch time and the headers that matter (`ETag`, `Expires`, `Last-Modified`, `X-Pages`,
+`X-Ratelimit-*`), under `data/raw/<characterId>/<route-slug>/<fetchedAt>.json`; public routes go
+under `data/raw/public/...`. A 304 stores nothing, and a body whose content hash equals the last
+stored one is not stored again. Ledgers and snapshots are derived views that `lib/derive.js`
+rebuilds from raw, so a wrong rule is fixed by re-deriving, never by re-fetching. ESI forgets
+wallet rows after about 30 days; raw is the one copy that keeps everything that might be useful
+later, including data no rule uses yet.
 
 Terms used below:
 - **run**: the export report snapshot saved when the user presses "Copy orders" on the export
@@ -93,7 +104,13 @@ Terms used below:
   - A 401/403 costs 5 tokens: never retry a bad token in a loop.
 - **Scopes.** `esi-wallet.read_character_wallet.v1`, `esi-markets.read_character_orders.v1`,
   `esi-assets.read_assets.v1`, `esi-contracts.read_character_contracts.v1`. The character id and
-  name come from the JWT, so no extra scope is needed.
+  name come from the JWT, so no extra scope is needed for them.
+  - Added 2026-11-13, because a scope added later means re-linking every character (Server
+    changes 7): `esi-skills.read_skills.v1` (the trade skills explain the real broker and tax
+    rates the export page assumes as constants), `esi-characters.read_standings.v1` (the broker
+    fee depends on standings) and `esi-universe.read_structures.v1` (structure names). The exact
+    scope strings are to verify against the OpenAPI spec in Phase 2; the spec could not be fetched
+    when this was written.
 
 | route `/characters/{id}/…` | scope | group, tokens/15 min | ESI cache | paging | retention |
 |---|---|---|---|---|---|
@@ -103,6 +120,9 @@ Terms used below:
 | `orders/history` | orders | none (error limit) | 3600 s | `page` + `X-Pages` | 90 days, cancelled/expired |
 | `assets` | assets | `char-asset` 1800 | 3600 s | `page` + `X-Pages` | snapshot |
 | `contracts`, `contracts/{cid}/items` | contracts | `char-contract` 600 | 300 / 3600 s | `page` + `X-Pages` (list only) | 30 days or `in_progress` (spec) |
+| `skills` | skills (to verify) | to fill in | to fill in | none | snapshot; refreshed daily |
+| `standings` | standings (to verify) | to fill in | to fill in | none | snapshot; refreshed daily |
+| `/universe/structures/{id}` (not under `/characters/`) | structures (to verify) | to fill in | to fill in | none | fetched once per structure id |
 
 **Contracts.** Batches and couriers (rules 2, 6, 7) rely on these:
 - `/characters/{id}/contracts` (`esi-contracts.read_character_contracts.v1`) returns a contract
@@ -141,11 +161,21 @@ Server files live under `data/` (gitignored; `EFLIP_DATA_DIR` overrides the loca
 
 - `data/tokens.json`: `{version: 1, characters: {<id>: {characterId, name, ownerHash, scopes,
   refreshToken, linkedAt, refreshedAt, status: 'ok'|'relink', lastError}}}`.
+- `data/raw/<characterId>/<route-slug>/<fetchedAt>.json` (public routes: `data/raw/public/...`):
+  every 200 response verbatim with its headers (Data principle). `lib/derive.js` builds everything
+  under `data/ledger/` from these and can rebuild it from scratch.
 - `data/ledger/<characterId>/{transactions,journal,orders-history,contracts}.json`. Arrays merged
   by `transaction_id` / `id` / `order_id` / `contract_id`. Rows only accumulate, and order/contract
   status is last-write-wins. This is the durable history that outlives ESI's 30-day window.
 - `data/ledger/<characterId>/contract-items/<contractId>.json`: fetched once, never again.
-- `data/ledger/<characterId>/snapshot.json`: `{syncedAt, orders, assets}`, replaced each sync.
+- `data/ledger/<characterId>/snapshots/<syncedAt>.json`: `{syncedAt, orders, assets, balance}`,
+  one file per sync, kept (2026-11-13; it used to be one file replaced each sync). A sync whose
+  content hash equals the previous snapshot's writes nothing. Keeping them gives: the first sync
+  that saw an `order_id`, which is the true listing time (ESI's `issued` is the last
+  modification); the price path and relist count per order; fill timing between snapshots as a
+  cross-check on transactions; stock aging per station; and capital at work over time (Phase 8).
+- `data/ledger/<characterId>/profile.json`: `{fetchedAt, skills, standings}`, refreshed daily; the
+  raw copies keep the history.
 - `data/esi-cache/<characterId>/<route-slug>.json`: `{etag, expires, body, pages}`.
   - Keyed by path and query, never by token.
   - Sends `If-None-Match` (a 304 costs 1 token) and skips the call while `Expires` is ahead.
@@ -158,22 +188,35 @@ stripped, and the token travels only in the header, so no token lands in a name 
 - cache hits lose `X-Pages`/`ETag`;
 - the journal loop probes up to 100 pages and costs 5 tokens per 4xx.
 
-The page keeps `util.getOrFetch` for public data: type names, `packaged_volume`, and destination
-sell orders for "at market" values.
+The page keeps `util.getOrFetch` for type names and `packaged_volume`. "At market" values come
+from `GET /api/market`, the destination market snapshot the last sync stored raw (Sync 5), so the
+results page shows nothing that is not on disk.
 
-**Sync** (`lib/sync.js`) runs per character on page load when more than 60 min have passed, or on
-"Sync now":
+**Sync** (`lib/sync.js`) runs per character when export.html or results.html loads and more than
+60 min have passed since the last sync, on "Sync now", or from `node scripts/sync.js`: the same
+modules without the server, for a launchd job (README gives an optional plist that runs it daily,
+so a long break does not lose a month of wallet history):
 1. Transactions: without `from_id`, then `from_id = min(transaction_id)` until a batch is empty,
    all known, or older than the last sync.
 2. Journal: page 1, then the rest of `X-Pages`.
-3. Open orders, orders history, assets, contracts, and the items of each new courier or
-   item-exchange contract.
-4. Merge, then record `syncedAt`, errors and rate-limit headers.
+3. Open orders, orders history, assets, wallet balance, contracts, and the items of each new
+   courier or item-exchange contract.
+4. Skills and standings, at most once a day.
+5. Destination market snapshot: for every type that is held, listed, in transit or sold in the
+   last 90 days, the destination region's current orders for that type and its daily history,
+   stored raw. At most 300 types per sync, and only after any export run in progress finishes,
+   since it draws on the IP-keyed `market-order` bucket the export page shares. Gives: competition
+   at listing time against days to sell, the user's share of regional daily volume, and realized
+   price against the daily average (Phase 8).
+6. Store raw, derive, then record `syncedAt`, errors and rate-limit headers.
 
-**Budget.** One sync is about 3–5 `char-wallet` calls (≤ 10 of 150 tokens), 1–10 contract calls
-and 1–3 asset pages. Syncs are at most hourly, which matches the cache timers. Price lookups take
-2 tokens per held type from the 12000 market-order bucket. A group with `X-Ratelimit-Remaining`
-below 20 % pauses until `Retry-After` or the window passes.
+**Budget.** One sync is about 3–5 `char-wallet` calls (≤ 10 of 150 tokens), 1–10 contract calls,
+1–3 asset pages, and once a day one skills and one standings call. The destination market
+snapshot adds up to 300 order calls (≤ 600 of the 12000 `market-order` tokens, 2 per call, which
+is why it waits for a run in progress) and up to 300 history calls (their group: to fill in).
+Syncs are at most hourly, which matches the cache timers. Price lookups take 2 tokens per held
+type from the same market-order bucket. A group with `X-Ratelimit-Remaining` below 20 % pauses
+until `Retry-After` or the window passes.
 
 ## Profit accounting rules (`public/results-calc.js`, pure, UMD like `estimate.js`)
 
@@ -263,6 +306,18 @@ destination station D), the runs, packaged m3 per type, the window, and the bonu
     ledger; the window only selects what is summed. Totals include a journal cross-check like
     today's `exportAndSold` line: the window's market + tax + broker + contract + donation flows,
     against the attributed sum, with the difference shown as "unattributed".
+12. **Outputs** (2026-11-13). Besides the per-type rows the table shows, `results-calc.js`
+    returns the **fact table**: event-level arrays that every chart groups for itself, so no
+    chart has accounting of its own.
+    - `sells`: one row per sell allocation (a sell transaction split over the lots it consumed):
+      `{date, eveHour, weekday, typeId, characterId, qty, unitPrice, tax, brokerShare,
+      relistShare, haulShare, buyCost, lotId, batchId, runId, courierId, daysSinceListed,
+      daysSinceArrived}`.
+    - `fees`: one row per journal fee row (`brokers_fee`, `transaction_tax`, `contract_*`,
+      counted donations) with its attribution (order, type, batch or courier) and the `est` flag.
+    - `lots`: rule 2's lots plus `soldQty`, `firstListedAt` (the first snapshot that saw the sell
+      order) and `lastSoldAt`.
+    - `relists`: per `order_id`, the price path across snapshots and the fee rows matched to it.
 
 ## Comparison to the prediction
 
@@ -273,9 +328,18 @@ destination station D), the runs, packaged m3 per type, the window, and the bonu
    BROKER_FEE, HAULING_REWARD_FRACTION, MIN_ROI}, rows: [{typeId, name, m3, qty, factor,
    recommended (report.volume), costPerItemMil, revenuePerItemMil, sellPriceMil, profitPerItemMil,
    dailyProfitMil, daysToClear, dailyDemand, competingVolume}], totals: {costMil, revenueMil,
-   profitMil, km3}}`.
-   - `id = <route>-<reportGeneratedAt ISO>`. Re-copying the same report overwrites it (keeps the
-     first `copiedAt`, sets `lastCopiedAt`); a new Run makes a new id.
+   profitMil, km3}, lastCopiedAt, copyCount, context}`.
+   - `id = <route>-<reportGeneratedAt ISO>-<contentHash>`, where the content hash covers the
+     copied rows' `typeId` and `qty` only. A later click with identical content updates
+     `lastCopiedAt` and `copyCount` on the same file (Rocky: "don't save 3 times for 3 clicks if
+     the copied orders didn't change between the clicks"). A changed selection, factor or filter
+     makes a new run; a new Run makes a new `reportGeneratedAt`.
+   - A run is the plan, not the truth. Rocky: "A copy orders click definitely cannot be depended
+     on to match up one to one with actually purchased orders." The batch (the hand-off contract)
+     says what was exported; the run is only what it is compared against (item 2).
+   - `context` (2026-11-13): for each copied row, the top 20 of each order book the estimator
+     used (source and destination, buy and sell: `price, volume_remain, issued, duration, range`)
+     and the destination daily history rows it used. Written with the first copy of a run id.
    - If the POST fails the button shows "Copied (run not saved)" and the clipboard still works.
 2. **Batches to runs.** A batch (accounting rule 2) belongs to the latest persisted run with
    `copiedAt` ≤ its `date_issued` and at most 7 days before it; otherwise it gets `runId: null`
@@ -324,7 +388,9 @@ lookups.
    - remaining (source/transit/hangar/listed, broken down in the tooltip), unrealized at cost and
      at market, days on market, sell rate/day;
    - run mode adds predicted vs actual for qty, net rev/item, days to clear and profit, with Δ in
-     green (better) or red (worse).
+     green (better) or red (worse);
+   - Phase 8 adds an inline profit bar per row and a stacked cost bar (buy / haul / tax / broker /
+     relist against gross), CSS only.
 
    Default sort: realized profit, descending.
 4. **Totals strip.** Spent, gross sales, tax, broker, haul (with bonuses if counted), realized
@@ -340,6 +406,8 @@ lookups.
      is older than 25 days, warn "older trades and contracts may be lost (ESI keeps 30 days)".
    - Overflow: sort, search, sold-out rows hidden by default, sticky header, no pagination.
 6. **Retire** `exportAndSold.*` once the 30-day totals match it.
+7. **Insights page** (`public/insights.html`, Phase 8): the charts, on a separate page that shares
+   this window bar and `results-calc.js`. The table above stays the at-a-glance view.
 
 ## Server changes
 
@@ -348,7 +416,10 @@ lookups.
      `verifyJwt`.
    - `lib/tokenStore.js`.
    - `lib/esi.js`: compat date, `User-Agent`, ETag cache, rate limits, paging.
-   - `lib/ledger.js`, `lib/sync.js`.
+   - `lib/ledger.js`, `lib/sync.js`, `lib/derive.js` (raw → ledger, snapshots and profile;
+     rebuildable from scratch).
+   - `scripts/sync.js`: one sync from the command line without the server, same modules (for the
+     optional launchd job).
    - `lib/api.js`: an express Router mounted once in `server.js`, so later phases do not collide
      there.
 2. **SSO routes.**
@@ -361,7 +432,8 @@ lookups.
      token, and 302s to `/results.html?linked=<id>` or `?ssoError=<code>`.
 3. **API routes.** `GET /api/config`, `GET /api/characters`, `DELETE /api/characters/:id[?purge=1]`,
    `POST /api/sync {characterIds?, force?}`, `GET /api/ledger?characterIds=&since=`,
-   `POST|GET /api/runs`, `GET|DELETE /api/runs/:id`.
+   `GET /api/snapshots?characterIds=&since=` (retained snapshots), `GET /api/market?typeIds=`
+   (the latest destination market snapshot), `POST|GET /api/runs`, `GET|DELETE /api/runs/:id`.
 4. **Guards.**
    - `/api` and `/sso` reject a `Host` other than `localhost:<port>` or `127.0.0.1:<port>`, and
      an `Origin` that is present but not same-origin. No CORS headers are sent.
@@ -376,14 +448,18 @@ lookups.
 6. **`.gitignore`:** add `data/`. Then delete the stale `cache/*characters*wallet*` files that
    `exportAndSold` wrote.
 7. **Developer app (the user, once).** At `https://developers.eveonline.com/applications`, create
-   "eFlip (local)" with connection type "Authentication & API Access". Add the four scopes and the
-   callback `http://localhost:5001/sso/callback`, then copy the Client ID and Secret into `.env`.
-   Adding a scope later means re-linking every character.
+   "eFlip (local)" with connection type "Authentication & API Access". Add the seven scopes (ESI
+   facts) and the callback `http://localhost:5001/sso/callback`, then copy the Client ID and Secret
+   into `.env`. Adding a scope later means re-linking every character, which is why the three
+   extra scopes go in now (decision 13).
 8. **Local only.** The tool runs on the user's machine only (decision 6): `Procfile` is deleted
    and nothing depends on `NODE_ENV`. The Host and Origin guards (item 4) still apply, for DNS
    rebinding and other local processes.
 
 ## Phases
+
+Widened on 2026-11-13 (decisions 11–19): Phase 2 adds scopes, 3 the raw store and snapshots, 4
+the fact table, 5 the run context and dedupe, 7 the launchd note; Phase 8 is new.
 
 ### Phase 1 — server hardening (sonnet: small, exact spec)
 Landed (commit 1dd687d): the `/file/:path` guard, as
@@ -401,8 +477,9 @@ Gate:
 - The export page still runs, `lsof -i :5001` shows 127.0.0.1 only, and nothing listens on :4000.
 
 ### Phase 2 — SSO and token store (opus: security-sensitive, verify live)
-Scope: `lib/sso.js`, `lib/tokenStore.js`, `/sso/*`, `/api/config`, `/api/characters` (GET and
-DELETE), `.env.example`, `test/sso.test.js`. Tests: RSA and EC keys from
+Scope: `lib/sso.js`, `lib/tokenStore.js`, `/sso/*` (requesting all seven scopes; verify the three
+added strings against the spec first), `/api/config`, `/api/characters` (GET and DELETE),
+`.env.example`, `test/sso.test.js`. Tests: RSA and EC keys from
 `crypto.generateKeyPairSync`; bad iss/aud/exp/signature; string `scp`; single-flight refresh and
 token replacement, with `fetch` stubbed.
 
@@ -413,17 +490,24 @@ Gate:
 - Sample capture: an uncommitted script writes anonymized `brokers_fee`, `transaction_tax`,
   `market_transaction` and `contract_*` rows, plus matching transactions and orders, to
   `data/samples/`. Also a hand-off `item_exchange` and its `courier` contract, both with items,
-  and a `player_donation` to that courier's hauler.
-- Fable writes the observed `context_id_type` values and the Contracts "to confirm" answers into
+  and a `player_donation` to that courier's hauler, plus `orders/history` rows including one sell
+  order that sold out.
+- Fable writes the observed `context_id_type` values, the Contracts "to confirm" answers, the
+  filled-order reading of `orders/history` and the new routes' rate-limit groups (Still open) into
   this doc before Phase 4 freezes rules 2 and 4–7.
 
-### Phase 3 — ESI client, sync, ledger (sonnet)
-Scope: `lib/esi.js`, `lib/ledger.js`, `lib/sync.js`, `/api/sync`, `/api/ledger`,
-`test/ledger.test.js`. Tests: dedupe, `from_id` walk, X-Pages, 304 reuse, rate-limit stop, and
-401 → relink without retry.
+### Phase 3 — ESI client, raw store, sync, ledger (sonnet)
+Scope: `lib/esi.js`, `lib/ledger.js`, `lib/derive.js`, `lib/sync.js`, `scripts/sync.js`,
+`/api/sync`, `/api/ledger`, `/api/snapshots`, `/api/market`, `test/ledger.test.js`,
+`test/derive.test.js`. Includes the raw store, retained snapshots with the content-hash skip, the
+daily skills and standings refresh, and the capped destination market snapshot (Data model, Sync
+4–5). Tests: dedupe, `from_id` walk, X-Pages, 304 reuse (nothing stored), rate-limit stop, 401 →
+relink without retry, an unchanged snapshot writes no file, the 300-type cap, and re-deriving from
+raw gives the same ledger as the incremental build.
 
-Gate: tests pass. On a second sync, no ESI calls go out before `Expires`, and the ledger grows
-only by new ids.
+Gate: tests pass. On a second sync, no ESI calls go out before `Expires`, the ledger grows only by
+new ids, `data/raw/` holds every 200 body, and `node scripts/sync.js` runs with the server
+stopped.
 
 ### Phase 4 — accounting (opus: semantics need care; writes the tests), parallel with 2–3
 Scope: `public/results-calc.js`, `test/results-calc.test.js`. Hand-written fixtures, shaped like
@@ -437,16 +521,21 @@ the Phase 2 samples, cover:
   with and without an item list;
 - hauler bonus matched by acceptor, inside and outside its dates; other donations; the toggle;
   internal flows ignored;
-- remaining in both views, days on market and projection, and the cross-check.
+- remaining in both views, days on market and projection, and the cross-check;
+- the fact table (rule 12): every `sells` row ties back to a lot and a sell transaction, the
+  `sells` sums equal the per-type rows, `firstListedAt` from two snapshots, and one `relists`
+  entry with a price path.
 
 Gate: `node --test 'test/*.test.js'`.
 
 ### Phase 5 — persist runs (sonnet; after the in-flight export edits land)
-Scope: `/api/runs` in `lib/api.js`, plus the Copy handler and an ISO `reportGeneratedAt` in
-`public/export.js`. Nothing else in `export.*`.
+Scope: `/api/runs` in `lib/api.js`, plus the Copy handler, an ISO `reportGeneratedAt`, the
+content hash and the saved market context (Comparison 1) in `public/export.js`. Nothing else in
+`export.*`.
 
-Gate: two copies of one report leave one file in `data/runs/`, and a new Run adds a second. With
-the server stopped, Copy still copies.
+Gate: three clicks on an unchanged report leave one file in `data/runs/` with `copyCount: 3`;
+changing the global factor and copying again adds a second file; a new Run adds a third. The saved
+file holds the context books for every copied row. With the server stopped, Copy still copies.
 
 ### Phase 6 — results page (sonnet; after 3, 4, 5)
 Scope: `public/results.html`, `public/results.js`.
@@ -462,33 +551,68 @@ Gate:
 ### Phase 7 — retire and document (haiku: mechanical)
 Delete `public/exportAndSold.*`, the `env.js` references, and util's
 `getCharacterWalletTransactions` / `getCharacterWalletJournals` once grep finds no callers.
-Update `README.md`: setup, `.env` keys, "sync at least every few weeks".
+Update `README.md`: setup, the seven scopes, `.env` keys, "sync at least every few weeks", and the
+optional launchd plist that runs `node scripts/sync.js` daily.
 
 Gate: grep is clean and the tests pass.
 
+### Phase 8 — insights page (sonnet; after 6)
+Scope: `public/insights.html`, `public/insights.js`, plus the inline bars in the results table.
+The implementer loads the `dataviz` skill before writing chart code.
+
+- **Library.** Observable Plot from a pinned CDN script tag with its d3 peer, the way the pages
+  load `moment`. Pin the newest release that is at least two weeks old at implementation time
+  (Plot 0.6.19 was published 2026-11-05, d3 7.9.2 on 2026-11-03).
+- **Placement.** A separate page sharing the results page's window bar (run or since-date, route,
+  "count hauler bonuses") and `results-calc.js`; every chart groups the fact table (rule 12). The
+  results table stays the at-a-glance view.
+- **Build order**, the first five:
+  1. Cost waterfall for the window or run: gross sales → sales tax → listing fees → relist fees →
+     haul (with bonuses when counted) → buy cost → net profit; plus, in the results table, an
+     inline profit bar per row and a stacked cost bar (buy / haul / tax / broker / relist against
+     gross).
+  2. Sales heatmap, weekday × hour, in EVE time with a local-time toggle, as ISK and as units.
+  3. Sell-through curves per batch: cumulative share sold against days since arrival, the
+     predicted days to clear marked, all batches overlaid.
+  4. Prediction calibration: predicted vs realized profit per item, and predicted vs actual days
+     to clear, by run.
+  5. Capital at work: stacked area of ISK in wallet, escrow, source stock, in transit,
+     destination hangar and listed, by day (from the retained snapshots).
+- **Backlog**, after those: margin vs days-to-sell scatter (bubble = profit); weekly stacked cost
+  bars; relist view per item (count, cost, price decay from first listing to sale); time-to-sell
+  histogram; daily sales timeline with batch arrivals marked; dead stock (unsold past a threshold,
+  cost vs best price); competition at listing time vs days to sell (from the run context); run
+  scorecard; the user's share of regional daily volume; realized price vs the daily average.
+
+Gate: tests pass; each chart checked in the browser against the results table's totals for one
+run; empty, loading and error states looked at.
+
 ## Agent roster
 
-- **Models.** Phases 1, 3, 5 and 6: sonnet (bounded, clear briefs). Phases 2 and 4: opus (OAuth/JWT
-  correctness; accounting semantics). Phase 7: haiku.
+- **Models.** Phases 1, 3, 5, 6 and 8: sonnet (bounded, clear briefs; Phase 8 is declarative
+  charts over the fact table). Phases 2 and 4: opus (OAuth/JWT correctness; accounting semantics).
+  Phase 7: haiku.
 - **Sequencing.** Phase 4 runs in parallel with 2–3 because it only adds files. `lib/api.js` is
   touched by 1 → 2 → 3 → 5, in that order. Phase 5 waits for the agents now editing `export.js`.
+  Phase 8 follows 6.
 - **Fable.** Reviews the `lib/sso.js` and `results-calc.js` cruxes, reruns the gates, does the live
-  link and sample capture with the user, smoke-tests results.html in the browser, and commits.
-  Briefs say "do not commit".
+  link and sample capture with the user, smoke-tests results.html and insights.html in the
+  browser, and commits. Briefs say "do not commit".
 
 ## Out of scope
 
 - Corporation wallets, orders and assets.
-- Citadel markets and structure names (`esi-universe.read_structures.v1`); a buy in a structure
-  gets the lot tag "other".
-- Background or cron sync.
+- Citadel markets (`esi-markets.structure_markets.v1`); a buy in a structure gets the lot tag
+  "other", named through the structures scope (decision 13).
+- A hosted scheduler. The only background sync is the optional launchd job running
+  `scripts/sync.js` (decision 14).
 - Lost or failed courier accounting beyond a banner.
 - Selling through contracts.
-- Skill modeling: the journal gives the actual amounts.
+- Skill modeling in the accounting: the journal gives the actual amounts; skills and standings are
+  synced only to explain the rates.
 - Moving the public market URLs off `/latest/`.
 - Any hosted deployment: Heroku is dropped. `cron.js` is dead code (it calls a Heroku URL and a
   route that no longer exists) and is left alone.
-- Charts.
 
 ## Decisions (2026-11-12, updated 2026-11-13)
 
@@ -505,10 +629,29 @@ Gate: grep is clean and the tests pass.
 10. Newest-first stays (2026-11-13). When two hand-offs are issued back to back and share a type,
     the lots may be mixed between them; Rocky: "in that kind of scenario where I double buy then
     double create contract its ok for source items to be mixed."
+11. Raw-first store and retained snapshots (2026-11-13): every ESI response is kept verbatim;
+    ledgers and snapshots are derived and rebuildable.
+12. Market context (2026-11-13): the books and history behind each run are saved with it; each
+    sync takes a capped destination market snapshot for the types in play.
+13. Scopes (2026-11-13): skills, standings and structures are added at link time.
+14. Sync (2026-11-13): on any page load after an hour, and from `scripts/sync.js` for an optional
+    launchd job.
+15. Charts (2026-11-13): Observable Plot from a pinned CDN build.
+16. Insights page (2026-11-13): a separate page sharing the results page's window bar.
+17. Chart build order (2026-11-13): cost waterfall and table bars, sales heatmap, sell-through
+    curves, prediction calibration, capital at work.
+18. Time axis (2026-11-13): EVE time, with a local-time toggle.
+19. Copy orders (2026-11-13): one run per distinct content (hash of `typeId`, `qty`); later
+    identical clicks only bump `copyCount`. Runs are a weak signal; the hand-off contract is the
+    truth.
 
 ### Still open
 
-None.
+- Whether a fully filled sell order appears in `orders/history` as `state: expired` with
+  `volume_remain: 0` (community reading; ESI documents no "filled" state). Confirm in the Phase 2
+  sample; sold-out detection and the relist view depend on it.
+- The rate-limit groups and cache timers of the skills, standings and structures routes, and the
+  exact scope strings (ESI facts table).
 
 ## Sources
 
