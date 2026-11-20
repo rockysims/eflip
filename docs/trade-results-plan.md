@@ -84,11 +84,15 @@ Terms used below:
      CORS headers added.
    - `app.listen(port)` binds every interface.
 
-## ESI facts this plan relies on (checked 2026-11-12)
+## ESI facts this plan relies on (checked 2026-11-12; groups, cache timers and journal shapes confirmed live 2026-11-19)
 
 - **URL style.** Use base `https://esi.evetech.net` with no `/latest/`, no `datasource=` and no
-  trailing slash. Send `X-Compatibility-Date: 2026-08-18`, the newest entry in
-  `/meta/compatibility-dates`, pinned as `ESI_COMPAT_DATE`.
+  trailing slash. Send `X-Compatibility-Date: 2026-08-18`, pinned as `ESI_COMPAT_DATE`. It was the
+  newest entry in `/meta/compatibility-dates` when the spec was checked; `2026-11-19` has since been
+  added and is not adopted until the spec is re-checked against it.
+  - The response header `X-Compatibility-Date` names the route version that answered, not the
+    request: every route tried on 2026-11-19 echoed `2020-01-01` whatever date was sent (and with
+    none), with `vary: X-Compatibility-Date`. Do not read it as "header ignored".
   - Old `/latest/...?datasource=tranquility` URLs still answer 200 with identical `X-Pages`, and
     CCP says versioned routes "will work for the foreseeable future". They are no longer in the
     OpenAPI spec.
@@ -102,6 +106,10 @@ Terms used below:
   - Routes with no group fall under the legacy limit: 100 non-2xx/3xx responses per minute, then
     420.
   - A 401/403 costs 5 tokens: never retry a bad token in a loop.
+  - Observed live 2026-11-19 (Ivan): every 200 cost 2 tokens; the groups and limits are as in the
+    table below; `orders`, `orders/history` and `/universe/structures` carry only
+    `X-Esi-Error-Limit-Remain/Reset`. `Expires` deltas: wallet balance 2 min, `orders` 20 min,
+    `contracts` 5 min, `skills` 60 s, every other route 60 min.
 - **Scopes.** `esi-wallet.read_character_wallet.v1`, `esi-markets.read_character_orders.v1`,
   `esi-assets.read_assets.v1`, `esi-contracts.read_character_contracts.v1`. The character id and
   name come from the JWT, so no extra scope is needed for them.
@@ -139,20 +147,36 @@ Terms used below:
   `false` means the issuer asks for it.
 - Journal: `player_donation` and the `contract_*` ref_types are in the spec's enum, but the spec
   says `first_party_id`/`second_party_id` have no consistency across ref_types.
-- To confirm in Phase 2 sample capture: that a completed hand-off and a delivered courier both
-  read `finished`; which party of a `player_donation` is the payer; whether items stay readable
-  once a contract drops off the 30-day list (sync fetches them on first sight either way).
+- Confirmed in the Phase 2 sample (Ivan, 2026-11-19): a completed hand-off reads `finished` with
+  `date_completed` equal to `date_accepted`; a hand-off deleted before acceptance reads `deleted`
+  with no `date_accepted`/`date_completed`, and its items are still readable. `player_donation`:
+  the payer is `first_party_id` and the receiver `second_party_id`; the row is positive in the
+  receiver's journal and has no `context_id`. Still to confirm from Grant's capture: a delivered
+  courier reading `finished`; whether items stay readable once a contract drops off the 30-day
+  list (no contract that old yet; sync fetches items on first sight either way).
 
 **Gotchas.**
 - `is_personal: false` marks a corporation-wallet trade: excluded.
 - `client_id` is the counterparty. A trade between two linked characters is internal: excluded.
-- `journal_ref_id` points at the `market_transaction` journal row, not at the tax row.
-- Journal `context_id` means something different per `ref_type`; read `context_id_type`. For
-  `contract_*` it is the contract id. For `transaction_tax` and `brokers_fee` it is undocumented,
-  so the Phase 2 sample settles it.
+- For sells, `journal_ref_id` points at the `market_transaction` journal row, not at the tax row
+  (to confirm from Grant). For buys there is no `market_transaction` row at all: the fill posts as
+  a `market_escrow` row ("Market escrow release", negative, `context_id_type:
+  market_transaction_id`, amount equal to `unit_price` × `quantity`), and `journal_ref_id` points
+  at that row (73 of 74 buys in the sample; the 74th had no journal row).
+- Journal `context_id` means something different per `ref_type`; read `context_id_type`.
+  Observed: `contract_price` and `contract_brokers_fee` → `contract_id` (every row matched the
+  contract list); `market_escrow` → `market_transaction_id`; `skill_purchase` → `type_id`;
+  `brokers_fee` and `player_donation` carry no `context_id` at all, so a broker fee can only be
+  time-matched. `transaction_tax`: to observe from Grant.
 - `brokers_fee` rows include relist fees, but an order's `issued` shows only its latest placement
-  or modification.
-- `market_escrow` is ignored: cost comes from transactions.
+  or modification. Seen: of four `brokers_fee` rows, two fell within two minutes of an order's
+  `issued` and two matched nothing (earlier modifications of the same order).
+- `market_escrow` is ignored for cost (cost comes from transactions), but it is the only journal
+  footprint of a buy; escrow deposits and refunds for limit buy orders appear as further
+  `market_escrow` rows with no matching transaction.
+- Immediate orders (buying straight from the book, `duration: 0`) appear in `orders/history` as
+  `expired` with `volume_remain: 0`, exactly like a filled limit order. They paid no broker fee, so
+  the relist view and any "orders placed" count must skip `duration: 0`.
 
 ## Data model
 
@@ -489,7 +513,9 @@ token replacement, with `fetch` stubbed.
 Gate:
 - Tests pass.
 - User + Fable: link a character. `data/tokens.json` has mode 0600 and `git status` is clean.
-  Remove it (revoke returns 200), then re-link.
+  Remove it (revoke returns 200), then re-link. Done for Ivan on 2026-11-19 up to the re-link:
+  linked with all seven scopes, `tokens.json` 0600 inside a 0700 `data/`, status clean, removed
+  with the revoke accepted; the re-link and Grant's link follow.
 - Sample capture: an uncommitted script writes anonymized `brokers_fee`, `transaction_tax`,
   `market_transaction` and `contract_*` rows, plus matching transactions and orders, to
   `data/samples/`. Also a hand-off `item_exchange` and its `courier` contract, both with items,
@@ -497,7 +523,11 @@ Gate:
   order that sold out.
 - Fable writes the observed `context_id_type` values, the Contracts "to confirm" answers, the
   filled-order reading of `orders/history` and the new routes' rate-limit groups (Still open) into
-  this doc before Phase 4 freezes rules 2 and 4–7.
+  this doc before Phase 4 freezes rules 2 and 4–7. Buy side written 2026-11-19 from Ivan's
+  capture: `data/samples/raw/<id>/<route>/<fetchedAt>.json` holds every 200 body with all its
+  headers, `summary-*.json` the aggregates and `shapes.json` the field types per route. Ivan has
+  no sells, so `transaction_tax`, sell-side `brokers_fee`, couriers and sold-out sells wait for
+  Grant's capture.
 
 ### Phase 3 — ESI client, raw store, sync, ledger (sonnet)
 Scope: `lib/esi.js`, `lib/ledger.js`, `lib/derive.js`, `lib/sync.js`, `scripts/sync.js`,
@@ -652,8 +682,10 @@ run; empty, loading and error states looked at.
 
 - Whether a fully filled sell order appears in `orders/history` as `state: expired` with
   `volume_remain: 0`. The spec's `state` enum is only `cancelled` and `expired`, so a sold-out
-  order can appear no other way, if at all (community reading: it does). Confirm in the Phase 2
-  sample; sold-out detection and the relist view depend on it.
+  order can appear no other way, if at all. Observed on the buy side (Ivan, 2026-11-19): all 63
+  filled buy orders, one of them a 1-day limit order, read exactly that, and the one cancelled
+  order reads `cancelled` with volume left. Confirm for sells from Grant's capture; sold-out
+  detection and the relist view depend on it.
 
 ## Sources
 
