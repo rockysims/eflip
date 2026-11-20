@@ -448,8 +448,11 @@ lookups.
 6. **`.gitignore`:** add `data/`. Then delete the stale `cache/*characters*wallet*` files that
    `exportAndSold` wrote.
 7. **Developer app (the user, once).** At `https://developers.eveonline.com/applications`, create
-   "eFlip (local)" with connection type "Authentication & API Access". Add the seven scopes (ESI
-   facts) and the callback `http://localhost:5001/sso/callback`, then copy the Client ID and Secret
+   "eFlip (local)". The create form (as of 2026-11-19) has no connection-type choice: it lists
+   scopes grouped by prefix (esi, esi-access, esi-activities, esi-wallet, ...). Expand a group and
+   tick the scope; the seven live under esi-wallet, esi-markets, esi-assets, esi-contracts,
+   esi-skills, esi-characters and esi-universe (`read_structures` is under esi-universe, not the
+   newer esi-structures group). Add the callback `http://localhost:5001/sso/callback`, then copy the Client ID and Secret
    into `.env`. Adding a scope later means re-linking every character, which is why the three
    extra scopes go in now (decision 13).
 8. **Local only.** The tool runs on the user's machine only (decision 6): `Procfile` is deleted
