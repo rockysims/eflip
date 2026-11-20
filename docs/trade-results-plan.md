@@ -641,7 +641,7 @@ against the live samples, now binding:
 1. **GM refunds** (`netGmRefunds`, default on): a `gm_cash_transfer` equal to the cent to an
    earlier `brokers_fee` of the same character within 30 days voids that fee (Grant's 999.8 M
    price-typo listing fee was refunded by a GM the next day); the GM row itself never counts.
-   Rocky to confirm; off, the sample shows a 1 B loss instead of +689 M.
+   Confirmed by Rocky 2026-11-19 (decision 20); off, the sample shows a 1 B loss instead of +689 M.
 2. **Courier items** come back empty from ESI, so a courier with an empty list claims the
    unclaimed hand-offs issued at or before it at its start location whose summed `volume` best
    fits its own (at most 1 % over; ties prefer the newest). All three live couriers matched.
@@ -787,6 +787,9 @@ run; empty, loading and error states looked at.
 19. Copy orders (2026-11-13): one run per distinct content (hash of `typeId`, `qty`); later
     identical clicks only bump `copyCount`. Runs are a weak signal; the hand-off contract is the
     truth.
+20. GM refunds (2026-11-19): a `gm_cash_transfer` equal to the cent to an earlier `brokers_fee`
+    of the same character within 30 days voids that fee, and the GM row itself never counts
+    (Rocky: "GM refund can be ignored if you also ignore the matching broker fee").
 
 ### Still open
 
