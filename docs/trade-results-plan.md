@@ -151,32 +151,62 @@ Terms used below:
   `date_completed` equal to `date_accepted`; a hand-off deleted before acceptance reads `deleted`
   with no `date_accepted`/`date_completed`, and its items are still readable. `player_donation`:
   the payer is `first_party_id` and the receiver `second_party_id`; the row is positive in the
-  receiver's journal and has no `context_id`. Still to confirm from Grant's capture: a delivered
-  courier reading `finished`; whether items stay readable once a contract drops off the 30-day
-  list (no contract that old yet; sync fetches items on first sight either way).
+  receiver's journal and has no `context_id`. Grant's capture (same day) adds: a delivered
+  courier reads `finished` with `date_accepted` and `date_completed` set (accepted 1–8 min after
+  issue, delivered 1.5–3 h later); a courier deleted unaccepted reads `deleted`; the items of all
+  nine contracts, deleted ones included, were readable. Still open: whether items stay readable
+  once a contract drops off the 30-day list (no contract that old yet; sync fetches items on first
+  sight either way).
 
 **Gotchas.**
 - `is_personal: false` marks a corporation-wallet trade: excluded.
 - `client_id` is the counterparty. A trade between two linked characters is internal: excluded.
-- For sells, `journal_ref_id` points at the `market_transaction` journal row, not at the tax row
-  (to confirm from Grant). For buys there is no `market_transaction` row at all: the fill posts as
-  a `market_escrow` row ("Market escrow release", negative, `context_id_type:
-  market_transaction_id`, amount equal to `unit_price` × `quantity`), and `journal_ref_id` points
-  at that row (73 of 74 buys in the sample; the 74th had no journal row).
+- Do not rely on `journal_ref_id`. For sells it matched the `market_transaction` row for only 3 of
+  106 transactions; the other 103 pointed two ids past it, at a row absent from the seller's
+  journal (the buyer's side, by the look of it). The reliable link runs the other way: the
+  `market_transaction` row's `context_id` is the `transaction_id` (106 of 106, amount equal to
+  `unit_price` × `quantity`). For buys there is no `market_transaction` row at all: the fill
+  posts as a `market_escrow` row ("Market escrow release", negative, `context_id_type:
+  market_transaction_id`, amount equal to `unit_price` × `quantity`); there `journal_ref_id` did
+  point at that row (73 of 74), but the `context_id` link works too.
 - Journal `context_id` means something different per `ref_type`; read `context_id_type`.
   Observed: `contract_price` and `contract_brokers_fee` → `contract_id` (every row matched the
   contract list); `market_escrow` → `market_transaction_id`; `skill_purchase` → `type_id`;
-  `brokers_fee` and `player_donation` carry no `context_id` at all, so a broker fee can only be
-  time-matched. `transaction_tax`: to observe from Grant.
+  `brokers_fee`, `transaction_tax` and `player_donation` carry no `context_id` at all. A tax row
+  is matched to its sale by timestamp: 102 of 106 tax rows shared their second with exactly one
+  transaction, and the tax row's `id` is the `market_transaction` row's `id` + 1 (101 cases) or
+  + 2 (3), which settles the few seconds holding two sales. A broker fee can only be time-matched.
 - `brokers_fee` rows include relist fees, but an order's `issued` shows only its latest placement
   or modification. Seen: of four `brokers_fee` rows, two fell within two minutes of an order's
-  `issued` and two matched nothing (earlier modifications of the same order).
+  `issued` and two matched nothing (earlier modifications of the same order). Grant's side is
+  worse: 214 fee rows in 13 days (up to 34 a day, from relisting), only 85 within two minutes of
+  any order's `issued`, and the fee divided by `price` × `volume_total` gives no single rate
+  (0.1 % to 2.4 %), because a modification charges on the price change. Read fees from the
+  journal; never derive a broker rate from them.
 - `market_escrow` is ignored for cost (cost comes from transactions), but it is the only journal
   footprint of a buy; escrow deposits and refunds for limit buy orders appear as further
   `market_escrow` rows with no matching transaction.
 - Immediate orders (buying straight from the book, `duration: 0`) appear in `orders/history` as
   `expired` with `volume_remain: 0`, exactly like a filled limit order. They paid no broker fee, so
   the relist view and any "orders placed" count must skip `duration: 0`.
+- Sell orders omit `is_buy_order`, `escrow` and `min_volume` in both `orders` and
+  `orders/history`: a missing `is_buy_order` means a sell.
+- The sales tax rate moved twice inside one 13-day window (7.5 % until 2026-11-10, 3.75 % to
+  2026-11-16, 2.1 % after: skill training). Take tax from the `transaction_tax` row, never from a
+  constant; skills explain the rate only for the prediction.
+- Courier journal rows on the issuer's side: `contract_reward_deposited` (minus the reward at
+  creation), `contract_deposit` (0.1 % of the reward, 10 000 ISK at least, returned as
+  `contract_deposit_refund` on delivery and kept on deletion), `contract_brokers_fee` (11 000 ISK
+  flat in the sample) and, on deletion, `contract_reward_refund` (plus the reward). So a delivered
+  courier costs reward + broker fee and a deleted one broker fee + deposit. The hand-off's
+  `contract_price` is negative on Grant's side and positive on Ivan's, and its broker fee falls
+  on the issuer (Ivan).
+- Hauler bonuses in the sample: two `player_donation` rows to the courier's `acceptor_id`, 4 min
+  and 49 min after `date_completed`, 19–36 % of the reward; the third donation was a 1 B ISK
+  transfer to Ivan (internal, excluded). Rule 7's 24-hour window holds.
+- `orders/history` reached back 144 days (an order issued 2026-06-28 that expired 2026-09-26 was
+  still listed 54 days later), so "90 days" counts from the order's end, not its start.
+- Other ref_types turn up (`gm_cash_transfer`, `skill_purchase`): ignore for profit, keep in raw.
 
 ## Data model
 
@@ -513,9 +543,10 @@ token replacement, with `fetch` stubbed.
 Gate:
 - Tests pass.
 - User + Fable: link a character. `data/tokens.json` has mode 0600 and `git status` is clean.
-  Remove it (revoke returns 200), then re-link. Done for Ivan on 2026-11-19 up to the re-link:
-  linked with all seven scopes, `tokens.json` 0600 inside a 0700 `data/`, status clean, removed
-  with the revoke accepted; the re-link and Grant's link follow.
+  Remove it (revoke returns 200), then re-link. Done 2026-11-19: Ivan linked
+  with all seven scopes, `tokens.json` 0600 inside a 0700 `data/`, status clean, removed with the
+  revoke accepted, re-linked; Grant linked. `/universe/structures/{id}` answered 200 for both
+  tokens on a public structure, so that scope works.
 - Sample capture: an uncommitted script writes anonymized `brokers_fee`, `transaction_tax`,
   `market_transaction` and `contract_*` rows, plus matching transactions and orders, to
   `data/samples/`. Also a hand-off `item_exchange` and its `courier` contract, both with items,
@@ -525,9 +556,8 @@ Gate:
   filled-order reading of `orders/history` and the new routes' rate-limit groups (Still open) into
   this doc before Phase 4 freezes rules 2 and 4–7. Buy side written 2026-11-19 from Ivan's
   capture: `data/samples/raw/<id>/<route>/<fetchedAt>.json` holds every 200 body with all its
-  headers, `summary-*.json` the aggregates and `shapes.json` the field types per route. Ivan has
-  no sells, so `transaction_tax`, sell-side `brokers_fee`, couriers and sold-out sells wait for
-  Grant's capture.
+  headers, `summary-*.json` the aggregates and `shapes.json` the field types per route. Grant's
+  capture the same day covered the sell side (Gotchas, Still open).
 
 ### Phase 3 — ESI client, raw store, sync, ledger (sonnet)
 Scope: `lib/esi.js`, `lib/ledger.js`, `lib/derive.js`, `lib/sync.js`, `scripts/sync.js`,
@@ -680,12 +710,11 @@ run; empty, loading and error states looked at.
 
 ### Still open
 
-- Whether a fully filled sell order appears in `orders/history` as `state: expired` with
-  `volume_remain: 0`. The spec's `state` enum is only `cancelled` and `expired`, so a sold-out
-  order can appear no other way, if at all. Observed on the buy side (Ivan, 2026-11-19): all 63
-  filled buy orders, one of them a 1-day limit order, read exactly that, and the one cancelled
-  order reads `cancelled` with volume left. Confirm for sells from Grant's capture; sold-out
-  detection and the relist view depend on it.
+- Resolved 2026-11-19: a fully filled order, buy or sell, appears in `orders/history` as
+  `state: expired` with `volume_remain: 0` (19 of Grant's 20 expired sells, 63 of Ivan's buys);
+  an order that ran out of time keeps its `volume_remain`, and a cancelled one reads `cancelled`.
+  Immediate orders (`duration: 0`) are listed the same way.
+- Whether contract items stay readable once the contract drops off the 30-day list (Contracts).
 
 ## Sources
 
