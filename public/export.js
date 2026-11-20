@@ -35,6 +35,9 @@ const DEFAULT_DAYS_TO_COMPLETE = 5; // the page's "days to clear" input override
 const HAULING_REWARD_FRACTION = 0.10;
 const COST_LIMIT = 10 * Math.pow(10, 9);
 const MIN_ROI = 1.5;
+// The destination history the estimator can read: the longer of its ordinary-price window and its
+// demand window plus the recent-price lead-in. A saved run keeps that much (exportPersist.marketContext).
+const CONTEXT_HISTORY_DAYS = Math.max(estimate.defaultConfig.ORDINARY_PRICE_DAYS, DAYS_CONSIDERED + estimate.defaultConfig.RECENT_THRESHOLD_DAYS);
 
 const ignoreOneActiveSellerForTypeIds = [
 	//Max
@@ -110,7 +113,9 @@ const loadBooks = async ({ start, end, options = {}, onProgress = () => {} }) =>
 };
 
 // Fetches the ESI data for one type and computes its report.
-// Resolves {typeId, name, m3, report, isAlwaysShow}; report is null when there is nothing to buy.
+// Resolves {typeId, name, m3, report, isAlwaysShow, context}; report is null when there is nothing to buy.
+// context is what the estimator was given (top of each order book, destination history), kept so
+// Copy orders can save it with the run.
 // options ({signal, queue}) is passed through to util so callers can use their own request queue.
 // With `books` (from loadBooks) the orders come from memory; otherwise one request per station.
 // daysToComplete: the horizon the recommended quantity covers (days of demand minus competing stock).
@@ -141,7 +146,8 @@ const buildRow = async ({ start, end, typeId, isAlwaysShow, books = null, option
 			ignoreOneActiveSeller: ignoreOneActiveSellerForTypeIds.includes(typeId)
 		}
 	});
-	return { typeId, name, m3, report, isAlwaysShow };
+	const context = report ? exportPersist.marketContext({ srcOrders, destOrders, destDays, now: new Date(), historyDays: CONTEXT_HISTORY_DAYS }) : null;
+	return { typeId, name, m3, report, isAlwaysShow, context };
 };
 
 // Resolves item names to type ids. Resolves {ids: Set, unresolved: [names]}.
@@ -406,6 +412,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	let currentRun = null; // {controller}
 	let currentBooks = null; // order books from the latest run (used by live always-show edits)
 	let reportGeneratedAt = null;
+	let reportGeneratedAtIso = null; // when the table's report was generated; saved with a copied run, null after a route change until set again
 	let searchGen = 0; // bumped when the query changes or the table is cleared; a lookup that sees it move drops its result
 	let searchNoteIsMiss = false; // the note says "no item named …"
 	const setSearchNote = (text, isMiss = false) => {
@@ -871,8 +878,8 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 
 	//--- row intake (buffered)
 	let rowBuffer = [];
-	const addRow = ({ typeId, name, m3, report, isAlwaysShow }) => {
-		rowBuffer.push({ typeId, name, m3, report, isAlwaysShow });
+	const addRow = ({ typeId, name, m3, report, isAlwaysShow, context }) => {
+		rowBuffer.push({ typeId, name, m3, report, isAlwaysShow, context });
 		scheduleFlush();
 	};
 	let flushTimer = null;
@@ -947,6 +954,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		runDaysToComplete = daysToClear; // fixed for this run
 		horizonFromRun = true;
 		reportGeneratedAt = moment().format('MMM. Do, h:mm a');
+		reportGeneratedAtIso = new Date().toISOString();
 		const horizon = `${runDaysToComplete} day${runDaysToComplete === 1 ? '' : 's'} to clear`;
 		headerElem.innerHTML = `${esc(startSel.value)} &rarr; ${esc(endSel.value)} <span class="dim">&middot;</span> ${horizon} <span class="dim">&middot; ${reportGeneratedAt}</span>`;
 		render();
@@ -1001,6 +1009,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		currentBooks = null; // books belong to a route
 		clearRows();
 		headerElem.textContent = '';
+		reportGeneratedAtIso = null;
 		// the table no longer holds a run's rows: the horizon follows the input again until the next Run
 		horizonFromRun = false;
 		runDaysToComplete = daysToClear;
@@ -1050,20 +1059,62 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	});
 
 	//--- copy orders
-	const buildOrdersText = () => sortedVisibleRows()
-		.filter(r => selected.has(r.typeId))
+	const copiedRows = () => sortedVisibleRows().filter(r => selected.has(r.typeId));
+	const buildOrdersText = () => copiedRows()
 		.map(r => `${r.name}\t${orderQty(r)}`)
 		.join('\n');
 	window.getOrdersText = buildOrdersText; // for debugging / tests
 
+	// Saves the copied orders as a run (docs/trade-results-plan.md, Comparison 1). The server dedupes
+	// by content: the same orders copied again only bump the run's copyCount.
+	const saveRun = async (copiedAt) => {
+		// rows a search fetched before any Run have no report time yet: their first copy sets it
+		if (!reportGeneratedAtIso) reportGeneratedAtIso = new Date().toISOString();
+		const start = STATIONS[startSel.value];
+		const end = STATIONS[endSel.value];
+		// (buildRun reads the table now, before the first await below)
+		const run = exportPersist.buildRun({
+			copiedAt,
+			reportGeneratedAt: reportGeneratedAtIso,
+			route: { start: startSel.value, end: endSel.value, startStationId: start.stationId, endStationId: end.stationId, startRegionId: start.regionId, endRegionId: end.regionId },
+			horizonDays: runDaysToComplete,
+			config: { SELL_TAX, SALES_TAX, BROKER_FEE, HAULING_REWARD_FRACTION, MIN_ROI },
+			rows: copiedRows().map(r => ({
+				typeId: r.typeId, name: r.name, m3: r.m3, qty: orderQty(r), factor: r.factor, report: r.report, context: r.context,
+				orderCostMil: orderCost(r), orderRevenueMil: orderRevenue(r), km3: km3Of(r)
+			}))
+		});
+		if (run === null) return;
+		const response = await fetch('/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(await exportPersist.withId(run)) });
+		if (!response.ok) throw new Error(`POST /api/runs answered ${response.status}`);
+	};
+
 	let copyTimer = null;
+	let runSaveFailed = false; // this click's save failed: said on the label while it reads "Copied"
+	const showSaveFailed = () => {
+		copyBtn.textContent = 'Copied (run not saved)';
+		clearTimeout(copyTimer);
+		copyTimer = setTimeout(() => { copyBtn.textContent = 'Copy orders'; }, 2500);
+	};
 	copyBtn.addEventListener('click', async () => {
 		copyBtn.classList.add('pending');
+		runSaveFailed = false;
+		// Never awaited: a slow or failed save (server stopped, say) must not hold up or fail the copy;
+		// it only changes what the label says (Comparison 1).
+		saveRun(new Date().toISOString()).catch(e => {
+			console.error('run not saved', e);
+			runSaveFailed = true;
+			if (copyBtn.textContent === 'Copied') showSaveFailed();
+		});
 		try {
 			await navigator.clipboard.writeText(buildOrdersText());
-			copyBtn.textContent = 'Copied';
-			clearTimeout(copyTimer);
-			copyTimer = setTimeout(() => { copyBtn.textContent = 'Copy orders'; }, 1000);
+			if (runSaveFailed) {
+				showSaveFailed();
+			} else {
+				copyBtn.textContent = 'Copied';
+				clearTimeout(copyTimer);
+				copyTimer = setTimeout(() => { copyBtn.textContent = 'Copy orders'; }, 1000);
+			}
 		} catch (e) {
 			console.error('clipboard write failed', e);
 			copyBtn.textContent = 'Copy failed';
@@ -1204,4 +1255,17 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	buildFilterRow();
 	render();
 	if (autoRunChk.checked) run();
+
+	// Sync the linked characters when one has not synced for an hour (docs/trade-results-plan.md,
+	// Sync). Fire and forget, errors dropped: nothing waits on it, and Run and auto-run have started
+	// above. market: false, since the market snapshot draws on the market-order budget a Run uses.
+	(async () => {
+		try {
+			const config = await (await fetch('/api/config')).json();
+			if (!config.configured) return;
+			const status = await (await fetch('/api/sync')).json();
+			if (!exportPersist.syncIsStale(status, Date.now())) return;
+			await fetch('/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ market: false }) });
+		} catch (e) { /* a convenience: the results page and "Sync now" do the same */ }
+	})();
 })();

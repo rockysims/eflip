@@ -680,6 +680,23 @@ Gate: three clicks on an unchanged report leave one file in `data/runs/` with `c
 changing the global factor and copying again adds a second file; a new Run adds a third. The saved
 file holds the context books for every copied row. With the server stopped, Copy still copies.
 
+Done 2026-11-19: `lib/runs.js`, `public/export-persist.js` (UMD shared by page, server and tests:
+content key and hash, run id, `marketContext`, `buildRun`, `syncIsStale`), `POST|GET /api/runs`
+outside `requireConfigured`, 58 tests. As built:
+
+- The id keeps the literal ISO time (`Jita-Amarr-2026-11-20T02:35:48.386Z-<16 hex>`), so run file
+  names hold `:` and `.`; fine on macOS and Linux. The server recomputes the id and answers 400
+  when the body disagrees; `lastCopiedAt` and `copyCount` are the server's and never move back.
+- `GET /api/runs` lists newest first without `context` unless `?context=1`; `GET /api/runs/:id`
+  and `DELETE` are not built yet (Phase 6 or 8 adds them if a page needs one run's context).
+- Context orders keep `order_id`, `volume_total` and `min_volume` beyond the plan's five fields;
+  history keeps the rows the estimator read (90 days). A run is about 18 KB per row; the POST cap
+  is 4 MB (about 220 rows), below `server.js`'s 5 MB parser.
+- Rows with `qty` under 1 are left out; a copy with no such row posts nothing. A failed save
+  shows "Copied (run not saved)" on the button and the clipboard still works.
+- The page-load sync fires when any linked character is stale (the server skips fresh ones), with
+  `market: false`.
+
 ### Phase 6 — results page (sonnet; after 3, 4, 5)
 Scope: `public/results.html`, `public/results.js`.
 
