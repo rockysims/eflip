@@ -631,6 +631,46 @@ the Phase 2 samples, cover:
 
 Gate: `node --test 'test/*.test.js'`.
 
+Done 2026-11-19: `public/results-calc.js` (UMD, `window.resultsCalc` / `require`), 31 tests. Public
+entry `compute(input)` with `input = {characterIds, ledgers (the `/api/ledger` shape plus
+`snapshots`), route, locations?, runs, m3, market?, window ({since, until} or {runId}), options,
+now}`; output `{window, types, totals, crossCheck, batches, couriers, runs, otherDonations,
+uncoveredSells, warnings, observedTaxRate, facts: {sells, fees, lots, relists}}`. Rules sharpened
+against the live samples, now binding:
+
+1. **GM refunds** (`netGmRefunds`, default on): a `gm_cash_transfer` equal to the cent to an
+   earlier `brokers_fee` of the same character within 30 days voids that fee (Grant's 999.8 M
+   price-typo listing fee was refunded by a GM the next day); the GM row itself never counts.
+   Rocky to confirm; off, the sample shows a 1 B loss instead of +689 M.
+2. **Courier items** come back empty from ESI, so a courier with an empty list claims the
+   unclaimed hand-offs issued at or before it at its start location whose summed `volume` best
+   fits its own (at most 1 % over; ties prefer the newest). All three live couriers matched.
+3. **Dead contracts** (deleted, cancelled, rejected, reversed) claim nothing: a dead courier's
+   broker fee and lost deposit roll into the next live courier on the route, a deleted hand-off's
+   broker fee into the issuer's next finished hand-off; with no successor the cost stays
+   unattributed. An outstanding contract's deposit is pending, not cost.
+4. **Tax fallback**: a lone sell within 2 s is accepted when its implied rate is in (0, 10 %];
+   the 1 % test only chooses among several; unmatched sells take the nearest matched rate in
+   time, same character first, else `SALES_TAX`.
+5. **Broker fees**: 2 s window (rule 5b), one fee per (order, `issued`) event, `issued` values
+   from history, open orders and every snapshot; the first matched fee on a destination sell order
+   is the listing and later ones relists; the pro-rata remainder goes to `relistShare`; fees on
+   sell orders elsewhere are `otherOrder`, outside the P&L. Only 32 of Grant's 214 fees match
+   from a single snapshot (one known `issued` per order); retained snapshots raise that over time.
+6. **Buy-order fees**: a fill is a lot of the same character and type at the order's station at
+   one of its known prices on or after its earliest placement, oldest first; a buy order with fees
+   and no fill is `buyOrderUnfilled` (its fee counts in "since" mode, is skipped in run mode).
+7. **FIFO**: arrived is judged at the sale's time; the fallback lot must predate the sale;
+   uncovered units stay out of gross, tax and COGS.
+8. **Remaining**: accounting and unrealized figures cover exported lots only; the mismatch flag
+   compares every lot's remainder with the physical total (assets at the two stations with
+   containers resolved, live couriers' loads, open sell orders at the destination).
+9. **Run-mode broker share**: units sold in [copiedAt, end] plus units held at the end, the run's
+   lots against every exported lot; overlapping runs do not sum to 100 %.
+10. A missing m3 splits haul by units, flagged `est`; `firstListedAt` is the first snapshot after
+    arrival that saw any sell order of the type at the destination; `historyFrom` (the earliest
+    synced transaction) replaces the ambiguous "synced through".
+
 ### Phase 5 — persist runs (sonnet; after the in-flight export edits land)
 Scope: `/api/runs` in `lib/api.js`, plus the Copy handler, an ISO `reportGeneratedAt`, the
 content hash and the saved market context (Comparison 1) in `public/export.js`. Nothing else in
