@@ -775,6 +775,34 @@ The implementer loads the `dataviz` skill before writing chart code.
 Gate: tests pass; each chart checked in the browser against the results table's totals for one
 run; empty, loading and error states looked at.
 
+Done 2026-11-19: `public/insights.html`, `public/insights.js`, `public/insights-calc.js` (pure grouping,
+14 tests), `public/results-shared.js` (the loader, window bar, formatters and storage factored out of
+`results.js`, which shrank from 1593 to about 1010 lines; the Phase 6 harness scenes still pass), the
+inline profit and cost-mix bars with a legend line above the results table, and "insights"/"results"
+links between the pages. Plot 0.6.19 and d3 7.9.2 from jsdelivr with sha384 integrity attributes.
+Checked on the real ledger: the waterfall equals the totals strip to the cent. As built:
+
+- Waterfall haul and buy cost are those of the units sold (what takes gross to realized profit);
+  the strip's haul paid and spent are shown beside the bars with the difference stated. Buy-order
+  fees fold into the buy-cost step; listing and relist fees are separate steps and the table's
+  broker column is their sum.
+- Heatmap counts distinct sell transactions; UTC or local; ISK or units.
+- Sell-through: units from the batch's lots (unsourced units are not in the denominator), arrival
+  = earliest lot arrival, sales before delivery drawn at day 0, predicted days to clear = the
+  longest `daysToClear` the batch's run gave its types. Colour covers the newest 8 batches, the rest
+  grey; colour follows newest-first rank within a view.
+- Calibration: one point per run and item, symmetric-log profit axes, hollow points for unsold
+  items (projected days); since/all windows run `compute` once per run (newest 25).
+- Capital at work: per UTC day, newest snapshot per character carried forward; wallet = balance,
+  escrow = buy-order escrow, source/destination = assets at the two stations (containers
+  resolved), listed = open sell orders at the destination, in transit = open couriers. Valuation:
+  units present are the newest their lots can account for (FIFO sells the oldest first), at buy
+  price plus buy fee, plus `haulPerUnit` past the source. Needs two days of snapshots.
+- Palette: the dataviz reference palette, validated light-only (worst adjacent CVD ΔE 9.1);
+  contrast warnings on three hues are relieved by legend, tooltips and a table view per chart.
+  Own hit layer for tooltips (keyboard parity). Not verified: screen readers, Safari/Firefox,
+  real touch.
+
 ## Agent roster
 
 - **Models.** Phases 1, 3, 5, 6 and 8: sonnet (bounded, clear briefs; Phase 8 is declarative

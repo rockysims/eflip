@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<link rel="shortcut icon" href="#" />
+	<title>eFlip insights</title>
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.1/moment.min.js"
+			integrity="sha512-qTXRIMyZIFb8iQcfjXWCO8+M5Tbc38Qi5WzdPOYZHIlZpzBHG3L3by84BBBOiRGiEb7KKtAOAs5qYdUiZiQNNQ=="
+			crossorigin="anonymous"
+			referrerpolicy="no-referrer"
+	></script>
+	<script src="https://cdn.jsdelivr.net/npm/d3@7.9.2/dist/d3.min.js"
+			integrity="sha384-LxfWGZyh6PaLjBRPf7NWiEYs9Mn0UQ6ZmqbLLZhxlOBBNWF2a2K0Pfc5efkrNnhQ"
+			crossorigin="anonymous"
+			referrerpolicy="no-referrer"
+	></script>
+	<script src="https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6.19/dist/plot.umd.min.js"
+			integrity="sha384-oSrbEzGlxR3UPW38YN678j8grQ0aSZjwvA8kBxHdv09D4qTPDbptkmF9eND5PviV"
+			crossorigin="anonymous"
+			referrerpolicy="no-referrer"
+	></script>
+	<style type="text/css">
+		html {
+			color-scheme: light;
+		}
+		body {
+			background: #fff;
+			color: #111;
+			font-family: system-ui, sans-serif;
+			font-size: 13px;
+			margin: 8px;
+		}
+		[hidden] {
+			display: none !important;
+		}
+		.dim {
+			color: #6b6b6b; /* 5:1 on white and on the chart surface */
+		}
+		.muted {
+			color: #555;
+		}
+		.block {
+			max-width: 1040px;
+			box-sizing: border-box;
+		}
+		button, a.btn, select, input[type=date] {
+			font: inherit;
+			min-height: 32px;
+			box-sizing: border-box;
+		}
+		button, a.btn {
+			padding: 4px 12px;
+			border: 1px solid #999;
+			border-radius: 4px;
+			background: #f6f6f6;
+			color: #111;
+			cursor: pointer;
+			text-decoration: none;
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			white-space: nowrap;
+		}
+		button:hover:not([disabled]), a.btn:hover {
+			background: #e9eefa;
+		}
+		button.linkish {
+			border: none;
+			background: none;
+			padding: 0 2px;
+			min-height: 0;
+			color: #1a4fa3;
+			text-decoration: underline;
+		}
+		:focus-visible {
+			outline: 2px solid #4a72c4;
+			outline-offset: 1px;
+		}
+		@media (pointer: coarse) {
+			button, a.btn, select, input[type=date] {
+				min-height: 44px;
+			}
+			#windowBar label.check {
+				min-height: 44px;
+			}
+		}
+
+		/* banners (the results page's idiom) */
+		#banners .banner {
+			display: flex;
+			flex-wrap: wrap;
+			align-items: center;
+			gap: 4px 10px;
+			padding: 6px 10px;
+			margin: 0 0 6px;
+			border-left: 4px solid #4a72c4;
+			background: #eef3fc;
+		}
+		#banners .banner.warn {
+			border-left-color: #a45f00;
+			background: #fff6e0;
+		}
+		#banners .banner.err {
+			border-left-color: #b3261e;
+			background: #fdeeed;
+		}
+		.banner .sev {
+			font-weight: bold;
+		}
+
+		/* window bar: the same controls and ids as the results page, so both read the same choices */
+		#windowBar {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 8px 14px;
+			align-items: center;
+			margin-bottom: 4px;
+		}
+		#windowBar label {
+			white-space: nowrap;
+			display: inline-flex;
+			align-items: center;
+			gap: 4px;
+		}
+		#windowBar input[type=checkbox] {
+			margin: 0;
+		}
+		#windowSel {
+			max-width: calc(100vw - 100px); /* a long run label shrinks the select on a phone instead of widening the page */
+			text-overflow: ellipsis;
+		}
+		#routeWrap {
+			display: inline-flex;
+			gap: 14px;
+			align-items: center;
+		}
+		#dataNote {
+			margin: 0 0 8px;
+		}
+		#stateBox {
+			margin: 8px 0;
+		}
+		#stateBox .card {
+			border: 1px solid #bbb;
+			border-radius: 6px;
+			padding: 10px 14px;
+			background: #fafafa;
+			max-width: 46em;
+		}
+		#stateBox h2 {
+			margin: 0 0 6px;
+			font-size: 15px;
+		}
+		#stateBox code {
+			background: #eee;
+			padding: 0 3px;
+			border-radius: 3px;
+		}
+
+		/* chart cards. Surface #fcfcfb, ink and chart colours from the dataviz palette (light only). */
+		.chart {
+			--surface: #fcfcfb;
+			--ink: #0b0b0b;
+			--ink2: #52514e;
+			--grid: #e1e0d9;
+			--axis: #c3c2b7;
+			background: var(--surface);
+			border: 1px solid rgba(11, 11, 11, 0.1);
+			border-radius: 8px;
+			padding: 12px 14px 10px;
+			margin: 0 0 14px;
+			max-width: 1040px;
+			box-sizing: border-box;
+		}
+		.chartHead {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 6px 16px;
+			align-items: flex-start;
+			justify-content: space-between;
+		}
+		.chart h2 {
+			font-size: 15px;
+			margin: 0;
+		}
+		.chart .sub {
+			margin: 2px 0 0;
+			color: var(--ink2);
+			max-width: 62em;
+		}
+		.ctls {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 6px 12px;
+			align-items: center;
+		}
+		.seg {
+			display: inline-flex;
+			border: 1px solid #999;
+			border-radius: 4px;
+			overflow: hidden;
+		}
+		.seg button {
+			border: 0;
+			border-radius: 0;
+			background: #f6f6f6;
+			min-width: 3.4em;
+		}
+		.seg button + button {
+			border-left: 1px solid #999;
+		}
+		.seg button[aria-pressed=true] {
+			background: #184f95;
+			color: #fff;
+			font-weight: 600;
+		}
+		.seg button[aria-pressed=true]:hover {
+			background: #184f95;
+		}
+		.ctlGroup {
+			display: inline-flex;
+			align-items: center;
+			gap: 6px;
+		}
+		.legend {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 4px 16px;
+			margin: 8px 0 4px;
+			color: var(--ink2);
+		}
+		.legend .key {
+			display: inline-flex;
+			align-items: center;
+			gap: 6px;
+		}
+		.sw {
+			display: inline-block;
+			width: 12px;
+			height: 12px;
+			border-radius: 2px;
+			flex: none;
+		}
+		.sw.line {
+			height: 3px;
+			width: 16px;
+			border-radius: 2px;
+		}
+		.sw.dot {
+			border-radius: 50%;
+		}
+		.sw.square {
+			border-radius: 1px;
+		}
+		.sw.triangle {
+			border-radius: 0;
+			clip-path: polygon(50% 8%, 100% 92%, 0 92%);
+		}
+		#charts.stale .chartBody {
+			opacity: 0.55;
+		}
+		.sw.ring {
+			border-radius: 50%;
+			background: var(--surface) !important;
+			border: 2px solid;
+			box-sizing: border-box;
+		}
+		.sw.diamond {
+			transform: rotate(45deg) scale(0.8);
+			border-radius: 1px;
+			background: var(--surface) !important;
+			border: 2px solid;
+			box-sizing: border-box;
+		}
+		.ramp {
+			display: inline-block;
+			width: 150px;
+			height: 10px;
+			border-radius: 2px;
+			vertical-align: middle;
+		}
+		.chartBody {
+			position: relative;
+			margin-top: 4px;
+		}
+		.chartBody.refreshing {
+			opacity: 0.55;
+		}
+		.chartBody svg {
+			display: block;
+			max-width: 100%;
+			overflow: visible;
+		}
+		.panels {
+			display: grid;
+			grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+			gap: 8px 18px;
+		}
+		.panel h3 {
+			font-size: 13px;
+			margin: 6px 0 0;
+		}
+		.panel .sub {
+			margin: 1px 0 2px;
+		}
+		.foot {
+			margin: 6px 0 0;
+			color: var(--ink2);
+			max-width: 66em;
+		}
+		.foot p {
+			margin: 2px 0;
+		}
+		.skeleton {
+			background: #f0efec;
+			border-radius: 6px;
+			min-height: 220px;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			color: var(--ink2);
+		}
+		.chartState {
+			border: 1px dashed #bbb;
+			border-radius: 6px;
+			padding: 18px 16px;
+			background: #fafaf8;
+			color: #333;
+		}
+		.chartState h3 {
+			margin: 0 0 4px;
+			font-size: 14px;
+		}
+		.chartState p {
+			margin: 2px 0 8px;
+			max-width: 60em;
+		}
+		.chartState.err {
+			border-color: #b3261e;
+			background: #fdeeed;
+		}
+		.chartState.busy {
+			border-style: solid;
+		}
+		.tableWrap {
+			overflow: auto;
+			max-height: 460px;
+			border: 1px solid #e4e3dd;
+			border-radius: 4px;
+		}
+		table.data {
+			border-collapse: separate;
+			border-spacing: 0;
+			font-variant-numeric: tabular-nums;
+			width: max-content;
+			min-width: 100%;
+		}
+		table.data caption {
+			text-align: left;
+			padding: 4px 8px;
+			color: var(--ink2);
+			caption-side: top;
+		}
+		table.data th {
+			position: sticky;
+			top: 0;
+			background: #f2f2f2;
+			border-bottom: 1px solid #bbb;
+			padding: 3px 8px;
+			font-weight: 600;
+			white-space: nowrap;
+			text-align: left;
+			z-index: 1;
+		}
+		table.data th.numeric, table.data td.numeric {
+			text-align: right;
+		}
+		table.data td {
+			padding: 2px 8px;
+			border-bottom: 1px solid #eee;
+			white-space: nowrap;
+		}
+		table.data tr:hover td {
+			background: #f6f9ff;
+		}
+		table.data tr.total td {
+			font-weight: 600;
+		}
+		.neg {
+			color: #b3261e;
+		}
+
+		/* hit targets over the drawn marks: transparent, larger than the mark, focusable */
+		.hit {
+			fill: transparent;
+			stroke: none;
+			cursor: default;
+			outline: none;
+		}
+		.hit.on {
+			fill: rgba(11, 11, 11, 0.06);
+			stroke: #0b0b0b;
+			stroke-width: 1.5px;
+		}
+		.hit:focus {
+			fill: rgba(74, 114, 196, 0.1);
+			stroke: #4a72c4;
+			stroke-width: 2px;
+		}
+		.crossline {
+			stroke: #0b0b0b;
+			stroke-width: 1px;
+			pointer-events: none;
+		}
+		.cross-hit {
+			fill: transparent;
+			outline: none;
+			touch-action: pan-y; /* a horizontal drag reads the chart, a vertical one still scrolls the page */
+		}
+		.cross-hit:focus-visible {
+			outline: 2px solid #4a72c4;
+			outline-offset: 2px;
+		}
+		#tip {
+			position: fixed;
+			z-index: 30;
+			pointer-events: none;
+			background: #fff;
+			color: #0b0b0b;
+			border: 1px solid rgba(11, 11, 11, 0.22);
+			border-radius: 6px;
+			box-shadow: 0 2px 10px rgba(0, 0, 0, 0.14);
+			padding: 6px 9px;
+			font-size: 12px;
+			max-width: 330px;
+			line-height: 1.35;
+		}
+		#tip .tt {
+			color: #52514e;
+			margin-bottom: 3px;
+		}
+		#tip .tr {
+			display: flex;
+			align-items: baseline;
+			gap: 7px;
+		}
+		#tip .tk {
+			display: inline-block;
+			flex: none;
+			width: 12px;
+			height: 3px;
+			border-radius: 2px;
+			align-self: center;
+		}
+		#tip .tv {
+			font-weight: 700;
+			font-variant-numeric: tabular-nums;
+			white-space: nowrap;
+		}
+		#tip .tn {
+			color: #52514e;
+		}
+		#tip .tx {
+			color: #52514e;
+			margin-top: 3px;
+		}
+		.sr {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			overflow: hidden;
+			clip: rect(0 0 0 0);
+			white-space: nowrap;
+		}
+	</style>
+	<script src="util.js"></script>
+	<script src="results-calc.js"></script>
+	<script src="results-shared.js"></script>
+	<script src="insights-calc.js"></script>
+	<script src="insights.js" defer></script>
+</head>
+<body>
+	<div id="banners" class="block" aria-live="polite"></div>
+	<div id="windowBar" class="block" hidden>
+		<label>Window <select id="windowSel"></select></label>
+		<label id="dateWrap" hidden>since <input id="sinceDate" type="date" title="local date, midnight to now" /></label>
+		<span id="routeWrap">
+			<label>From <select id="startStation"></select></label>
+			<label>To <select id="endStation"></select></label>
+		</span>
+		<span id="routeFixed" class="muted" hidden></span>
+		<label class="check" title="include the donations paid to a courier's hauler in the haul cost"><input id="countBonuses" type="checkbox" /> count hauler bonuses</label>
+		<a class="btn" id="toResults" href="results.html" title="the per-item results table">results</a>
+		<span id="statusNote" class="muted" role="status"></span>
+	</div>
+	<p id="dataNote" class="block dim"></p>
+	<div id="stateBox" class="block"></div>
+	<main id="charts" aria-label="Charts"></main>
+	<div id="tip" role="presentation" hidden></div>
+</body>
+</html>

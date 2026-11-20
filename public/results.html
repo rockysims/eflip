@@ -365,10 +365,98 @@
 		.mark {
 			color: #8a4b00;
 		}
+
+		/* inline bars (insights.html's waterfall uses the same colours): CSS only, exact figures in the title.
+		   blue is money in and profit, red a loss; the five cost parts take the next palette slots in the order a sale pays them */
+		:root {
+			--c-profit: #2a78d6;
+			--c-loss: #e34948;
+			--c-buy: #eb6834;
+			--c-haul: #1baf7a;
+			--c-tax: #eda100;
+			--c-listing: #e87ba4;
+			--c-relist: #008300;
+			--c-track: #ebe9e3;
+		}
+		td.barCell {
+			padding-left: 10px;
+			padding-right: 10px;
+		}
+		.pbar {
+			position: relative;
+			display: inline-block;
+			width: 96px;
+			height: 10px;
+			background: var(--c-track);
+			border-radius: 2px;
+			vertical-align: middle;
+		}
+		.pbar i {
+			position: absolute;
+			top: 0;
+			bottom: 0;
+			min-width: 2px;
+			border-radius: 2px;
+			background: var(--c-profit);
+		}
+		.pbar i.lossBar {
+			background: var(--c-loss);
+		}
+		.pbar .zero {
+			position: absolute;
+			top: -2px;
+			bottom: -2px;
+			width: 1px;
+			background: #898781;
+		}
+		.cbar {
+			display: inline-flex;
+			gap: 2px;
+			width: 120px;
+			height: 10px;
+			vertical-align: middle;
+		}
+		.cbar.over {
+			outline: 1px solid var(--c-loss);
+			outline-offset: 1px;
+		}
+		.cbar i {
+			display: block;
+			min-width: 2px;
+			height: 10px;
+			border-radius: 2px;
+			flex-basis: 0;
+		}
+		.cbar i.buy { background: var(--c-buy); }
+		.cbar i.haul { background: var(--c-haul); }
+		.cbar i.tax { background: var(--c-tax); }
+		.cbar i.listing { background: var(--c-listing); }
+		.cbar i.relist { background: var(--c-relist); }
+		.cbar i.rest { background: var(--c-track); }
+		#barLegend {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 2px 14px;
+			align-items: center;
+			margin: 2px 0 4px;
+		}
+		#barLegend .key {
+			display: inline-flex;
+			align-items: center;
+			gap: 5px;
+			white-space: nowrap;
+		}
+		#barLegend .sw {
+			display: inline-block;
+			width: 12px;
+			height: 10px;
+			border-radius: 2px;
+		}
 	</style>
 	<script src="util.js"></script>
 	<script src="export-persist.js"></script>
 	<script src="results-calc.js"></script>
+	<script src="results-shared.js"></script>
 	<script src="results.js" defer></script>
 </head>
 <body>
@@ -394,11 +482,13 @@
 		<label>search <input id="search" type="search" /></label>
 		<label class="check"><input id="showSoldOut" type="checkbox" /> show sold out</label>
 		<label class="check" title="include the donations paid to a courier's hauler in the haul cost"><input id="countBonuses" type="checkbox" /> count hauler bonuses</label>
+		<a class="btn" id="toInsights" href="insights.html" title="charts of the same window">insights</a>
 		<span id="tableNote" class="muted" role="status"></span>
 	</div>
 	<div id="runInfo" class="block"></div>
 	<div id="stateBox" class="block"></div>
 	<div id="totals" hidden></div>
+	<div id="barLegend" class="block dim" hidden></div>
 	<table id="table" aria-label="Trade results per item" hidden>
 		<thead><tr id="sortRow"></tr></thead>
 		<tbody></tbody>
