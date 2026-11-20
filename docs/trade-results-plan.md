@@ -739,6 +739,11 @@ optional launchd plist that runs `node scripts/sync.js` daily.
 
 Gate: grep is clean and the tests pass.
 
+Done 2026-11-19: `exportAndSold.*` deleted, `env.js` gone from `.gitignore` (no such file existed), the
+two util wallet getters removed (no caller left), README rewritten (setup with the new portal's scope
+groups, running, linking, syncing, the launchd job, the `data/` map, tests). The landing page
+`index.html` has no links at all, so none was added.
+
 ### Phase 8 — insights page (sonnet; after 6)
 Scope: `public/insights.html`, `public/insights.js`, plus the inline bars in the results table.
 The implementer loads the `dataviz` skill before writing chart code.

@@ -1,5 +1,4 @@
 node_modules
-env.js
 .env
 .DS_Store
 cache

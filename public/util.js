@@ -4,8 +4,8 @@
 // error-limit headers, pauses on HTTP 420). Local /file/ cache reads/writes bypass the queue.
 //
 // Cancellation: every network-touching function (getOrFetch, fetchWithRetries, getOrders,
-// getDays, getTypeIds, getTypeName, getTypeM3, getTypeIdByName, getFuzzworkPricesInRegion,
-// wallet getters) takes an optional trailing `options` object: `{signal, queue}`.
+// getDays, getTypeIds, getTypeName, getTypeM3, getTypeIdByName, getFuzzworkPricesInRegion)
+// takes an optional trailing `options` object: `{signal, queue}`.
 // Alternatively call `util.setAbortSignal(signal)` once per run (pass null to clear); it is
 // used whenever no per-call `options.signal` is given. Aborted work rejects with an Error whose
 // `name === 'AbortError'` and is never retried. Callers should catch it (check `e.name`).
@@ -355,30 +355,6 @@ const util = (() => {
 			: [];
 	};
 	
-	const getCharacterWalletTransactions = async (characterId, accessToken, hoursStaleLimit = 0.05*100, options = {}) => {
-		const url = `https://esi.evetech.net/latest/characters/${characterId}/wallet/transactions/?datasource=tranquility`;
-		const transactions = await getOrFetch(url, hoursStaleLimit, accessToken, options);
-		return Array.isArray(transactions)
-			? transactions
-			: [];
-	};
-	
-	const getCharacterWalletJournals = async (characterId, accessToken, hoursStaleLimit = 0.05*100, options = {}) => {
-		const journals = [];
-		for (let p = 1; p <= 100; p++) {
-			const url = `https://esi.evetech.net/latest/characters/${characterId}/wallet/journal/?datasource=tranquility&page=${p}`;
-			const journalsPage = await getOrFetch(url, hoursStaleLimit, accessToken, options);
-			if (journalsPage && !journalsPage.error) {
-				journals.push(...journalsPage);
-			} else {
-				console.log('break on journal page ', p);
-				break;
-			}
-		}
-		
-		return journals;
-	};
-
 	//---
 
 	const getFuzzworkPricesInRegion = async (regionId, typeIds, hoursStaleLimit = 0.5, options = {}) => {
@@ -465,8 +441,6 @@ const util = (() => {
 		getRegionOrders,
 		getDays,
 		getOrders,
-		getCharacterWalletTransactions,
-		getCharacterWalletJournals,
 		roundNonZero,
 		roundMils,
 		avg,
