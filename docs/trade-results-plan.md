@@ -708,6 +708,29 @@ Gate:
 - Every state shows correctly: unset `EVE_CLIENT_ID`, no characters, a revoked app (revoked on the
   EVE support site), an empty window.
 
+Done 2026-11-19: `public/results.html`, `public/results.js`; checked against the real ledger on
+2026-11-19: the 30-day strip read spent 613.3M, gross 1.49B, tax 68.05M, broker 157.2M, realized
++683.1M, and reconciles with the ledger once the rules are applied (gross and tax leave out the
+1,291 uncovered units sold with no purchase in the synced history; spent covers only the lots a
+hand-off took, the 50 unbatched lots being Ivan's buys still awaiting a contract; broker excludes
+the GM-refunded typo fee, decision 20). As built, beyond the UI section:
+
+- `/api/ledger` is read without `since` (FIFO needs the whole history); the window only selects
+  what is summed. Snapshots are read from the window start minus 7 days.
+- The run dropdown offers "Unplanned batches (hand-offs with no run)", summed in the page from
+  `facts.lots` and `facts.sells` of batches with `runId` null (compute has no such window yet; a
+  `{unplanned: true}` window would move it into the module).
+- Quantity Δ stays neutral; net/item and profit Δ carry a sign and a colour; days Δ says
+  "faster"/"slower", "~" while projected. The route selector is hidden in run mode.
+- Sold-out rows are hidden by default, so a wallet check of sold quantity needs "show sold out".
+- Tooltips are `title` text like the export page (no keyboard route). Times are local.
+- A chip's Sync posts `{characterIds, force: true, market: false}`; Sync all `{force: true, market:
+  true}`; the page-load sync is unforced and includes the market.
+- Amounts show abbreviated (4.56M) with the exact ISK in the tooltip.
+- Known gaps: `STATIONS` is duplicated from `export.js` (unify later); stations carry no solar
+  system id, so rule 6's same-system match cannot fire for a courier starting at a structure;
+  `/api/snapshots` returns whole snapshots (about 180 KB each for Ivan), fine for now.
+
 ### Phase 7 — retire and document (haiku: mechanical)
 Delete `public/exportAndSold.*`, the `env.js` references, and util's
 `getCharacterWalletTransactions` / `getCharacterWalletJournals` once grep finds no callers.

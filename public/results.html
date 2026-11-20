@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<link rel="shortcut icon" href="#" />
+	<title>eFlip results</title>
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.1/moment.min.js"
+			integrity="sha512-qTXRIMyZIFb8iQcfjXWCO8+M5Tbc38Qi5WzdPOYZHIlZpzBHG3L3by84BBBOiRGiEb7KKtAOAs5qYdUiZiQNNQ=="
+			crossorigin="anonymous"
+			referrerpolicy="no-referrer"
+	></script>
+	<style type="text/css">
+		html {
+			color-scheme: light;
+		}
+		body {
+			background: #fff;
+			color: #111;
+			font-family: system-ui, sans-serif;
+			font-size: 13px;
+			margin: 8px;
+			/* span the (wide) table so sticky children can pin to the viewport's left edge */
+			width: max-content;
+			min-width: calc(100vw - 16px);
+		}
+		[hidden] {
+			display: none !important;
+		}
+		.dim {
+			color: #6b6b6b; /* 5:1 on white and on the tinted plan cells; export.html's lighter grey is for decoration only */
+		}
+		.muted {
+			color: #555;
+		}
+		/* Blocks of prose stay one viewport wide however wide the table makes the body. */
+		.block {
+			max-width: calc(100vw - 16px);
+			box-sizing: border-box;
+		}
+		button, a.btn, select, input[type=search], input[type=date] {
+			font: inherit;
+			min-height: 32px;
+			box-sizing: border-box;
+		}
+		button, a.btn {
+			padding: 4px 12px;
+			border: 1px solid #999;
+			border-radius: 4px;
+			background: #f6f6f6;
+			color: #111;
+			cursor: pointer;
+			text-decoration: none;
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			white-space: nowrap;
+		}
+		button:hover:not([disabled]), a.btn:hover {
+			background: #e9eefa;
+		}
+		button[disabled], button[aria-disabled=true] {
+			color: #777;
+			cursor: default;
+			background: #f6f6f6;
+		}
+		button.danger {
+			border-color: #b3261e;
+			color: #b3261e;
+			font-weight: bold;
+		}
+		button.sync {
+			min-width: 6.5em;
+		}
+		button.linkish {
+			border: none;
+			background: none;
+			padding: 0 2px;
+			min-height: 0;
+			color: #1a4fa3;
+			text-decoration: underline;
+		}
+		:focus-visible {
+			outline: 2px solid #4a72c4;
+			outline-offset: 1px;
+		}
+		@media (pointer: coarse) {
+			button, a.btn, select, input[type=search], input[type=date] {
+				min-height: 44px;
+			}
+			#windowBar label.check {
+				min-height: 44px;
+			}
+		}
+
+		/* characters strip */
+		#characters {
+			margin-bottom: 6px;
+		}
+		#chips {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 8px;
+			align-items: stretch;
+		}
+		.chip {
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			border: 1px solid #bbb;
+			border-radius: 6px;
+			padding: 6px 8px;
+			background: #fafafa;
+			max-width: 34em;
+		}
+		.chip.problem {
+			border-color: #b3261e;
+			border-width: 2px;
+		}
+		.portrait {
+			width: 32px;
+			height: 32px;
+			border-radius: 4px;
+			background: #e4e4e4;
+			flex: none;
+		}
+		.portrait.noimg {
+			visibility: hidden;
+		}
+		.chipBody {
+			min-width: 11em;
+			overflow-wrap: anywhere;
+		}
+		.chipName {
+			font-weight: bold;
+		}
+		.chipStatus.bad {
+			color: #b3261e;
+		}
+		.chipActions button {
+			min-width: 6.5em; /* Sync/Syncing... and Remove/Removing... keep their width */
+		}
+		.chipActions, .chipConfirm {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 6px;
+			align-items: center;
+		}
+		.chipConfirm {
+			max-width: 22em;
+		}
+		.chipConfirm label {
+			display: inline-flex;
+			align-items: center;
+			gap: 4px;
+		}
+		#stripTail {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 8px;
+			align-items: center;
+			margin-top: 6px;
+		}
+		#syncProgress {
+			margin: 4px 0 0;
+			min-height: 1.2em;
+		}
+
+		/* banners */
+		#banners .banner {
+			display: flex;
+			flex-wrap: wrap;
+			align-items: center;
+			gap: 4px 10px;
+			padding: 6px 10px;
+			margin: 0 0 6px;
+			border-left: 4px solid #4a72c4;
+			background: #eef3fc;
+		}
+		#banners .banner.warn {
+			border-left-color: #a45f00;
+			background: #fff6e0;
+		}
+		#banners .banner.err {
+			border-left-color: #b3261e;
+			background: #fdeeed;
+		}
+		.banner .sev {
+			font-weight: bold;
+		}
+
+		/* window bar */
+		#windowBar {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 8px 14px;
+			align-items: center;
+			margin-bottom: 6px;
+		}
+		#windowBar label {
+			white-space: nowrap;
+			display: inline-flex;
+			align-items: center;
+			gap: 4px;
+		}
+		#windowBar input[type=checkbox] {
+			margin: 0;
+		}
+		#routeWrap {
+			display: inline-flex;
+			gap: 14px;
+			align-items: center;
+		}
+		#runInfo {
+			margin: 4px 0 6px;
+		}
+		#runInfo details {
+			margin: 4px 0;
+		}
+		#runInfo summary {
+			cursor: pointer;
+		}
+		#runInfo ul {
+			margin: 2px 0 2px 18px;
+			padding: 0;
+		}
+		#runInfo li {
+			margin: 2px 0;
+		}
+		.warnLine {
+			color: #8a4b00;
+		}
+		#stateBox {
+			margin: 8px 0;
+		}
+		#stateBox .card {
+			border: 1px solid #bbb;
+			border-radius: 6px;
+			padding: 10px 14px;
+			background: #fafafa;
+			max-width: 46em;
+		}
+		#stateBox h2 {
+			margin: 0 0 6px;
+			font-size: 15px;
+		}
+		#stateBox ol {
+			margin: 6px 0 8px 20px;
+			padding: 0;
+		}
+		#stateBox li {
+			margin: 3px 0;
+		}
+		#stateBox code {
+			background: #eee;
+			padding: 0 3px;
+			border-radius: 3px;
+		}
+
+		/* totals and table (the export page's idiom) */
+		#totals {
+			/* sticky on both axes: stays at the top, and spans the viewport even when the wide table
+			   has scrolled the page horizontally (body margin is 8px, hence the -8px / +16px) */
+			position: sticky;
+			top: 0;
+			left: 0;
+			z-index: 2;
+			box-sizing: border-box;
+			width: 100vw;
+			margin: 4px 0 4px -8px;
+			padding: 6px 8px;
+			background: #fff;
+			border-top: 1px solid #bbb;
+			border-bottom: 1px solid #bbb;
+			display: flex;
+			flex-wrap: wrap;
+			gap: 2px 16px;
+			align-items: baseline;
+			font-variant-numeric: tabular-nums;
+		}
+		#totals .tot {
+			white-space: nowrap;
+		}
+		#totals .tot b {
+			font-weight: 600;
+		}
+		#totals .tot.main b {
+			font-size: 14px;
+		}
+		table {
+			border-collapse: separate;
+			border-spacing: 0;
+			font-variant-numeric: tabular-nums;
+		}
+		thead th {
+			position: sticky;
+			top: var(--sticky-offset, 0px);
+			background: #f2f2f2;
+			color: #111;
+			border-bottom: 1px solid #bbb;
+			padding: 3px 6px;
+			cursor: pointer;
+			user-select: none;
+			white-space: nowrap;
+			z-index: 1;
+			font-weight: 600;
+		}
+		thead th.sorted {
+			background: #e2e8f4;
+		}
+		thead th.planCol {
+			background: #f7f3e6;
+		}
+		thead th.planCol.sorted {
+			background: #ece4c8;
+		}
+		td {
+			padding: 2px 6px;
+			border-bottom: 1px solid #eee;
+			white-space: nowrap;
+		}
+		tr:hover td {
+			background: #f6f9ff;
+		}
+		.numeric {
+			text-align: right;
+		}
+		.text {
+			text-align: left;
+		}
+		td.planCell {
+			background: #fcfaf2;
+		}
+		td.nameCell .name {
+			font-weight: 600;
+			/* a very long item name is cut, not allowed to stretch the column; the tooltip has it whole */
+			display: inline-block;
+			max-width: 26em;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			vertical-align: bottom;
+		}
+		.flag {
+			display: inline-block;
+			font-size: 10px;
+			line-height: 14px;
+			border: 1px solid #888;
+			border-radius: 3px;
+			padding: 0 3px;
+			margin-left: 4px;
+			color: #333;
+			background: #f4f4f4;
+			cursor: help;
+			vertical-align: 1px;
+		}
+		.better {
+			color: #0a6b2c;
+		}
+		.worse {
+			color: #b3261e;
+		}
+		.neg {
+			color: #b3261e;
+		}
+		.mark {
+			color: #8a4b00;
+		}
+	</style>
+	<script src="util.js"></script>
+	<script src="export-persist.js"></script>
+	<script src="results-calc.js"></script>
+	<script src="results.js" defer></script>
+</head>
+<body>
+	<div id="banners" class="block" aria-live="polite"></div>
+	<section id="characters" class="block" aria-label="Characters">
+		<div id="chips"></div>
+		<div id="stripTail">
+			<a class="btn" id="addCharacter" href="/sso/login?return=/results.html">+ Add character</a>
+			<button type="button" id="syncAll" class="sync" data-act="syncAll">Sync all</button>
+			<span id="syncNote" class="muted" aria-live="polite"></span>
+			<span id="marketNote" class="dim"></span>
+		</div>
+		<div id="syncProgress" class="muted" role="status"></div>
+	</section>
+	<div id="windowBar" class="block">
+		<label>Window <select id="windowSel"></select></label>
+		<label id="dateWrap" hidden>since <input id="sinceDate" type="date" title="local date, midnight to now" /></label>
+		<span id="routeWrap">
+			<label>From <select id="startStation"></select></label>
+			<label>To <select id="endStation"></select></label>
+		</span>
+		<span id="routeFixed" class="muted" hidden></span>
+		<label>search <input id="search" type="search" /></label>
+		<label class="check"><input id="showSoldOut" type="checkbox" /> show sold out</label>
+		<label class="check" title="include the donations paid to a courier's hauler in the haul cost"><input id="countBonuses" type="checkbox" /> count hauler bonuses</label>
+		<span id="tableNote" class="muted" role="status"></span>
+	</div>
+	<div id="runInfo" class="block"></div>
+	<div id="stateBox" class="block"></div>
+	<div id="totals" hidden></div>
+	<table id="table" aria-label="Trade results per item" hidden>
+		<thead><tr id="sortRow"></tr></thead>
+		<tbody></tbody>
+	</table>
+</body>
+</html>
