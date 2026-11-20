@@ -272,6 +272,39 @@ Syncs are at most hourly, which matches the cache timers. Price lookups take 2 t
 type from the same market-order bucket. A group with `X-Ratelimit-Remaining` below 20 % pauses
 until `Retry-After` or the window passes.
 
+Added by Phase 3 (2026-11-19), beside the files above:
+
+- `data/esi-cache/<characterId|public>/<route-slug>.json`: per-route bookkeeping `{url, etag,
+  expires, pages, checkedAt, status}` with no body, plus a remembered 403 (`forbiddenUntil`, 30 days)
+  or a remembered 404 (`notFound`; market history also answers 400 "not tradable" for a type with no
+  market, treated the same). `data/esi-cache/<owner>/_sync.json` holds each owner's last sync
+  (`syncedAt`, status, errors, walk completeness, `profileCheckedAt`); `data/esi-cache/_limits.json`
+  holds the rate-limit state the server and `scripts/sync.js` share.
+- `data/raw/<owner>/_sync-log/<syncedAt>.json`: one entry per sync that called ESI, naming the raw
+  files behind that sync's snapshot; derive rebuilds the retained snapshots from it. A sync that
+  made no call writes none, and `syncedAt` moves only when a call went out, so a page-load sync
+  that found nothing due does not delay the next one. A snapshot is written only when orders,
+  assets and balance were all current in that sync.
+- `data/locks/<name>.lock`: one lock per character and one for the market, so the server and the
+  script never sync the same owner at once; a lock whose process is gone is taken over.
+- `data/ledger/structures.json`: structure names by id, shared by all characters; `/api/ledger`
+  returns it beside the characters. `profile.skills` is the skills array (`total_sp` stays in raw).
+- Market snapshot: the cap of 300 counts (region, type) pairs, chosen by priority (listed, in
+  transit, held, sold in 90 days) then least recently checked, so successive runs rotate through
+  the candidates; order calls are budgeted at twice the type count with at most five pages per
+  book. The destination region is the end region of the newest run in `data/runs/`, else the
+  region holding most of the characters' sell orders. Types with no market are remembered and
+  no longer take a slot.
+- Routes: `POST /api/sync` takes `{characterIds?, force?, market? (default true), regionIds?}`,
+  runs the characters one after another and then the market, and without `force` skips an owner
+  synced within the hour (`market: false` lets the export page defer the market step during a
+  run); `GET /api/sync` reports per-character status and progress; `/api/ledger` keys are
+  camelCase (`ordersHistory`, `contractItems`) plus `sync` and `profile`, and `since` filters by
+  `date`, `issued` or `date_issued`; `/api/market?typeIds=&regionIds=` answers
+  `{regionIds, syncedAt, types: {typeId: {regionId: {orders, history}}}}` from raw.
+- Removing a character with `?purge=1` deletes its ledger, raw and ESI bookkeeping together (a
+  ledger deleted alone would be rebuilt from raw) and answers 409 while that character syncs.
+
 ## Profit accounting rules (`public/results-calc.js`, pure, UMD like `estimate.js`)
 
 Inputs: the merged ledgers of the selected characters (set L), the route (source station S,
@@ -571,6 +604,13 @@ raw gives the same ledger as the incremental build.
 Gate: tests pass. On a second sync, no ESI calls go out before `Expires`, the ledger grows only by
 new ids, `data/raw/` holds every 200 body, and `node scripts/sync.js` runs with the server
 stopped.
+
+Done 2026-11-19: 83 tests. Live, the first sync of both characters made 33 calls and a second
+run none; `--rebuild` reproduced the ledger byte for byte; `data/` is owner-only; a 40-type market
+snapshot stored 79 bodies and read back through `/api/market`. Courier `/items` answered 200 with
+an empty list for all four live couriers (ESI hides courier packages), so rule 6's type overlap
+never fires on real data and Phase 4 matches couriers to hand-offs by volume instead. Extra files
+and route shapes are listed under Data model ("Added by Phase 3").
 
 ### Phase 4 — accounting (opus: semantics need care; writes the tests), parallel with 2–3
 Scope: `public/results-calc.js`, `test/results-calc.test.js`. Hand-written fixtures, shaped like
