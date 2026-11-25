@@ -79,7 +79,7 @@ const isAbort = (e) => !!e && e.name === 'AbortError';
 
 //--- pipeline
 
-// Runs one report. Calls onRow({typeId, name, m3, report, isAlwaysShow}) for every report (filtered ones too).
+// Runs one report. Calls onRow({typeId, name, m3, report, isAlwaysShow, daysToComplete, inputs}) for every report (filtered ones too).
 // Calls onProgress at least every 500ms.
 // Loads both regions' order books once (a few hundred paginated requests instead of two per type:
 // ESI's market-order rate limit counts requests) and indexes them by type, station-filtered.
@@ -112,10 +112,24 @@ const loadBooks = async ({ start, end, options = {}, onProgress = () => {} }) =>
 	return { src: index(srcAll, start.stationId), dest: index(destAll, end.stationId) };
 };
 
+// The estimate's config for one row (the page re-estimates a row with the same config for another quantity).
+const reportConfig = ({ typeId, isAlwaysShow, daysToComplete }) => ({
+	DAYS_CONSIDERED,
+	DAYS_TO_COMPLETE: daysToComplete,
+	HAULING_REWARD_FRACTION,
+	COST_LIMIT,
+	MIN_ROI,
+	SELL_TAX,
+	isAlwaysShow,
+	ignoreOneActiveSeller: ignoreOneActiveSellerForTypeIds.includes(typeId)
+});
+
 // Fetches the ESI data for one type and computes its report.
-// Resolves {typeId, name, m3, report, isAlwaysShow, context}; report is null when there is nothing to buy.
+// Resolves {typeId, name, m3, report, isAlwaysShow, context, daysToComplete, inputs}; report is null when there is nothing to buy.
 // context is what the estimator was given (top of each order book, destination history), kept so
-// Copy orders can save it with the run.
+// Copy orders can save it with the run. inputs (the orders, history and clock the report was computed from)
+// let the page re-estimate the row for another quantity without a request. The order arrays may be shared
+// with the in-memory books: the estimate copies before mutating, so that is fine.
 // options ({signal, queue}) is passed through to util so callers can use their own request queue.
 // With `books` (from loadBooks) the orders come from memory; otherwise one request per station.
 // daysToComplete: the horizon the recommended quantity covers (days of demand minus competing stock).
@@ -130,24 +144,17 @@ const buildRow = async ({ start, end, typeId, isAlwaysShow, books = null, option
 	const destDays = await util.getDays(end.regionId, typeId, options);
 	const m3 = await util.getTypeM3(typeId, options);
 	const name = await util.getTypeName(typeId, options);
+	const now = new Date();
 	const report = estimate.computeItemReport({
 		srcOrders,
 		destOrders,
 		destDays,
 		typeId,
-		config: {
-			DAYS_CONSIDERED,
-			DAYS_TO_COMPLETE: daysToComplete,
-			HAULING_REWARD_FRACTION,
-			COST_LIMIT,
-			MIN_ROI,
-			SELL_TAX,
-			isAlwaysShow,
-			ignoreOneActiveSeller: ignoreOneActiveSellerForTypeIds.includes(typeId)
-		}
+		now,
+		config: reportConfig({ typeId, isAlwaysShow, daysToComplete })
 	});
-	const context = report ? exportPersist.marketContext({ srcOrders, destOrders, destDays, now: new Date(), historyDays: CONTEXT_HISTORY_DAYS }) : null;
-	return { typeId, name, m3, report, isAlwaysShow, context };
+	const context = report ? exportPersist.marketContext({ srcOrders, destOrders, destDays, now, historyDays: CONTEXT_HISTORY_DAYS }) : null;
+	return { typeId, name, m3, report, isAlwaysShow, context, daysToComplete, inputs: { srcOrders, destOrders, destDays, now } };
 };
 
 // Resolves item names to type ids. Resolves {ids: Set, unresolved: [names]}.
@@ -435,8 +442,28 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	const fmtRoi = (v) => v === null || v === undefined ? '' : nf2.format(v);
 	const num = (v) => v === null || v === undefined ? null : +v;
 
-	// quantity = what the Copy button writes (equals the recommended volume when factor is 1)
-	const orderQty = (row) => Math.ceil(row.report.volume * row.factor);
+	// quantity = what the Copy button writes: the report's volume, i.e. the recommendation at factor 1, else the
+	// units the re-estimate bought toward ceil(recommended × factor)
+	const orderQty = (row) => row.report.volume;
+	// The row's report is the estimate for its quantity. At factor 1 that is the recommendation itself (row.base);
+	// otherwise the estimate is re-run with ceil(recommended × factor) as the target, bought for real up the
+	// source book (past the ROI floor; the spend cap still applies), from the same orders, history and clock as
+	// the recommendation, so only the quantity differs. The filtered state stays the recommendation's, so a
+	// factor never hides a row. No request is made: the inputs are kept on the row. A recommendation of 0 stays 0 at
+	// any factor, so it keeps the recommendation (and its real stop reason).
+	const reportForFactor = (row) => {
+		if (row.factor === 1 || !row.inputs || row.base.volume === 0) return row.base;
+		const target = Math.ceil(row.base.volume * row.factor);
+		const report = estimate.computeItemReport({
+			...row.inputs,
+			typeId: row.typeId,
+			targetVolume: target,
+			config: reportConfig({ typeId: row.typeId, isAlwaysShow: row.isAlwaysShow, daysToComplete: row.daysToComplete })
+		});
+		if (!report) return row.base;
+		report.filteredReason = row.base.filteredReason;
+		return report;
+	};
 	// Order totals, in millions. Revenue is net of sales tax and the broker (listing) fee; cost is
 	// buy price plus hauling. revenue − cost = quantity × profit/item, the same as the per-item figures.
 	const sellPriceOf = (row) => row.report.sellPriceMil ?? (row.report.revenuePerItemMil / (1 - SELL_TAX));
@@ -452,20 +479,42 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	const pct = (f) => (Math.round(f * 1000) / 10) + '%';
 	const mil = (v) => v === null || v === undefined ? '?' : `${v}M`;
 	const SUPPLY_BAND_TXT = `within ${pct(cfg.SUPPLY_BAND)} above the sell price`;
+	// What bound the recommended quantity (the factor-1 report `base`): the demand cap and the limit that cut it.
+	const recommendedClause = (base) => {
+		const head = `Demand cap ${nf.format(base.horizonVolume)} (${base.dailyDemand}/day × ${runDaysToComplete} days − ${nf.format(base.competingVolume)} competing)`;
+		switch (base.stopReason) {
+			case 'horizon': return `${head} sets the recommended quantity`;
+			case 'roi': return `${head}; cut to ${nf.format(base.volume)} by the ROI floor: the next source order (${mil(base.stopPriceMil)}) returns ${base.stopRoi}x, below ${cfg.MIN_ROI}x`;
+			case 'book': return `${head}; cut to ${nf.format(base.volume)}: the source station lists no more units`;
+			case 'cost': return `${head}; cut to ${nf.format(base.volume)} by the ${COST_LIMIT / 1e9}B spend cap`;
+			default: return head;
+		}
+	};
 	// `help` is a string, or a function for text that depends on the run (read on every header render).
 	const COLUMNS = [
 		{ key: 'select', label: '', sort: (r) => selected.has(r.typeId) ? 1 : 0, help: 'checked rows are always shown, summed in the totals and included in Copy orders. Greyed rows are stocked items.' },
 		{ key: 'name', label: 'name', sort: (r) => r.name.toLowerCase(), text: true, help: 'dim rows were filtered out; hover the name for the reason' },
 		{ key: 'dailyProfitMil', label: 'daily profit', val: (r) => num(r.report.dailyProfitMil), fmt: fmtMil,
-			help: 'profit on the recommended quantity ÷ max(days to clear, 1), in millions',
-			tip: (r) => `${mil(r.report.profitPerItemMil)} profit/item × ${nf.format(r.report.volume)} recommended = ${mil(Math.round(r.report.profitPerItemMil * r.report.volume * 100) / 100)}, over max(${r.report.daysToClear ?? '?'} days to clear, 1)` },
+			help: 'profit on the quantity ÷ max(days to clear, 1), in millions',
+			tip: (r) => `${mil(r.report.profitPerItemMil)} profit/item × ${nf.format(orderQty(r))} = ${mil(Math.round(r.report.profitPerItemMil * r.report.volume * 100) / 100)}, over max(${r.report.daysToClear ?? '?'} days to clear, 1)` },
 		{ key: 'roi', label: 'ROI', val: (r) => num(r.report.roi), fmt: fmtRoi,
-			help: `revenue/item ÷ cost/item (items below ${cfg.MIN_ROI}x are filtered)`,
+			help: `revenue/item ÷ cost/item for the quantity (recommendations below ${cfg.MIN_ROI}x are filtered; a factor above 1 buys past that floor, so the row's ROI can be lower)`,
 			tip: (r) => `${mil(r.report.revenuePerItemMil)} ÷ ${mil(r.report.costPerItemMil)}` },
-		{ key: 'factor', label: 'factor', val: (r) => r.factor, help: 'multiplier on the recommended quantity; quantity = ceil(recommended × factor)' },
+		{ key: 'factor', label: 'factor', val: (r) => r.factor, help: 'multiplier on the recommended quantity. The row is re-estimated for ceil(recommended × factor), bought for real up the source book' },
 		{ key: 'qty', label: 'quantity', val: orderQty, fmt: fmtNum,
-			help: () => `ceil(recommended × factor). Recommended = ${runDaysToComplete} days of demand minus competing stock (within ${pct(cfg.COMPETE_BAND)} above the sell price in full, dearer stock by its seller's rival weight), bought up the source book while each order still clears ${cfg.MIN_ROI}x ROI`,
-			tip: (r) => `${nf.format(r.report.volume)} recommended × factor ${r.factor} (demand ${r.report.dailyDemand}/day × ${runDaysToComplete} days − ${nf.format(r.report.competingVolume)} competing)` },
+			help: () => `recommended × factor, bought for real up the source book, so cost/item, ROI, the order totals, days to clear and daily profit are for this quantity. Recommended = ${runDaysToComplete} days of demand minus competing stock (within ${pct(cfg.COMPETE_BAND)} above the sell price in full, dearer stock by its seller's rival weight), bought while each order still clears ${cfg.MIN_ROI}x ROI; a factor above 1 buys past that floor. The cell tooltip names the limit that bound`,
+			tip: (r) => {
+				const base = r.base || r.report;
+				if (r.report === base) return `${nf.format(base.volume)} recommended × factor ${r.factor}. ${recommendedClause(base)}`;
+				const target = Math.ceil(base.volume * r.factor);
+				const bought = r.report.volume;
+				const outcome = bought >= target
+					? ', bought for real up the source book'
+					: r.report.stopReason === 'cost'
+						? `; only ${nf.format(bought)} bought: the ${COST_LIMIT / 1e9}B spend cap`
+						: `; only ${nf.format(bought)} bought: the source station lists no more units`;
+				return `${nf.format(target)} = ${nf.format(base.volume)} recommended × factor ${r.factor}${outcome}. Recommended: ${recommendedClause(base)}`;
+			} },
 		{ key: 'daysOfSupply', label: 'days of supply left', val: (r) => num(r.report.daysOfSupply), fmt: fmtRoi,
 			help: `units listed at the destination ${SUPPLY_BAND_TXT} ÷ demand per day: how long until the cheap stock is gone and the price steps up`,
 			tip: (r) => `${nf.format(r.report.supplyVolume)} units listed ${SUPPLY_BAND_TXT} (${mil(r.report.sellPriceMil)}) ÷ ${r.report.dailyDemand}/day` },
@@ -502,7 +551,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			help: 'order revenue − order cost, in millions',
 			tip: (r) => `${fmtTotal(orderRevenue(r))} − ${fmtTotal(orderCost(r))}` },
 		{ key: 'daysToClear', label: 'days to clear', val: (r) => num(r.report.daysToClear), fmt: fmtRoi,
-			help: `(recommended quantity + competing stock: within ${pct(cfg.COMPETE_BAND)} above the sell price in full, dearer stock by its seller's rival weight) ÷ demand per day`,
+			help: `(quantity + competing stock: within ${pct(cfg.COMPETE_BAND)} above the sell price in full, dearer stock by its seller's rival weight) ÷ demand per day`,
 			tip: (r) => `(${nf.format(r.report.volume)} + ${nf.format(r.report.competingVolume)} competing) ÷ ${r.report.dailyDemand}/day` }
 	];
 	const sortValue = (col, row) => col.sort ? col.sort(row) : col.val(row);
@@ -818,6 +867,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		row.hasOverride = true;
 		factorOverrides[row.typeId] = f;
 		saveFactors();
+		row.report = reportForFactor(row);
 		updateRowEl(tr, row);
 		updateSums();
 	});
@@ -878,8 +928,8 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 
 	//--- row intake (buffered)
 	let rowBuffer = [];
-	const addRow = ({ typeId, name, m3, report, isAlwaysShow, context }) => {
-		rowBuffer.push({ typeId, name, m3, report, isAlwaysShow, context });
+	const addRow = (row) => {
+		rowBuffer.push(row);
 		scheduleFlush();
 	};
 	let flushTimer = null;
@@ -895,9 +945,11 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			const override = factorOverrides[r.typeId];
 			const row = {
 				...r,
+				base: r.report,
 				factor: override !== undefined ? override : globalFactor,
 				hasOverride: override !== undefined
 			};
+			row.report = reportForFactor(row);
 			const existing = rowByTypeId.get(r.typeId);
 			if (existing) rows[rows.indexOf(existing)] = row;
 			else rows.push(row);
@@ -1031,6 +1083,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		for (const row of rows) {
 			if (row.hasOverride) continue;
 			row.factor = f;
+			row.report = reportForFactor(row);
 			const tr = trByTypeId.get(row.typeId);
 			if (tr) updateRowEl(tr, row);
 		}

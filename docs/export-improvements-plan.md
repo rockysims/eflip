@@ -56,17 +56,31 @@ orders, destination region history. Changes:
    "seller updated too recently" filter stays.
 6. **Marginal stop rule**: while walking the source book, stop when the next
    order's `revenuePerItem / (price * (1 + HAULING_REWARD_FRACTION)) < MIN_ROI`.
-   Replaces the `profitPerDayEstimate < 2000000` test.
-7. **Days to clear**: `(volume + competingVolume) / dailyDemand`.
+   Replaces the `profitPerDayEstimate < 2000000` test. A `targetVolume` input
+   makes the walk buy toward that many units instead of the demand cap,
+   ignoring the ROI floor (spend cap kept); the page uses it for a factor
+   other than 1.
+7. **Days to clear**: `(volume + competingVolume) / dailyDemand`. For a
+   factor other than 1 the page re-runs the estimate with the factored
+   quantity as `targetVolume`, so this follows the factor with real book
+   prices.
 8. **Daily profit**: `(revenue - cost) / max(daysToClear, 1)`. Ranking uses
    this. For one release the old `(revenue - cost) / DAYS_TO_COMPLETE` is also
    reported as `dailyProfitOldMil` so the two can be compared in the table;
-   remove after the user is happy.
+   remove after the user is happy. For a factor other than 1 the page re-runs
+   the estimate with the factored quantity as `targetVolume`, so this follows
+   the factor with real book prices.
 9. Remove the dead "margin crashed" filter.
 10. Report shape (all Mil values via `roundMils`): `volume`, `costPerItemMil`,
     `revenuePerItemMil`, `profitPerItemMil`, `roi`, `dailyProfitMil`,
     `dailyProfitOldMil`, `daysToClear`, `competingVolume`, `dailyDemand`,
     `activeSellers`, `daysSinceSellerUpdate`, `activeDaysFraction`,
+    `stopReason` (`'horizon' | 'roi' | 'book' | 'cost' | 'target'`: which
+    limit bound the volume; `'target'` when a `targetVolume` was given and
+    reached), `stopPriceMil` (the source order the walk stopped at, for
+    `'roi'` and `'cost'`, else null), `stopRoi` (that order's ROI, for
+    `'roi'`, else null), `horizonVolume` (the demand cap as whole units),
+    `targetVolume` (the quantity asked for; null for a recommendation),
     `filteredReason` (null when the item passes).
 11. Page-level filters move into `estimate.js` as `applyFilters(report,
     config)` returning a reason string or null, so filtered items can be shown
@@ -94,8 +108,14 @@ Fixtures are small hand-written order/history arrays.
    reason (only with "show filtered"). Default sort daily profit desc; live
    re-sort as rows arrive, suspended while the user is editing a row.
 4. Factor per row (default = global factor at the time the row appears).
-   Order qty = `ceil(volume * factor)`; editing qty sets factor =
-   `qty / volume`. Order cost and revenue scale with qty, km3 too.
+   At a factor other than 1 the row is re-estimated with `ceil(volume ×
+   factor)` as `targetVolume`, bought for real up the source book past the
+   ROI floor (spend cap kept), from the order books and history already in
+   memory, so no request is made. The quantity shown and copied is what the
+   book had; cost/item, ROI, order cost and revenue, days to clear and daily
+   profit are those of that quantity, km3 scales with it. The filtered state
+   stays the recommendation's, so a factor never hides a row; sorting uses
+   the re-estimated figures.
 5. Footer over selected rows: total cost, revenue, profit, km3 — same figures
    the paste box produced.
 6. Copy: one line per selected row, `name + '\t' + orderQty`, no trailing
