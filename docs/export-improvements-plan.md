@@ -57,16 +57,26 @@ orders, destination region history. Changes:
 6. **Marginal stop rule**: while walking the source book, stop when the next
    order's `revenuePerItem / (price * (1 + HAULING_REWARD_FRACTION)) < MIN_ROI`.
    Replaces the `profitPerDayEstimate < 2000000` test.
-7. **Days to clear**: `(volume + competingVolume) / dailyDemand`.
+7. **Days to clear**: `(volume + competingVolume) / dailyDemand`. The
+   estimate's figure is for the recommended volume; the page's column
+   recomputes it for the factored quantity (`ceil(volume × factor)`) so it
+   moves with the factor.
 8. **Daily profit**: `(revenue - cost) / max(daysToClear, 1)`. Ranking uses
    this. For one release the old `(revenue - cost) / DAYS_TO_COMPLETE` is also
    reported as `dailyProfitOldMil` so the two can be compared in the table;
-   remove after the user is happy.
+   remove after the user is happy. Likewise the estimate's figure is for the
+   recommended volume; the page's column recomputes it from the factored
+   quantity (`ceil(volume × factor)`) and its days to clear, so it moves with
+   the factor.
 9. Remove the dead "margin crashed" filter.
 10. Report shape (all Mil values via `roundMils`): `volume`, `costPerItemMil`,
     `revenuePerItemMil`, `profitPerItemMil`, `roi`, `dailyProfitMil`,
     `dailyProfitOldMil`, `daysToClear`, `competingVolume`, `dailyDemand`,
     `activeSellers`, `daysSinceSellerUpdate`, `activeDaysFraction`,
+    `stopReason` (`'horizon' | 'roi' | 'book' | 'cost'`: which limit bound the
+    recommended volume), `stopPriceMil` (the source order the walk stopped at,
+    for `'roi'` and `'cost'`, else null), `stopRoi` (that order's ROI, for
+    `'roi'`, else null), `horizonVolume` (the demand cap as whole units),
     `filteredReason` (null when the item passes).
 11. Page-level filters move into `estimate.js` as `applyFilters(report,
     config)` returning a reason string or null, so filtered items can be shown

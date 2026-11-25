@@ -308,6 +308,10 @@
 				.sort((a, b) => a.price - b.price);
 			let bookIndex = 0;
 			let stopped = book.length === 0;
+			//which limit ended the walk (the demand horizon is decided after the walk, see below)
+			let stopReason = book.length === 0 ? 'book' : null;
+			let stopPrice = null;
+			let stopRoi = null;
 
 			const dayReports = [];
 			for (let d = 1; d <= c.DAYS_TO_COMPLETE; d++) {
@@ -327,12 +331,17 @@
 					//marginal stop: the book is ascending, so every later order is worse
 					if (!c.isAlwaysShow && revenuePerItem / costPerItem < c.MIN_ROI) {
 						stopped = true;
+						stopReason = 'roi';
+						stopPrice = order.price;
+						stopRoi = revenuePerItem / costPerItem;
 						break;
 					}
 
 					const affordableVol = Math.floor((c.COST_LIMIT - (cost + pastDaysCost)) / order.price);
 					if (affordableVol <= 0) {
 						stopped = true;
+						stopReason = 'cost';
+						stopPrice = order.price;
 						break;
 					}
 
@@ -344,7 +353,10 @@
 
 					if (order.volume_remain <= 0) {
 						bookIndex++;
-						if (bookIndex >= book.length) stopped = true;
+						if (bookIndex >= book.length) {
+							stopped = true;
+							stopReason = 'book';
+						}
 					}
 				}
 
@@ -357,6 +369,16 @@
 				acc.revenue += cur.revenue;
 				return acc;
 			}, { volume: 0, cost: 0, revenue: 0 });
+
+			//the demand horizon bound when the walk reached the cap (same epsilon as the daily limit). That
+			//covers a cap of 0 from overhanging competing stock, and a book that ran out exactly at the cap.
+			const horizonVolume = Math.floor(cap + 1e-9);
+			if (total.volume >= horizonVolume) {
+				stopReason = 'horizon';
+				stopPrice = null;
+				stopRoi = null;
+			}
+			if (stopReason === null) stopReason = 'horizon';
 
 			const daysToClearRaw = dailyDemand > 0 ? (total.volume + competingVolume) / dailyDemand : null;
 			const daysOfSupplyRaw = dailyDemand > 0 && sellPrice !== null ? supplyVolume / dailyDemand : null;
@@ -377,7 +399,12 @@
 				srcBestSellPriceMil: milsNum(srcBestSellPrice, 3),
 				destBestSellPriceMil: destBestSellPrice === null ? null : milsNum(destBestSellPrice, 3),
 				destBestBuyPriceMil: destBestBuyPrice === null ? null : milsNum(destBestBuyPrice, 3),
-				destSellOrderCount: destSellOrders.length
+				destSellOrderCount: destSellOrders.length,
+				//which limit bound the recommended volume: 'horizon' (demand cap), 'roi', 'book' or 'cost'
+				stopReason,
+				stopPriceMil: stopPrice === null ? null : milsNum(stopPrice, 3),
+				stopRoi: stopRoi === null ? null : round2(stopRoi),
+				horizonVolume
 			};
 
 			let report;

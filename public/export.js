@@ -438,6 +438,17 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	const orderProfit = (row) => orderRevenue(row) - orderCost(row);
 	const fmtTotal = (v) => v === null || v === undefined ? '' : roundNonZero(Math.round(v * 1000) / 1000, 3);
 	const km3Of = (row) => Math.ceil(orderQty(row) * (row.m3 || 0)) / 1000;
+	// The estimate's daysToClear / dailyProfitMil describe the recommended volume; these follow the factored
+	// quantity, so the columns move when the factor does (same formulas as estimate.js).
+	const round2 = (v) => Math.round(v * 100) / 100;
+	const daysToClearOf = (row) => {
+		const { dailyDemand, competingVolume } = row.report;
+		return dailyDemand > 0 ? round2((orderQty(row) + competingVolume) / dailyDemand) : null;
+	};
+	const dailyProfitOf = (row) => {
+		const d = daysToClearOf(row);
+		return Number(roundNonZero(orderProfit(row) / Math.max(d ?? 0, 1), 2));
+	};
 
 	// text: left aligned, sorts ascending first ; sort: custom sort value ; val/fmt: displayed number
 	// Tooltip text. `help` is the column definition (on the header); `tip(row)` is the per-cell working.
@@ -449,16 +460,26 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	const COLUMNS = [
 		{ key: 'select', label: '', sort: (r) => selected.has(r.typeId) ? 1 : 0, help: 'checked rows are always shown, summed in the totals and included in Copy orders. Greyed rows are stocked items.' },
 		{ key: 'name', label: 'name', sort: (r) => r.name.toLowerCase(), text: true, help: 'dim rows were filtered out; hover the name for the reason' },
-		{ key: 'dailyProfitMil', label: 'daily profit', val: (r) => num(r.report.dailyProfitMil), fmt: fmtMil,
-			help: 'profit on the recommended quantity ÷ max(days to clear, 1), in millions',
-			tip: (r) => `${mil(r.report.profitPerItemMil)} profit/item × ${nf.format(r.report.volume)} recommended = ${mil(Math.round(r.report.profitPerItemMil * r.report.volume * 100) / 100)}, over max(${r.report.daysToClear ?? '?'} days to clear, 1)` },
+		{ key: 'dailyProfitMil', label: 'daily profit', val: dailyProfitOf, fmt: fmtMil,
+			help: 'order profit ÷ max(days to clear, 1), in millions (both follow the factored quantity)',
+			tip: (r) => `${fmtTotal(orderProfit(r))} order profit (${nf.format(orderQty(r))} × ${mil(r.report.profitPerItemMil)}) over max(${daysToClearOf(r) ?? '?'} days to clear, 1)` },
 		{ key: 'roi', label: 'ROI', val: (r) => num(r.report.roi), fmt: fmtRoi,
 			help: `revenue/item ÷ cost/item (items below ${cfg.MIN_ROI}x are filtered)`,
 			tip: (r) => `${mil(r.report.revenuePerItemMil)} ÷ ${mil(r.report.costPerItemMil)}` },
 		{ key: 'factor', label: 'factor', val: (r) => r.factor, help: 'multiplier on the recommended quantity; quantity = ceil(recommended × factor)' },
 		{ key: 'qty', label: 'quantity', val: orderQty, fmt: fmtNum,
-			help: () => `ceil(recommended × factor). Recommended = ${runDaysToComplete} days of demand minus competing stock (within ${pct(cfg.COMPETE_BAND)} above the sell price in full, dearer stock by its seller's rival weight), bought up the source book while each order still clears ${cfg.MIN_ROI}x ROI`,
-			tip: (r) => `${nf.format(r.report.volume)} recommended × factor ${r.factor} (demand ${r.report.dailyDemand}/day × ${runDaysToComplete} days − ${nf.format(r.report.competingVolume)} competing)` },
+			help: () => `ceil(recommended × factor). Recommended = ${runDaysToComplete} days of demand minus competing stock (within ${pct(cfg.COMPETE_BAND)} above the sell price in full, dearer stock by its seller's rival weight), bought up the source book while each order still clears ${cfg.MIN_ROI}x ROI. The cell tooltip names the limit that bound: the demand cap, the ${cfg.MIN_ROI}x ROI floor, the source book or the spend cap`,
+			tip: (r) => {
+				const rep = r.report;
+				const head = `${nf.format(rep.volume)} recommended × factor ${r.factor}. Demand cap ${nf.format(rep.horizonVolume)} (${rep.dailyDemand}/day × ${runDaysToComplete} days − ${nf.format(rep.competingVolume)} competing)`;
+				switch (rep.stopReason) {
+					case 'horizon': return `${head} sets the recommended quantity`;
+					case 'roi': return `${head}; cut to ${nf.format(rep.volume)} by the ROI floor: the next source order (${mil(rep.stopPriceMil)}) returns ${rep.stopRoi}x, below ${cfg.MIN_ROI}x`;
+					case 'book': return `${head}; cut to ${nf.format(rep.volume)}: the source station lists no more units`;
+					case 'cost': return `${head}; cut to ${nf.format(rep.volume)} by the ${COST_LIMIT / 1e9}B spend cap`;
+					default: return head;
+				}
+			} },
 		{ key: 'daysOfSupply', label: 'days of supply left', val: (r) => num(r.report.daysOfSupply), fmt: fmtRoi,
 			help: `units listed at the destination ${SUPPLY_BAND_TXT} ÷ demand per day: how long until the cheap stock is gone and the price steps up`,
 			tip: (r) => `${nf.format(r.report.supplyVolume)} units listed ${SUPPLY_BAND_TXT} (${mil(r.report.sellPriceMil)}) ÷ ${r.report.dailyDemand}/day` },
@@ -494,9 +515,9 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		{ key: 'orderProfit', label: 'order profit', val: orderProfit, fmt: fmtTotal,
 			help: 'order revenue − order cost, in millions',
 			tip: (r) => `${fmtTotal(orderRevenue(r))} − ${fmtTotal(orderCost(r))}` },
-		{ key: 'daysToClear', label: 'days to clear', val: (r) => num(r.report.daysToClear), fmt: fmtRoi,
-			help: `(recommended quantity + competing stock: within ${pct(cfg.COMPETE_BAND)} above the sell price in full, dearer stock by its seller's rival weight) ÷ demand per day`,
-			tip: (r) => `(${nf.format(r.report.volume)} + ${nf.format(r.report.competingVolume)} competing) ÷ ${r.report.dailyDemand}/day` }
+		{ key: 'daysToClear', label: 'days to clear', val: daysToClearOf, fmt: fmtRoi,
+			help: `(quantity + competing stock: within ${pct(cfg.COMPETE_BAND)} above the sell price in full, dearer stock by its seller's rival weight) ÷ demand per day`,
+			tip: (r) => `(${nf.format(orderQty(r))} + ${nf.format(r.report.competingVolume)} competing) ÷ ${r.report.dailyDemand}/day` }
 	];
 	const sortValue = (col, row) => col.sort ? col.sort(row) : col.val(row);
 	if (!COLUMNS.some(c => c.key === sort.key) || (sort.dir !== 'asc' && sort.dir !== 'desc')) {
