@@ -220,9 +220,12 @@
 	//   destDays: ESI region history for the destination region (any order).
 	//   now: Date, defaults to new Date().
 	//   config: overrides for defaultConfig.
+	//   targetVolume: when a non-negative integer, the walk buys toward this many units instead of the
+	//     demand cap, ignoring the ROI floor (the spend cap still applies). Used by the page for a factor
+	//     other than 1. stopReason is then 'target' when the target was reached, else 'book' or 'cost'.
 	// Returns a report object, or null when there is nothing to buy (no source
 	// sell orders) or the calculation fails (the reason is logged).
-	const computeItemReport = ({ srcOrders = [], destOrders = [], destDays = [], typeId = null, now = new Date(), config = {} } = {}) => {
+	const computeItemReport = ({ srcOrders = [], destOrders = [], destDays = [], typeId = null, now = new Date(), config = {}, targetVolume = null } = {}) => {
 		try {
 			const c = { ...defaultConfig, ...config };
 
@@ -298,8 +301,10 @@
 			const destSellers = calcDestSellers(destSellOrders, now, c);
 			const inBandSellers = calcDestSellers(inBandDestSellOrders, now, c);
 
-			//calc buy cap over the horizon
-			const cap = Math.max(0, dailyDemand * c.DAYS_TO_COMPLETE - competingVolume);
+			//calc buy cap over the horizon; a target volume replaces it as the walk's cap
+			const targeting = Number.isFinite(targetVolume) && targetVolume >= 0;
+			const demandCap = Math.max(0, dailyDemand * c.DAYS_TO_COMPLETE - competingVolume);
+			const cap = targeting ? targetVolume : demandCap;
 
 			//walk the source book cheapest first (copies, so the caller's orders aren't mutated)
 			const book = srcSellOrders
@@ -308,7 +313,7 @@
 				.sort((a, b) => a.price - b.price);
 			let bookIndex = 0;
 			let stopped = book.length === 0;
-			//which limit ended the walk (the demand horizon is decided after the walk, see below)
+			//which limit ended the walk (the demand horizon / target is decided after the walk, see below)
 			let stopReason = book.length === 0 ? 'book' : null;
 			let stopPrice = null;
 			let stopRoi = null;
@@ -328,8 +333,8 @@
 					const order = book[bookIndex];
 					const costPerItem = order.price * (1 + c.HAULING_REWARD_FRACTION);
 
-					//marginal stop: the book is ascending, so every later order is worse
-					if (!c.isAlwaysShow && revenuePerItem / costPerItem < c.MIN_ROI) {
+					//marginal stop: the book is ascending, so every later order is worse (a target buys past it)
+					if (!c.isAlwaysShow && !targeting && revenuePerItem / costPerItem < c.MIN_ROI) {
 						stopped = true;
 						stopReason = 'roi';
 						stopPrice = order.price;
@@ -370,15 +375,22 @@
 				return acc;
 			}, { volume: 0, cost: 0, revenue: 0 });
 
-			//the demand horizon bound when the walk reached the cap (same epsilon as the daily limit). That
-			//covers a cap of 0 from overhanging competing stock, and a book that ran out exactly at the cap.
-			const horizonVolume = Math.floor(cap + 1e-9);
-			if (total.volume >= horizonVolume) {
+			//the demand horizon (or the target) bound when the walk reached its cap (same epsilon as the daily
+			//limit). That covers a cap of 0 from overhanging competing stock, and a book that ran out exactly
+			//at the cap. horizonVolume is the demand cap in whole units, whatever the walk targeted.
+			const horizonVolume = Math.floor(demandCap + 1e-9);
+			if (targeting) {
+				if (total.volume >= targetVolume) {
+					stopReason = 'target';
+					stopPrice = null;
+					stopRoi = null;
+				}
+			} else if (total.volume >= horizonVolume) {
 				stopReason = 'horizon';
 				stopPrice = null;
 				stopRoi = null;
 			}
-			if (stopReason === null) stopReason = 'horizon';
+			if (stopReason === null) stopReason = targeting ? 'target' : 'horizon';
 
 			const daysToClearRaw = dailyDemand > 0 ? (total.volume + competingVolume) / dailyDemand : null;
 			const daysOfSupplyRaw = dailyDemand > 0 && sellPrice !== null ? supplyVolume / dailyDemand : null;
@@ -400,11 +412,13 @@
 				destBestSellPriceMil: destBestSellPrice === null ? null : milsNum(destBestSellPrice, 3),
 				destBestBuyPriceMil: destBestBuyPrice === null ? null : milsNum(destBestBuyPrice, 3),
 				destSellOrderCount: destSellOrders.length,
-				//which limit bound the recommended volume: 'horizon' (demand cap), 'roi', 'book' or 'cost'
+				//which limit bound the volume: 'horizon' (demand cap), 'roi', 'book' or 'cost'; 'target' when
+				//the walk was given a targetVolume and reached it
 				stopReason,
 				stopPriceMil: stopPrice === null ? null : milsNum(stopPrice, 3),
 				stopRoi: stopRoi === null ? null : round2(stopRoi),
-				horizonVolume
+				horizonVolume,
+				targetVolume: targeting ? targetVolume : null
 			};
 
 			let report;
@@ -439,6 +453,7 @@
 				};
 			}
 
+			// (a targeted report is filtered like any other; the page replaces filteredReason with the recommendation's)
 			report.filteredReason = applyFilters(report, c);
 			return report;
 		} catch (reason) {

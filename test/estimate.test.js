@@ -217,6 +217,68 @@ test('source book running out is reported, unless it ran out exactly at the cap'
 	assert.equal(exact.stopReason, 'horizon');
 });
 
+test('target volume walks the source book to the target, past the ROI floor', () => {
+	// the 8M order returns 0.916x, below MIN_ROI, so the recommendation stops at the 10 cheap units
+	const srcOrders = [sellOrder(1 * M, 10), sellOrder(8 * M, 1000)];
+	const recommended = computeItemReport({ srcOrders, destOrders: baseDest(), destDays: baseDays(), now: NOW });
+	assert.equal(recommended.volume, 10);
+	assert.equal(recommended.stopReason, 'roi');
+	assert.equal(recommended.targetVolume, null);
+
+	const report = computeItemReport({ srcOrders, destOrders: baseDest(), destDays: baseDays(), now: NOW, targetVolume: 30 });
+	assert.equal(report.volume, 30);
+	assert.equal(report.stopReason, 'target');
+	assert.equal(report.targetVolume, 30);
+	assert.equal(report.horizonVolume, 43); // the demand cap is still reported
+	assert.equal(report.stopPriceMil, null);
+	assert.equal(report.stopRoi, null);
+	assert.equal(report.costPerItemMil, 6.23); // (10 x 1.1M + 20 x 8.8M) / 30 = 6.233M
+	assert.equal(report.roi, 1.29);
+	assert.equal(report.filteredReason, 'margin too slim'); // the estimate still applies its filters; the page keeps the recommendation's
+	assert.deepEqual(srcOrders.map(o => o.volume_remain), [10, 1000]);
+});
+
+test('a target below the recommendation buys only the cheapest units', () => {
+	const srcOrders = [sellOrder(1 * M, 10), sellOrder(2 * M, 100)];
+	const recommended = computeItemReport({ srcOrders, destOrders: baseDest(), destDays: baseDays(), now: NOW });
+	assert.equal(recommended.volume, 43);
+	assert.ok(recommended.costPerItemMil > 1.1);
+
+	const report = computeItemReport({ srcOrders, destOrders: baseDest(), destDays: baseDays(), now: NOW, targetVolume: 5 });
+	assert.equal(report.volume, 5);
+	assert.equal(report.costPerItemMil, 1.1);
+	assert.equal(report.stopReason, 'target');
+});
+
+test('a target beyond the book reports the book', () => {
+	const report = computeItemReport({ srcOrders: [sellOrder(1 * M, 10)], destOrders: baseDest(), destDays: baseDays(), now: NOW, targetVolume: 20 });
+	assert.equal(report.volume, 10);
+	assert.equal(report.stopReason, 'book');
+	assert.equal(report.targetVolume, 20);
+});
+
+test('a target under the spend cap reports the cap', () => {
+	const report = computeItemReport({
+		srcOrders: [sellOrder(1 * M, 1000)],
+		destOrders: baseDest(),
+		destDays: baseDays(),
+		now: NOW,
+		targetVolume: 20,
+		config: { COST_LIMIT: 10 * M }
+	});
+	assert.equal(report.volume, 9); // same arithmetic as the COST_LIMIT test above
+	assert.equal(report.stopReason, 'cost');
+	assert.equal(report.stopPriceMil, 1);
+});
+
+test('target 0 buys nothing', () => {
+	const report = computeItemReport({ srcOrders: [sellOrder(1 * M, 1000)], destOrders: baseDest(), destDays: baseDays(), now: NOW, targetVolume: 0 });
+	assert.equal(report.volume, 0);
+	assert.equal(report.stopReason, 'target');
+	assert.equal(report.dailyProfitMil, 0);
+	assert.equal(report.filteredReason, 'not profitable');
+});
+
 test('always-show ignores the ROI stop but still respects the cap, and bypasses filters', () => {
 	const srcOrders = [sellOrder(6 * M, 10), sellOrder(1 * M, 10), sellOrder(4 * M, 10), sellOrder(7 * M, 100)];
 	const report = computeItemReport({ srcOrders, destOrders: baseDest(), destDays: baseDays(), now: NOW, config: { isAlwaysShow: true } });
@@ -316,7 +378,7 @@ test('regression: realistic fixture produces the full report shape', () => {
 	const report = computeItemReport({ srcOrders, destOrders, destDays, typeId: 12345, now: NOW });
 	assert.equal(JSON.stringify(srcOrders), before);
 
-	const CONTEXT_KEYS = ['activeDays', 'supplyVolume', 'sellPriceMil', 'srcBestSellPriceMil', 'destBestSellPriceMil', 'destBestBuyPriceMil', 'destSellOrderCount', 'stopReason', 'stopPriceMil', 'stopRoi', 'horizonVolume'];
+	const CONTEXT_KEYS = ['activeDays', 'supplyVolume', 'sellPriceMil', 'srcBestSellPriceMil', 'destBestSellPriceMil', 'destBestBuyPriceMil', 'destSellOrderCount', 'stopReason', 'stopPriceMil', 'stopRoi', 'horizonVolume', 'targetVolume'];
 	assert.deepEqual(Object.keys(report).sort(), [
 		'activeDaysFraction',
 		'activeSellers',
@@ -340,6 +402,7 @@ test('regression: realistic fixture produces the full report shape', () => {
 	for (const [key, val] of Object.entries(report)) {
 		if (key === 'filteredReason' || key === 'stopReason') continue;
 		if (val === null && (key === 'stopPriceMil' || key === 'stopRoi')) continue; // null when the demand cap bound
+		if (val === null && key === 'targetVolume') continue; // null for a recommendation
 		assert.equal(typeof val, 'number', `${key} should be a number`);
 		assert.ok(Number.isFinite(val), `${key} should be finite`);
 	}
@@ -357,7 +420,8 @@ test('regression: realistic fixture produces the full report shape', () => {
 		stopReason: 'horizon', // the demand cap (5) bound the volume, not the book or the ROI floor
 		stopPriceMil: null,
 		stopRoi: null,
-		horizonVolume: 5
+		horizonVolume: 5,
+		targetVolume: null
 	});
 
 	assert.deepEqual(report, {
