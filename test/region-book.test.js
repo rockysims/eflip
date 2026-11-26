@@ -501,6 +501,33 @@ test('an unforced hourly sync inside the hour of the last snapshot leaves the re
 	assert.equal(third.regionBook.status, 'ok');
 });
 
+test('a forced sync of the characters and the market does not force the region book: a snapshot inside the hour is not taken twice', async (t) => {
+	const { fake, clock, service } = setup(t, { env: { EFLIP_REGION_BOOK: '1' } });
+	fake.character(IVAN, { orders: [order(8001, { type_id: 35 })] });
+	fake.market.regionOrders.set(String(REGION), SNAPSHOT_A);
+	await service.syncCharacter(IVAN, { force: true });
+	const scheduled = await service.syncRegionBook();
+	assert.equal(scheduled.status, 'ok', JSON.stringify(scheduled.errors));
+	assert.equal(scheduled.regionId, REGION);
+
+	// ten minutes on, the script's plain run or the results page's "Sync all": force for the characters and the market
+	clock.advance(10 * MINUTE);
+	fake.reset();
+	const all = await service.syncAll({ force: true });
+	assert.equal(all.characters[0].status, 'ok');
+	assert.equal(all.market.status, 'ok');
+	assert.equal(all.regionBook.status, 'skipped');
+	assert.match(all.regionBook.reason, /within the last hour/);
+	assert.equal(regionCalls(fake).length, 0, 'no second snapshot');
+
+	// only an explicit request overrides the hour
+	clock.advance(MINUTE);
+	fake.reset();
+	const asked = await service.syncAll({ force: true, regionBook: true });
+	assert.equal(asked.regionBook.status, 'ok', JSON.stringify(asked.regionBook));
+	assert.equal(regionCalls(fake).length, 2);
+});
+
 test('a region book that blows up does not take the characters and the market down with it', async (t) => {
 	const { fake, service, log } = setup(t, { env: { EFLIP_REGION_BOOK: '1' } });
 	fake.character(IVAN, { orders: [order(8001, { type_id: 35 })] });

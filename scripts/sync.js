@@ -6,7 +6,8 @@
 //
 //   node scripts/sync.js                    every linked character, then the destination market
 //   node scripts/sync.js --character 123    only that character (repeatable)
-//   node scripts/sync.js --no-market        skip the market snapshot
+//   node scripts/sync.js --no-market        skip the market snapshot and the regional book: nothing
+//                                           that draws on the market-order bucket
 //   node scripts/sync.js --market-only      only the market snapshot
 //   node scripts/sync.js --region 10000043  snapshot that region's market (repeatable)
 //   node scripts/sync.js --rebuild          rebuild the character ledgers (and structure names) from
@@ -46,7 +47,8 @@
 //   node scripts/sync.js --storage-report   the same from the last storage run, without running one.
 //
 // Always syncs (the page's "more than an hour ago" test is the server's business), but every route
-// still honours its Expires, so a run inside the cache windows makes no call.
+// still honours its Expires, so a run inside the cache windows makes no call. The regional book
+// (EFLIP_REGION_BOOK=1) keeps its own rule: no second snapshot within 55 minutes of the last.
 // Reads the same .env as the server (EVE_CLIENT_ID, EVE_CLIENT_SECRET, EVE_CALLBACK_URL,
 // ESI_USER_AGENT, ESI_COMPAT_DATE, EFLIP_DATA_DIR).
 // Prints one block per character and one for the market: calls made, 304s, rows added, tokens left
@@ -543,6 +545,8 @@ const main = async (argv, deps = {}) => {
 			characterIds: options.marketOnly ? [] : options.characterIds,
 			force: true,
 			market: options.market,
+			// --no-market: no regional book either (it would answer "deferred", which is the export page's word)
+			...(options.market ? {} : { regionBook: false }),
 			regionIds: options.regionIds,
 			maxTypes: options.maxTypes,
 		});

@@ -402,6 +402,17 @@ test('the hourly sync of the script takes the region book after the market only 
 	assert.ok(text.indexOf('market (region') < text.indexOf('region book ('), 'after the market');
 });
 
+test('--no-market leaves the region book alone too, with EFLIP_REGION_BOOK=1: nothing that draws on the market-order bucket, and no "deferred" line', async (t) => {
+	const ctx = setup(t);
+	ctx.fake.market.regionOrders.set(String(REGION), regionBookRows([35]));
+	assert.equal(await ctx.run(['--no-market'], { env: { ...ENV, EFLIP_REGION_BOOK: '1' } }), 0, ctx.errors.join('\n'));
+	const text = ctx.lines.join('\n');
+	assert.match(text, /Ivan Tester/);
+	assert.ok(!text.includes('region book'), text);
+	assert.ok(!text.includes('deferred'), text);
+	assert.equal(ctx.fake.callsTo(/markets/).length, 0);
+});
+
 test('--watch says whether the hourly region book is on: off by default, and on with EFLIP_REGION_BOOK=1 it takes the snapshot on the first tick, skips the ticks inside the hour and takes the next an hour later', async (t) => {
 	const off = setup(t);
 	off.fake.market.orders.set(`${REGION}:35`, [bookOrder(8001, 35, 1000)]);
