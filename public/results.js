@@ -20,7 +20,7 @@
 
 	//--- shared with the insights page (results-shared.js): formatting, storage, server calls, the window and the loader
 
-	const { DAY_MS, DASH, MINUS, ARROW } = resultsShared.constants;
+	const { DAY_MS, DASH, ARROW } = resultsShared.constants;
 	const { get: lsGet, set: lsSet } = resultsShared.ls;
 	const { nf, isNum, esc, fmtIsk, fmtExact, fmtQty, fmtPct, fmtPct0, fmtDays, fmtRate, ago, clock, stamp } = resultsShared.fmt;
 	const { setHtml, setText, api, widenNext } = resultsShared;
@@ -37,7 +37,7 @@
 		typesChanged: () => { renderStatusBits(); renderTable(); },
 		reloaded: () => noteSyncState()
 	});
-	const { state, charName, nameOf, runProfit, resolveSelection, chooseWindow, reloadData, apply, loadFatal } = shared;
+	const { state, charName, nameOf, runProfit, resolveSelection, chooseWindow, reloadData, loadFatal } = shared;
 	// the loader's state (config, characters, runs, ledgers, snapshots, view, ...) is shared.state; the rest is this page's
 	Object.assign(state, {
 		notices: [],              // dismissible one-off messages {kind, text}

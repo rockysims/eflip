@@ -28,8 +28,8 @@
 
 	//--- shared with the results and insights pages (results-shared.js): formatting, storage, server calls, the loader
 
-	const { DAY_MS, DASH, MINUS, STATIONS } = resultsShared.constants;
-	const { nf2, isNum, esc, fmtIsk, fmtExact, fmtQty, fmtPct, fmtRate, clock, stamp } = resultsShared.fmt;
+	const { DAY_MS, DASH, STATIONS } = resultsShared.constants;
+	const { nf2, isNum, esc, fmtIsk, fmtExact, fmtQty, fmtPct, fmtRate, clock, stamp, toMs: msOf } = resultsShared.fmt;
 	const { setHtml, setText, api } = resultsShared;
 	const store = resultsShared.storage('eflip.orders.');
 	const oc = ordersCalc;
@@ -73,17 +73,15 @@
 	};
 	const ageText = (ms, now) => (isNum(ms) ? `${dur(now - ms)} ago` : DASH);
 	const hasMoment = () => typeof moment === 'function';
-	const localTime = (ms) => (hasMoment() ? moment(ms).format('MMM D, HH:mm') : new Date(ms).toLocaleString());
 	const eveTime = (ms) => {
 		if (!hasMoment()) return new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
 		const sameDay = moment(ms).format('YYYY-MM-DD') === moment.utc(ms).format('YYYY-MM-DD');
 		return moment.utc(ms).format(sameDay ? 'HH:mm' : 'MMM D, HH:mm');
 	};
-	const whenText = (ms) => `${localTime(ms)} (EVE ${eveTime(ms)})`;
+	const whenText = (ms) => `${stamp(ms)} (EVE ${eveTime(ms)})`;
 	const clockOrDate = (ms) => (hasMoment() && moment(ms).isSame(moment(), 'day') ? clock(ms) : stamp(ms));
 	const short = (s, n = 26) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 	const plural = (n, one, many = `${one}s`) => `${nf2.format(n)} ${n === 1 ? one : many}`;
-	const msOf = (v) => (typeof v === 'number' ? v : Date.parse(v));
 	const tot = (label, text, title, cls = '') => `<span class="tot ${cls}"${title ? ` title="${esc(title)}"` : ''}><span class="dim">${esc(label)}</span> <b>${text}</b></span>`;
 	const money = (v, signed = false) => `<span${isNum(v) && v < 0 ? ' class="neg"' : ''}>${esc(fmtIsk(v, signed))}</span>`;
 
@@ -122,10 +120,8 @@
 	//--- user choices (persisted under eflip.orders.)
 
 	const exportMinRoi = () => {
-		try {
-			const v = JSON.parse(localStorage.getItem('eflip.export.minRoi'));
-			return isNum(v) && v >= 1 ? v : null;
-		} catch (e) { return null; }
+		const v = resultsShared.storage('eflip.export.').get('minRoi', null);
+		return isNum(v) && v >= 1 ? v : null;
 	};
 	const savedThresholds = store.get('thresholds', {});
 	const thresholds = {
@@ -672,7 +668,7 @@
 		const chars = data.sync && data.sync.characters ? data.sync.characters : {};
 		const times = (state.characters || []).map(c => (chars[c.characterId] && chars[c.characterId].syncedAt ? Date.parse(chars[c.characterId].syncedAt) : NaN)).filter(Number.isFinite);
 		const lastSale = lastSaleIso ? Date.parse(lastSaleIso) : null;
-		const title = `${isNum(lastSale) ? `last sale ${localTime(lastSale)}` : 'no sale on record'} \u00b7 ESI holds transactions back up to an hour`;
+		const title = `${isNum(lastSale) ? `last sale ${stamp(lastSale)}` : 'no sale on record'} \u00b7 ESI holds transactions back up to an hour`;
 		if (times.length === 0) return `<span class="st" title="${esc(title)}">sales ${DASH}, not synced yet</span>`;
 		return `<span class="st" title="${esc(title)}">sales synced ${esc(clockOrDate(Math.max(...times)))}</span>`;
 	};
@@ -1033,7 +1029,7 @@
 				parts.push(`relist fee ${pct3(f.rate)} of the remaining value at ${esc(where)} (${isNum(f.rows) ? plural(f.rows, 'relist') : 'relists'}${since})`);
 				if (isNum(f.rows) && f.rows < FEW_RELISTS) tips.push(`${where}: few observations`);
 				const obs = f.observations.filter(o => isNum(o.rate)).slice().sort((x, y) => Date.parse(y.date) - Date.parse(x.date)).slice(0, 8);
-				if (obs.length > 0) tips.push(`${where}, newest relists: ${obs.map(o => `${isNum(Date.parse(o.date)) ? localTime(Date.parse(o.date)) : DASH} ${pct3(o.rate)} (${nameOf(o.typeId)})`).join('; ')}`);
+				if (obs.length > 0) tips.push(`${where}, newest relists: ${obs.map(o => `${isNum(Date.parse(o.date)) ? stamp(Date.parse(o.date)) : DASH} ${pct3(o.rate)} (${nameOf(o.typeId)})`).join('; ')}`);
 			}
 			if (parts.length > 0) lines.push(`<div title="${esc(tips.join('\n'))}">${esc(c.name || `character ${c.characterId}`)}: ${parts.join('; ')}</div>`);
 		}
@@ -1174,7 +1170,7 @@
 		if (isNum(row.observedFractionVolume) && row.observedFractionVolume > 0) seen.push(`demand ${pctObserved(row.observedFractionVolume)} observed`);
 		if (isNum(row.soldBeforeUnits) && row.soldBeforeUnits > 0) seen.push(`sold before: ${plural(row.soldBeforeUnits, 'unit')} in the 90 days before the run`);
 		return `<div class="snapHead"><h3 id="snapTitle">${esc(name)} — export snapshot</h3><button type="button" class="snapClose" data-act="snapClose">Close</button></div>
-			<p class="snapRun">run ${esc(isNum(Date.parse(run.copiedAt)) ? localTime(Date.parse(run.copiedAt)) : DASH)} (${esc(route)}), ${esc(fmtQty(row.qty))} copied of ${esc(fmtQty(recommended))} recommended (${esc(stop)})</p>
+			<p class="snapRun">run ${esc(isNum(Date.parse(run.copiedAt)) ? stamp(Date.parse(run.copiedAt)) : DASH)} (${esc(route)}), ${esc(fmtQty(row.qty))} copied of ${esc(fmtQty(recommended))} recommended (${esc(stop)})</p>
 			<table class="snapTable"><thead><tr><th scope="col"><span class="sr">figure</span></th><th scope="col" class="numeric">at the run</th><th scope="col" class="numeric">now</th></tr></thead><tbody>${lines}</tbody></table>
 			${seen.length > 0 ? `<p class="snapSeen dim">${esc(seen.join(' · '))}</p>` : ''}`;
 	};
