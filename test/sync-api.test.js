@@ -773,3 +773,15 @@ test('GET /api/config reports the storage budget, the shares and each kind\'s by
 	assert.equal(measured.json.storage.status, 'no-budget');
 	assert.equal(measured.json.storage.budgetBytes, null);
 });
+
+test('GET /api/config passes on a storage setting that does not parse, so the pages can say that no budget is applied', async (t) => {
+	const budget = await startApp(t, { env: { EFLIP_STORAGE_BUDGET: '1GiB' } });
+	const storage = (await budget.get('/api/config')).json.storage;
+	assert.equal(storage.budget, null);
+	assert.equal(typeof storage.error, 'string');
+	assert.match(storage.error, /storage budget: "1GiB"/);
+	const shares = await startApp(t, { configured: false, env: { EFLIP_STORAGE_BUDGET: '1GB', EFLIP_STORAGE_SHARES: 'regionPages:40%' } });
+	const unparsed = (await shares.get('/api/config')).json.storage;
+	assert.equal(unparsed.budget, null, 'shares that do not parse: no budget either');
+	assert.match(unparsed.error, /storage shares: regionPages:40%/);
+});

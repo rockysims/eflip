@@ -1,7 +1,9 @@
 // storage-notice.js: the storage line of the pages' env notice (planning/2026-11-25-export-history-
 // columns, M2 P2.2), from GET /api/config: `regionBook.enabled` (EFLIP_REGION_BOOK=1) and `storage`
-// ({budget: bytes | null, usage, total, unmet, ...}, lib/api.js). results-shared.js (results,
+// ({budget: bytes | null, usage, total, unmet, error, ...}, lib/api.js). results-shared.js (results,
 // insights and orders pages) and export.js print the same sentences; scripts/sync.js uses sizeText.
+//   - a budget or shares setting that does not parse (`error`): that no budget is applied, and why,
+//     whether or not the region job is on
 //   - region job on, no budget: a note that raw grows without bound, and the setting that stops it
 //   - a budget: how much of it is used ("Storage 62 % of 1 GB."), and, when the last run could not
 //     get under it, by how much it is over with nothing left to trim above the floors
@@ -33,6 +35,9 @@
 		const storage = config.storage;
 		if (!storage || typeof storage !== 'object') return [];
 		const regionBookOn = Boolean(config.regionBook && config.regionBook.enabled);
+		if (typeof storage.error === 'string' && storage.error !== '') {
+			return [{ kind: 'warn', text: `EFLIP_STORAGE_BUDGET or EFLIP_STORAGE_SHARES did not parse (${storage.error}): no storage budget is applied.` }];
+		}
 		const budget = Number(storage.budget);
 		if (storage.budget === null || storage.budget === undefined || !(budget > 0)) {
 			return regionBookOn

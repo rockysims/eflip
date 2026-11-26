@@ -13,6 +13,14 @@ test('the hourly book on with no budget: a note that raw grows, and the setting 
 	assert.deepEqual(storageNoticeLines(config({ budget: null, total: 5e9, unmet: 0 }, false)), [], 'the book off: nothing grows unbounded, nothing to say');
 });
 
+test('a budget or shares setting that does not parse: a warning that no budget is applied, whether or not the book is on', () => {
+	const error = 'storage budget: "1GiB" is not a size such as 1GB, 500MB or a number of bytes';
+	const expected = [{ kind: 'warn', text: `EFLIP_STORAGE_BUDGET or EFLIP_STORAGE_SHARES did not parse (${error}): no storage budget is applied.` }];
+	assert.deepEqual(storageNoticeLines({ regionBook: { enabled: false }, storage: { budget: null, error, total: 5e9, unmet: 0 } }), expected);
+	assert.deepEqual(storageNoticeLines(config({ budget: null, error, total: 5e9, unmet: 0 })), expected, 'the book on: not "Set EFLIP_STORAGE_BUDGET", which is set');
+	assert.deepEqual(storageNoticeLines(config({ budget: null, error: null, total: 5e9, unmet: 0 }, false)), [], 'no error: as before');
+});
+
 test('a budget: the share of it used, and how far over when only the floors are left', () => {
 	assert.deepEqual(storageNoticeLines(config({ budget: 1e9, total: 620e6, unmet: 0 })), [{ kind: 'info', text: 'Storage 62 % of 1 GB.' }]);
 	assert.deepEqual(storageNoticeLines(config({ budget: 1e9, total: 620e6, unmet: 0 }, false)), [{ kind: 'info', text: 'Storage 62 % of 1 GB.' }], 'whether or not the book is on');
