@@ -474,6 +474,26 @@ test('invalid_grant marks the character relink and later calls skip the endpoint
 	assert.equal(fetch.callsTo(TOKEN_URL).length, 1);
 });
 
+// Only invalid_grant says the grant is dead. A 403 block page, a 404 during a CCP deploy or an invalid_request
+// says nothing about it, and must not mark every character whose token expires meanwhile.
+test('other 4xx answers (a 403 HTML page, a 404, a 400 invalid_request) are thrown and leave the character linked', async (t) => {
+	const answers = [
+		[403, () => new Response('<html><body>Request blocked</body></html>', { status: 403, headers: { 'Content-Type': 'text/html' } })],
+		[404, () => new Response('Not Found', { status: 404 })],
+		[400, () => jsonResponse(400, { error: 'invalid_request', error_description: 'Malformed request' })],
+	];
+	for (const [status, answer] of answers) {
+		const { store, fetch, tokens } = managerFixture(t, answer);
+		await assert.rejects(tokens.accessTokenFor(CHARACTER_ID), (e) => e instanceof SsoError && e.status === status, `${status}`);
+		assert.equal(store.get(CHARACTER_ID).status, 'ok', `${status}`);
+		assert.equal(store.get(CHARACTER_ID).lastError, null, `${status}`);
+		// not retried, and the next call tries the endpoint again
+		assert.equal(fetch.callsTo(TOKEN_URL).length, 1, `${status}`);
+		await assert.rejects(tokens.accessTokenFor(CHARACTER_ID), (e) => e instanceof SsoError && e.status === status, `${status}`);
+		assert.equal(fetch.callsTo(TOKEN_URL).length, 2, `${status}`);
+	}
+});
+
 test('a network error is retried once after 500 ms, then thrown with the status unchanged', async (t) => {
 	const { store, fetch, tokens, sleeps } = managerFixture(t, () => { throw new TypeError('fetch failed'); });
 	await assert.rejects(tokens.accessTokenFor(CHARACTER_ID), /fetch failed/);
