@@ -109,6 +109,26 @@
 			font-weight: bold;
 		}
 
+		/* env notice: results-shared.js fills #envNotice while EFLIP_DATA_DIR or ESI_USER_AGENT is unset */
+		#envNotice .envNote {
+			display: flex;
+			flex-wrap: wrap;
+			align-items: baseline;
+			gap: 4px 10px;
+			padding: 6px 10px;
+			margin: 0 0 6px;
+			border-left: 4px solid #a45f00;
+			background: #fff6e0;
+		}
+		#envNotice .envNote .sev {
+			font-weight: bold;
+		}
+		#envNotice code {
+			background: rgba(0, 0, 0, 0.06);
+			padding: 0 3px;
+			border-radius: 3px;
+		}
+
 		/* window bar: the same controls and ids as the results page, so both read the same choices */
 		#windowBar {
 			display: flex;
@@ -481,6 +501,7 @@
 	<script src="insights.js" defer></script>
 </head>
 <body>
+	<div id="envNotice" class="block"></div>
 	<div id="banners" class="block" aria-live="polite"></div>
 	<div id="windowBar" class="block" hidden>
 		<label>Window <select id="windowSel"></select></label>
@@ -492,6 +513,7 @@
 		<span id="routeFixed" class="muted" hidden></span>
 		<label class="check" title="include the donations paid to a courier's hauler in the haul cost"><input id="countBonuses" type="checkbox" /> count hauler bonuses</label>
 		<a class="btn" id="toResults" href="results.html" title="the per-item results table">results</a>
+		<a class="btn" id="toOrders" href="orders.html" title="open sell orders and recent sales">orders</a>
 		<span id="statusNote" class="muted" role="status"></span>
 	</div>
 	<p id="dataNote" class="block dim"></p>

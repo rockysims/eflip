@@ -52,7 +52,9 @@
 //             volumeTotal, issued, firstSeen (order log), listedSince (the earliest of firstSeen, the
 //             first logged issued and facts.relists firstSeenAt), listedFor = now - listedSince,
 //             relistCount (price changes in the log path), relistFees (fees after the first in
-//             facts.relists), listingFee (the first), feeTotal (all), lastFillAt (last volumeRemain drop).
+//             facts.relists), listingFee (the first), feeTotal (all), lastFillAt and lastFillObserved:
+//             the last observed volumeRemain drop (true) while the wallet has not covered it, else the
+//             newest sale matched to the order (false), else the last observed drop (true).
 //     rule 2  bookFetchedAt, unitsAhead, ordersAhead, rank (1 + ordersAhead), bestPrice (lowest in scope,
 //             ours included, our other orders not), gapToBest = (price - bestPrice) / bestPrice,
 //             cheaperElsewhere {orders, units} (station scope; null for region), ownAhead {orders,
@@ -71,19 +73,29 @@
 //             marginIfMatch, roiIfMatch = marginIfMatch / landedCost, feeEstimate, feeEstimateFrom
 //             ('order' | 'type' | null), expectedSalesBeforeUndercut, expectedGainBeforeUndercut.
 //     rule 7  verdict, reason (short phrase), badges: subset of priceWar, nocost, nofee, est (time on
-//             top from under three episodes), nobook, nobooklog, nohistory, nolog (no order log).
+//             top from under three episodes), nobook, nobooklog, nohistory, nolog (no order log). The
+//             typical-trade `leave` needs a known daysBehind under undercutDays (decision 14).
 //   sales (rule 8): one per wallet transaction (results-calc rows of one sellTxId merged) in [now -
 //     windowMs, now], newest first: {date, sellTxId, typeId, characterId, qty, unitPrice, gross, tax,
 //     brokerShare, relistShare, net = gross - tax - brokerShare - relistShare, profit, orderId,
-//     orderMatch ('unique' | 'none' | 'ambiguous'), daysSinceListed, lotIds}.
+//     orderMatch, daysSinceListed, lotIds}. orderMatch: 'unique' (the one order whose logged price
+//     then equals unitPrice), 'ambiguous' (several; orderId null), 'byTime' (no logged price equals
+//     it and exactly one order of the character, type and, when the sale row has one, location was
+//     open then by its log), 'none' (orderId null).
 //   salesClusters: per type, sales each within clusterGapMs of the previous: {typeId, start, end, at
 //     (midpoint), count, qty, gross, net, profit (signed sums), sales}, newest first.
-//   pending: per open order, {orderId, characterId, typeId, locationId, date (last drop in the log),
-//     qty, unitPrice, gross, filledPerLog, filledPerTx, estNet, estProfit} when the log saw more units
-//     go than the wallet has matched to the order; only those dated inside the window.
+//   pending: per open order, {orderId, characterId, typeId, locationId, date (its last observed drop),
+//     observed: true, qty, unitPrice, gross, filledPerLog, filledPerTx, allocated, estNet, estProfit};
+//     only those dated inside the window. Per character and type since logging began: each order's
+//     drops (filledPerLog) less its matched sales (filledPerTx); the sales matched to no order are
+//     then taken off oldest drop first (allocated). So a type's pending units never exceed its drops
+//     less all of the character's sales of it since logging began.
 //   salesByTypeDay: {typeId, day, count, qty, gross, net, profit, dayQty (our units that whole UTC
 //     day), volume (history; null when no row), share = dayQty / volume}, day descending.
-//   share (rule 9): {overall: {share, qty, volume}, byType: {[typeId]: {share, qty, volume, days}}}.
+//   share (rule 9): {overall, window, byType}. overall {share, qty, volume} = sum of dayQty / sum of
+//     volume over exactly the salesByTypeDay rows that have a volume (what the table shows); window
+//     {share, qty, volume} and byType[typeId] {share, qty, volume, days} = our units over the volume
+//     of every day of the window that has a history row, for every type listed or sold.
 //   timeOnTop (rule 5): overall {episodes, undercutEpisodes, medianTimeOnTop, est}; byType[typeId] the
 //     same plus onTopFor, bookLogSince and list (episodes {orderId, characterId, locationId, price,
 //     start, end, current, undercut, undercutAt, undercutBy, undercutPrice, timeOnTop}).
@@ -115,6 +127,7 @@
 	const PRICE_WAR_MS = DAY_MS;      // two re-undercuts within this is a price war
 	const FALLBACK_TAX = 0.08;        // results-calc defaultOptions.SALES_TAX
 	const PRICE_EPS = 0.005;          // a transaction's unit_price equals a logged price within half a cent
+	const ORDERS_CACHE_MS = 20 * MINUTE_MS; // /characters/{id}/orders cache: the first logged answer may be this old
 	const VERDICTS = ['undercut', 'maybe', 'reconsider', 'leave', 'top'];
 
 	//--- helpers
@@ -229,13 +242,6 @@
 		let n = 0;
 		for (let i = 1; i < path.length; i++) if (path[i].price !== null && path[i - 1].price !== null && path[i].price !== path[i - 1].price) n++;
 		return n;
-	};
-	// Rule 1: the `at` of the last entry whose volumeRemain dropped (decision 13: a drop is a fill).
-	const lastDrop = (path) => {
-		for (let i = path.length - 1; i >= 1; i--) {
-			if (path[i].volumeRemain !== null && path[i - 1].volumeRemain !== null && path[i].volumeRemain < path[i - 1].volumeRemain) return path[i];
-		}
-		return null;
 	};
 
 	// Rule 5: an episode is one price of one order, from an `issued` to the next `issued` of that order,
@@ -424,7 +430,10 @@
 		if (r.ordersAhead === null) return { verdict: 'maybe', reason: 'no book yet' };
 		if (r.ordersAhead === 0) return { verdict: 'top', reason: r.ownAhead && r.ownAhead.orders > 0 ? 'only our own orders ahead' : 'nothing ahead' };
 		if (r.daysBehind !== null && r.daysBehind * 24 < t.leaveHours) return { verdict: 'leave', reason: `the queue ahead clears in ~${fmtHours(r.daysBehind * 24)}` };
-		if (r.typicalTrade !== null && r.unitsAhead <= r.typicalTrade) return { verdict: 'leave', reason: 'no more ahead than a typical trade' };
+		// decision 14: one unit ahead of an item that sells every five days is still days behind
+		if (r.typicalTrade !== null && r.unitsAhead <= r.typicalTrade && r.daysBehind !== null && r.daysBehind < t.undercutDays) {
+			return { verdict: 'leave', reason: 'no more ahead than a typical trade' };
+		}
 		if (r.landedCost !== null && r.matchPrice !== null) {
 			const netIfMatch = r.matchPrice * (1 - r.taxRate);
 			if (netIfMatch <= r.landedCost) return { verdict: 'reconsider', reason: 'below cost' };
@@ -486,16 +495,59 @@
 		return out;
 	};
 
+	// When an order of ours was open by its log: from the earlier of its first logged `issued` and
+	// its firstSeen, to end.at (open-ended while it has no end).
+	const openSpanOf = (rec) => {
+		let start = rec.firstSeenMs;
+		for (const e of rec.path) if (e.issuedMs !== null && (start === null || e.issuedMs < start)) start = e.issuedMs;
+		return { start, end: rec.end && rec.end.atMs !== null ? rec.end.atMs : null };
+	};
+
 	// Rule 8: the order of the same character and type (and location, when the sale row carries one)
-	// whose logged price at the sale's time equals the unit price; null when none or several.
+	// whose logged price at the sale's time equals the unit price ('unique'; 'ambiguous' and null when
+	// several). When no logged price matches, the one such order open at the sale's time ('byTime': a
+	// price set and changed again between two samples is never logged); 'none' and null otherwise.
 	const matchSales = (sales, logsByCharType) => {
 		for (const sale of sales) {
-			const candidates = (logsByCharType.get(`${sale.characterId}:${sale.typeId}`) || [])
-				.filter(rec => sale.locationId === null || rec.locationId === sale.locationId)
-				.filter(rec => samePrice(priceAt(rec, sale.ms), sale.unitPrice));
-			sale.orderId = candidates.length === 1 ? candidates[0].orderId : null;
-			sale.orderMatch = candidates.length === 1 ? 'unique' : candidates.length === 0 ? 'none' : 'ambiguous';
+			const mine = (logsByCharType.get(`${sale.characterId}:${sale.typeId}`) || [])
+				.filter(rec => sale.locationId === null || rec.locationId === sale.locationId);
+			const exact = mine.filter(rec => samePrice(priceAt(rec, sale.ms), sale.unitPrice));
+			if (exact.length > 0) {
+				sale.orderId = exact.length === 1 ? exact[0].orderId : null;
+				sale.orderMatch = exact.length === 1 ? 'unique' : 'ambiguous';
+				continue;
+			}
+			const open = mine.filter(rec => {
+				const span = openSpanOf(rec);
+				return span.start !== null && span.start <= sale.ms && (span.end === null || sale.ms <= span.end);
+			});
+			sale.orderId = open.length === 1 ? open[0].orderId : null;
+			sale.orderMatch = open.length === 1 ? 'byTime' : 'none';
 		}
+	};
+
+	// The fills the log saw of one of our orders since logging began, as drops (decision 13: a drop of
+	// volumeRemain is a fill): between two path entries; at the first sighting of an order placed after
+	// logging began (volumeTotal less the volumeRemain first seen); and after the last entry, to the
+	// open row's volume_remain (at `currentAt`) or to the ended order's end.volumeRemain (at end.at).
+	const dropsOf = (rec, logStart, currentRemain, currentAt) => {
+		const out = [];
+		const entries = rec.path.filter(e => e.atMs !== null && e.volumeRemain !== null);
+		if (entries.length === 0) return out;
+		const first = entries[0];
+		if (logStart !== null && rec.firstSeenMs !== null && rec.firstSeenMs > logStart && rec.volumeTotal !== null && rec.volumeTotal > first.volumeRemain) {
+			out.push({ atMs: first.atMs, units: rec.volumeTotal - first.volumeRemain, price: first.price });
+		}
+		for (let i = 1; i < entries.length; i++) {
+			if (entries[i].volumeRemain < entries[i - 1].volumeRemain) out.push({ atMs: entries[i].atMs, units: entries[i - 1].volumeRemain - entries[i].volumeRemain, price: entries[i].price });
+		}
+		const last = entries[entries.length - 1];
+		if (currentRemain !== null) {
+			if (currentRemain < last.volumeRemain) out.push({ atMs: Math.max(currentAt, last.atMs), units: last.volumeRemain - currentRemain, price: last.price });
+		} else if (rec.end && rec.end.volumeRemain !== null && rec.end.atMs !== null && rec.end.volumeRemain < last.volumeRemain) {
+			out.push({ atMs: rec.end.atMs, units: last.volumeRemain - rec.end.volumeRemain, price: last.price });
+		}
+		return out;
 	};
 
 	const saleOut = (s) => ({
@@ -679,6 +731,45 @@
 		const ambiguous = allSales.filter(s => s.orderMatch === 'ambiguous').length;
 		if (ambiguous > 0) warnings.push(`${ambiguous} sale(s) match more than one order at their price; left unmatched`);
 
+		// rule 8, the fill account behind pending fills, per character and type, since logging began (the
+		// character's first logged orders answer, less its cache time): each order's drops less the sales
+		// matched to it; the sales matched to no order (and any excess matched to one) are then taken
+		// from those remainders, oldest drop first. So the type's pending units never exceed its drops
+		// less all of the character's sales of it since logging began.
+		const logStartByChar = new Map();
+		for (const rec of logById.values()) {
+			if (rec.synthetic || rec.firstSeenMs === null) continue;
+			const cur = logStartByChar.get(rec.characterId);
+			if (cur === undefined || rec.firstSeenMs < cur) logStartByChar.set(rec.characterId, rec.firstSeenMs);
+		}
+		const openById = new Map(open.map(x => [x.o.orderId, x]));
+		const salesByCharType = groupBy(allSales, s => `${s.characterId}:${s.typeId}`);
+		const accountById = new Map();
+		for (const [key, recs] of groupBy(sellLogs, rec => `${rec.characterId}:${rec.typeId}`)) {
+			const logStart = logStartByChar.get(recs[0].characterId);
+			if (logStart === undefined) continue;
+			const typeSales = (salesByCharType.get(key) || []).filter(s => s.ms > logStart - ORDERS_CACHE_MS);
+			const accounts = recs.map(rec => {
+				const x = openById.get(rec.orderId);
+				const drops = rec.synthetic ? [] : dropsOf(rec, logStart, x ? x.volumeRemain : null, ordersAsOf === null ? nowMs : ordersAsOf);
+				const filledPerLog = sum(drops, d => d.units);
+				const filledPerTx = sum(typeSales.filter(s => s.orderId === rec.orderId), s => s.qty);
+				return { orderId: rec.orderId, drops, filledPerLog, filledPerTx, allocated: 0, residual: filledPerLog - filledPerTx };
+			});
+			let unexplained = sum(typeSales.filter(s => s.orderId === null), s => s.qty) + sum(accounts, a => Math.max(0, -a.residual));
+			for (const a of accounts) a.residual = Math.max(0, a.residual);
+			const byOldestDrop = accounts.filter(a => a.residual > 0).sort((a, b) => a.drops[0].atMs - b.drops[0].atMs || a.orderId - b.orderId);
+			for (const a of byOldestDrop) {
+				const take = Math.min(a.residual, unexplained);
+				a.residual -= take;
+				a.allocated += take;
+				unexplained -= take;
+			}
+			for (const a of accounts) accountById.set(a.orderId, a);
+		}
+		const newestSaleByOrder = new Map();
+		for (const s of allSales) if (s.orderId !== null && (!newestSaleByOrder.has(s.orderId) || s.ms > newestSaleByOrder.get(s.orderId))) newestSaleByOrder.set(s.orderId, s.ms);
+
 		// rows (rules 1-7)
 		const landedByType = new Map();
 		const landedOf = (typeId) => {
@@ -703,7 +794,14 @@
 			const firstIssued = rec.path.reduce((acc, e) => (e.issuedMs === null ? acc : acc === null ? e.issuedMs : Math.min(acc, e.issuedMs)), null);
 			const listedSince = [rec.firstSeenMs, firstIssued, relist ? toMs(relist.firstSeenAt) : null]
 				.filter(ms => ms !== null).reduce((acc, ms) => (acc === null ? ms : Math.min(acc, ms)), null);
-			const drop = x.hasLog ? lastDrop(rec.path) : null;
+			// the last fill: an observed drop the wallet has not covered yet, else the newest matched sale,
+			// else the last observed drop (an observation time: up to one refresh after the sale)
+			const account = accountById.get(o.orderId) || null;
+			const lastObserved = account !== null && account.drops.length > 0 ? account.drops[account.drops.length - 1].atMs : null;
+			const newestSale = newestSaleByOrder.has(o.orderId) ? newestSaleByOrder.get(o.orderId) : null;
+			const lastFill = account !== null && account.residual > 0 ? { ms: lastObserved, observed: true }
+				: newestSale !== null ? { ms: newestSale, observed: false }
+				: lastObserved !== null ? { ms: lastObserved, observed: true } : { ms: null, observed: false };
 
 			// rule 2 / 3
 			const bookEntry = isObj(books[typeId]) && x.regionId !== null ? books[typeId][x.regionId] : null;
@@ -767,7 +865,8 @@
 				relistFees: relist ? sum(fees.slice(1), f => f.cost) : null,
 				listingFee: fees.length > 0 ? fees[0].cost : null,
 				feeTotal: relist && num(relist.feeTotal) !== null ? relist.feeTotal : (relist ? sum(fees, f => f.cost) : null),
-				lastFillAt: drop === null ? null : iso(drop.atMs),
+				lastFillAt: iso(lastFill.ms),
+				lastFillObserved: lastFill.observed,
 
 				bookFetchedAt: book === null ? null : iso(toMs(book.fetchedAt)),
 				unitsAhead: pos === null ? null : pos.unitsAhead,
@@ -828,23 +927,20 @@
 		const sales = windowSales.map(s => outByInternal.get(s));
 		const salesClusters = clusterSales(windowSales.map(s => ({ ms: s.ms, sale: outByInternal.get(s) })), t.clusterGapMs);
 
-		// pending fills: units the log saw go since its first sighting of the order, less the units of
-		// the sales matched to the order after that sighting (fills before it are in neither count)
+		// pending fills: per open order, what is left of its fill account (above), dated at its last drop
 		const pending = [];
 		for (const x of open) {
-			if (!x.hasLog || x.volumeRemain === null) continue;
-			const first = x.rec.path.find(e => e.atMs !== null && e.volumeRemain !== null);
-			const drop = lastDrop(x.rec.path);
-			if (!first || !drop) continue;
-			const filledPerLog = first.volumeRemain - x.volumeRemain;
-			const filledPerTx = sum(allSales.filter(s => s.orderId === x.o.orderId && s.ms > first.atMs), s => s.qty);
-			const qty = filledPerLog - filledPerTx;
-			if (!(qty > 0) || !inWindow(drop.atMs)) continue;
+			const a = accountById.get(x.o.orderId);
+			if (!x.hasLog || !a || !(a.residual > 0)) continue;
+			const drop = a.drops[a.drops.length - 1];
+			if (!inWindow(drop.atMs)) continue;
+			const qty = a.residual;
 			const unitPrice = drop.price !== null ? drop.price : x.o.price;
 			const landed = landedOf(x.o.typeId).landedCost;
 			pending.push({
 				orderId: x.o.orderId, characterId: x.characterId, typeId: x.o.typeId, locationId: x.o.locationId,
-				date: iso(drop.atMs), qty, unitPrice, gross: qty * unitPrice, filledPerLog, filledPerTx,
+				date: iso(drop.atMs), observed: true, qty, unitPrice, gross: qty * unitPrice,
+				filledPerLog: a.filledPerLog, filledPerTx: a.filledPerTx, allocated: a.allocated,
 				estNet: qty * unitPrice * (1 - taxRate),
 				estProfit: landed === null ? null : qty * (unitPrice * (1 - taxRate) - landed),
 				ms: drop.atMs
@@ -853,36 +949,14 @@
 		pending.sort((a, b) => b.ms - a.ms || a.orderId - b.orderId);
 		for (const p of pending) delete p.ms;
 
-		// rule 9: share of the regional volume over the window's UTC days that have a history row (whole
-		// days on both sides; a day not yet in the history is left out of both)
+		// rule 9: share of the regional volume, by type and UTC day, whole days on both sides (a day not
+		// yet in the history has no volume)
 		const days = windowDays(nowMs, t.windowMs);
 		const dayQty = new Map(); // `${typeId}:${day}` -> our units that whole day
 		for (const s of allSales) {
 			const k = `${s.typeId}:${dayKey(s.ms)}`;
 			dayQty.set(k, (dayQty.get(k) || 0) + s.qty);
 		}
-		const shareTypes = [...new Set([...rows.map(r => r.typeId), ...windowSales.map(s => s.typeId)])].sort((a, b) => a - b);
-		const shareByType = {};
-		let overallQty = 0;
-		let overallVolume = 0;
-		for (const typeId of shareTypes) {
-			const hist = history[typeId];
-			if (!Array.isArray(hist) || hist.length === 0) {
-				shareByType[typeId] = { share: null, qty: null, volume: null, days: [] };
-				continue;
-			}
-			const byDay = historyByDay(hist);
-			const covered = days.filter(d => byDay.has(d));
-			const qty = sum(covered, d => dayQty.get(`${typeId}:${d}`) || 0);
-			const volume = sum(covered, d => byDay.get(d));
-			shareByType[typeId] = { share: volume > 0 ? qty / volume : null, qty, volume, days: covered };
-			if (volume > 0) {
-				overallQty += qty;
-				overallVolume += volume;
-			}
-		}
-		const share = { overall: { share: overallVolume > 0 ? overallQty / overallVolume : null, qty: overallQty, volume: overallVolume }, byType: shareByType };
-
 		const salesByTypeDay = [];
 		for (const [key, list] of groupBy(windowSales, s => `${s.typeId}:${dayKey(s.ms)}`)) {
 			const typeId = list[0].typeId;
@@ -897,6 +971,38 @@
 			});
 		}
 		salesByTypeDay.sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : a.typeId - b.typeId));
+
+		// overall: over exactly the type-day rows above that have a volume, so it agrees with the table
+		const withVolume = salesByTypeDay.filter(r => r.volume !== null && r.volume > 0);
+		const tableQty = sum(withVolume, r => r.dayQty);
+		const tableVolume = sum(withVolume, r => r.volume);
+		// byType and window: every day of the window that has a history row, for every type listed or sold,
+		// days we sold nothing included
+		const shareTypes = [...new Set([...rows.map(r => r.typeId), ...windowSales.map(s => s.typeId)])].sort((a, b) => a - b);
+		const shareByType = {};
+		let windowQty = 0;
+		let windowVolume = 0;
+		for (const typeId of shareTypes) {
+			const hist = history[typeId];
+			if (!Array.isArray(hist) || hist.length === 0) {
+				shareByType[typeId] = { share: null, qty: null, volume: null, days: [] };
+				continue;
+			}
+			const byDay = historyByDay(hist);
+			const covered = days.filter(d => byDay.has(d));
+			const qty = sum(covered, d => dayQty.get(`${typeId}:${d}`) || 0);
+			const volume = sum(covered, d => byDay.get(d));
+			shareByType[typeId] = { share: volume > 0 ? qty / volume : null, qty, volume, days: covered };
+			if (volume > 0) {
+				windowQty += qty;
+				windowVolume += volume;
+			}
+		}
+		const share = {
+			overall: { share: tableVolume > 0 ? tableQty / tableVolume : null, qty: tableQty, volume: tableVolume },
+			window: { share: windowVolume > 0 ? windowQty / windowVolume : null, qty: windowQty, volume: windowVolume },
+			byType: shareByType
+		};
 
 		// totals: relist fees are the fee rows after each order's first, dated inside the window
 		let relistFees = 0;
@@ -938,7 +1044,7 @@
 		compute,
 		// exposed for tests
 		_internal: {
-			toMs, iso, median, recencyWeight, dayAge, priceAt, priceChanges, lastDrop, episodesOf, firstUndercut,
+			toMs, iso, median, recencyWeight, dayAge, priceAt, priceChanges, openSpanOf, dropsOf, episodesOf, firstUndercut,
 			reUndercutsOf, positionOf, dailyVolumeOf, typicalTradeOf, landedCostOf, feeEstimateOf, verdictOf,
 			compareRows, mergeSales, clusterSales, windowDays
 		}

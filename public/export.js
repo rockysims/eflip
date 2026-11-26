@@ -1442,12 +1442,33 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	render();
 	if (autoRunChk.checked) run();
 
+	// Env notice (docs/order-monitor-plan.md, UI 2): a reminder while EFLIP_DATA_DIR or ESI_USER_AGENT
+	// is unset. It reads /api/config, which answers before SSO is set up, so it shows whether or not
+	// the app is configured. Built with textContent only; when the read fails, nothing is shown.
+	const showEnvNotice = (env) => {
+		const box = $('#envNotice');
+		if (!box || !env || typeof env !== 'object') return;
+		const lines = [];
+		if (env.dataDirFromEnv === false && typeof env.dataDir === 'string') {
+			lines.push(`Synced data is in ${env.dataDir} because EFLIP_DATA_DIR is not set. Add EFLIP_DATA_DIR=/path to .env so every checkout shares one store.`);
+		}
+		if (env.userAgentFromEnv === false) lines.push('ESI_USER_AGENT is not set; CCP asks for a contact in it.');
+		for (const text of lines) {
+			const line = document.createElement('div');
+			const label = document.createElement('strong');
+			label.textContent = 'Note:';
+			line.append(label, ` ${text}`);
+			box.append(line);
+		}
+	};
+
 	// Sync the linked characters when one has not synced for an hour (docs/trade-results-plan.md,
 	// Sync). Fire and forget, errors dropped: nothing waits on it, and Run and auto-run have started
 	// above. market: false, since the market snapshot draws on the market-order budget a Run uses.
 	(async () => {
 		try {
 			const config = await (await fetch('/api/config')).json();
+			showEnvNotice(config.env);
 			if (!config.configured) return;
 			const status = await (await fetch('/api/sync')).json();
 			if (!exportPersist.syncIsStale(status, Date.now())) return;

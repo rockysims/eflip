@@ -1,0 +1,824 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<link rel="shortcut icon" href="#" />
+	<title>eFlip orders</title>
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.1/moment.min.js"
+			integrity="sha512-qTXRIMyZIFb8iQcfjXWCO8+M5Tbc38Qi5WzdPOYZHIlZpzBHG3L3by84BBBOiRGiEb7KKtAOAs5qYdUiZiQNNQ=="
+			crossorigin="anonymous"
+			referrerpolicy="no-referrer"
+	></script>
+	<script src="https://cdn.jsdelivr.net/npm/d3@7.9.2/dist/d3.min.js"
+			integrity="sha384-LxfWGZyh6PaLjBRPf7NWiEYs9Mn0UQ6ZmqbLLZhxlOBBNWF2a2K0Pfc5efkrNnhQ"
+			crossorigin="anonymous"
+			referrerpolicy="no-referrer"
+	></script>
+	<script src="https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6.19/dist/plot.umd.min.js"
+			integrity="sha384-oSrbEzGlxR3UPW38YN678j8grQ0aSZjwvA8kBxHdv09D4qTPDbptkmF9eND5PviV"
+			crossorigin="anonymous"
+			referrerpolicy="no-referrer"
+	></script>
+	<style type="text/css">
+		html {
+			color-scheme: light;
+		}
+		body {
+			background: #fff;
+			color: #111;
+			font-family: system-ui, sans-serif;
+			font-size: 13px;
+			margin: 8px;
+			/* span the (wide) table so the page, not the table, scrolls sideways and the header stays pinned */
+			width: max-content;
+			min-width: calc(100vw - 16px);
+		}
+		[hidden] {
+			display: none !important;
+		}
+		.dim {
+			color: #6b6b6b; /* 5:1 on white; the results page's grey */
+		}
+		.muted {
+			color: #555;
+		}
+		/* Blocks of prose and controls stay one viewport wide however wide the table makes the body. */
+		.block {
+			max-width: calc(100vw - 16px);
+			box-sizing: border-box;
+		}
+		button, a.btn, select, input[type=number] {
+			font: inherit;
+			min-height: 32px;
+			box-sizing: border-box;
+		}
+		button, a.btn {
+			padding: 4px 12px;
+			border: 1px solid #999;
+			border-radius: 4px;
+			background: #f6f6f6;
+			color: #111;
+			cursor: pointer;
+			text-decoration: none;
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			white-space: nowrap;
+		}
+		button:hover:not([disabled]), a.btn:hover {
+			background: #e9eefa;
+		}
+		button[disabled] {
+			color: #777;
+			cursor: default;
+			background: #f6f6f6;
+		}
+		button.linkish {
+			border: none;
+			background: none;
+			padding: 0 2px;
+			min-height: 0;
+			color: #1a4fa3;
+			text-decoration: underline;
+		}
+		:focus-visible {
+			outline: 2px solid #4a72c4;
+			outline-offset: 1px;
+		}
+		@media (pointer: coarse) {
+			button, a.btn, select, input[type=number] {
+				min-height: 44px;
+			}
+		}
+
+		/* page head: title and the links to the sibling pages */
+		#pageHead {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 6px 12px;
+			align-items: center;
+			margin: 0 0 6px;
+		}
+		#pageHead h1 {
+			font-size: 16px;
+			margin: 0 6px 0 0;
+		}
+
+		/* banners and the env notice (the results page's idiom) */
+		#banners .banner {
+			display: flex;
+			flex-wrap: wrap;
+			align-items: center;
+			gap: 4px 10px;
+			padding: 6px 10px;
+			margin: 0 0 6px;
+			border-left: 4px solid #4a72c4;
+			background: #eef3fc;
+		}
+		#banners .banner.warn {
+			border-left-color: #a45f00;
+			background: #fff6e0;
+		}
+		#banners .banner.err {
+			border-left-color: #b3261e;
+			background: #fdeeed;
+		}
+		.banner .sev {
+			font-weight: bold;
+		}
+		/* env notice: results-shared.js fills #envNotice while EFLIP_DATA_DIR or ESI_USER_AGENT is unset */
+		#envNotice .envNote {
+			display: flex;
+			flex-wrap: wrap;
+			align-items: baseline;
+			gap: 4px 10px;
+			padding: 6px 10px;
+			margin: 0 0 6px;
+			border-left: 4px solid #a45f00;
+			background: #fff6e0;
+		}
+		#envNotice .envNote .sev {
+			font-weight: bold;
+		}
+		#envNotice code {
+			background: rgba(0, 0, 0, 0.06);
+			padding: 0 3px;
+			border-radius: 3px;
+		}
+
+		/* characters strip */
+		#characters {
+			margin-bottom: 6px;
+		}
+		#chips {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 8px;
+			align-items: stretch;
+		}
+		.chip {
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			border: 1px solid #bbb;
+			border-radius: 6px;
+			padding: 6px 8px;
+			background: #fafafa;
+			max-width: 34em;
+		}
+		.chip.problem {
+			border-color: #b3261e;
+			border-width: 2px;
+		}
+		.portrait {
+			width: 32px;
+			height: 32px;
+			border-radius: 4px;
+			background: #e4e4e4;
+			flex: none;
+		}
+		.portrait.noimg {
+			visibility: hidden;
+		}
+		.chipBody {
+			min-width: 11em;
+			overflow-wrap: anywhere;
+		}
+		.chipName {
+			font-weight: bold;
+		}
+		.chipStatus.bad {
+			color: #b3261e;
+		}
+
+		/* status line, refresh controls, thresholds */
+		#refreshBar, #thresholds {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 6px 14px;
+			align-items: center;
+			margin: 0 0 6px;
+		}
+		#statusLine {
+			display: inline-flex;
+			flex-wrap: wrap;
+			gap: 2px 8px;
+			align-items: baseline;
+			font-variant-numeric: tabular-nums;
+		}
+		#statusLine .st.stale {
+			color: #8a4b00;
+			font-weight: 600;
+		}
+		#refreshNow {
+			min-width: 8.4em; /* Refresh now / Refreshing... keep their width */
+		}
+		#refreshBar label, #thresholds label {
+			display: inline-flex;
+			align-items: center;
+			gap: 5px;
+			white-space: nowrap;
+		}
+		#thresholds input[type=number] {
+			width: 4.6em;
+			padding: 2px 4px;
+		}
+		#thresholds input[aria-invalid=true] {
+			border: 2px solid #b3261e;
+		}
+		#tickNote.bad {
+			color: #b3261e;
+		}
+		#stateBox {
+			margin: 8px 0;
+		}
+		#stateBox .card {
+			border: 1px solid #bbb;
+			border-radius: 6px;
+			padding: 10px 14px;
+			background: #fafafa;
+			max-width: 46em;
+		}
+		#stateBox .card.err {
+			border-color: #b3261e;
+			background: #fdeeed;
+		}
+		#stateBox h2 {
+			margin: 0 0 6px;
+			font-size: 15px;
+		}
+		#stateBox ol {
+			margin: 6px 0 8px 20px;
+			padding: 0;
+		}
+		#stateBox code {
+			background: #eee;
+			padding: 0 3px;
+			border-radius: 3px;
+		}
+
+		/* sections */
+		h2.sectionHead {
+			font-size: 15px;
+			margin: 12px 0 4px;
+			display: flex;
+			flex-wrap: wrap;
+			gap: 2px 12px;
+			align-items: baseline;
+		}
+		h2.sectionHead .dim {
+			font-size: 13px;
+			font-weight: normal;
+		}
+		#openNote {
+			margin: 0 0 4px;
+		}
+
+		/* the open orders table (the export page's idiom: dense, sticky header, right-aligned figures) */
+		table {
+			border-collapse: separate;
+			border-spacing: 0;
+			font-variant-numeric: tabular-nums;
+		}
+		#orders thead th {
+			position: sticky;
+			top: 0;
+			background: #f2f2f2;
+			color: #111;
+			border-bottom: 1px solid #bbb;
+			padding: 3px 6px;
+			cursor: pointer;
+			user-select: none;
+			z-index: 1;
+			font-weight: 600;
+			line-height: 1.2;
+			vertical-align: bottom;
+			white-space: normal;
+			max-width: 4.6em;
+		}
+		#orders thead th.sorted {
+			background: #e2e8f4;
+		}
+		#orders td {
+			padding: 2px 5px;
+			border-bottom: 1px solid #eee;
+			white-space: nowrap;
+			background: #fff;
+		}
+		#orders tr:hover td {
+			background: #f6f9ff;
+		}
+		/* the verdict and item columns stay in view while the figures scroll sideways */
+		#orders .stickV, #orders .stickI {
+			position: sticky;
+			z-index: 2;
+		}
+		#orders .stickV {
+			left: 0;
+		}
+		#orders .stickI {
+			left: var(--stick-i, 190px);
+			border-right: 1px solid #bbb;
+		}
+		#orders thead th.stickV, #orders thead th.stickI {
+			z-index: 3;
+		}
+		#orders thead th.text {
+			max-width: none;
+		}
+		@media (max-width: 720px) {
+			/* on a phone the pinned columns would fill the screen: let everything scroll */
+			#orders tbody .stickV, #orders tbody .stickI {
+				position: static;
+			}
+			#orders thead th.stickV, #orders thead th.stickI {
+				left: auto;
+			}
+		}
+		.numeric {
+			text-align: right;
+		}
+		.text {
+			text-align: left;
+		}
+		td.nameCell .name {
+			font-weight: 600;
+			display: inline-block;
+			max-width: 13em;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			vertical-align: bottom;
+		}
+		td.verdictCell .flag {
+			margin-left: 3px;
+		}
+		td.verdictCell .reason {
+			display: inline-block;
+			max-width: 8em;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			vertical-align: bottom;
+		}
+		.verdict {
+			display: inline-block;
+			min-width: 5.6em;
+			text-align: center;
+			font-weight: 600;
+			font-size: 12px;
+			line-height: 17px;
+			padding: 0 6px;
+			border-radius: 9px;
+			border: 1.5px solid;
+			cursor: help;
+		}
+		.v-undercut {
+			background: #184f95;
+			border-color: #184f95;
+			color: #fff;
+		}
+		.v-maybe {
+			background: #fff6e0;
+			border-color: #a45f00;
+			color: #6b3d00;
+		}
+		.v-reconsider {
+			background: #fdeeed;
+			border-color: #b3261e;
+			color: #8c1a13;
+		}
+		.v-leave {
+			background: #f2f2f2;
+			border-color: #777;
+			color: #333;
+		}
+		.v-top {
+			background: #e9f6ec;
+			border-color: #0a6b2c;
+			color: #0a5224;
+		}
+		.flag {
+			display: inline-block;
+			font-size: 10px;
+			line-height: 14px;
+			border: 1px solid #888;
+			border-radius: 3px;
+			padding: 0 3px;
+			margin-left: 4px;
+			color: #333;
+			background: #f4f4f4;
+			cursor: help;
+			vertical-align: 1px;
+		}
+		.flag.war {
+			border-color: #b3261e;
+			color: #8c1a13;
+			background: #fdeeed;
+		}
+		.neg {
+			color: #b3261e;
+		}
+		.below {
+			color: #b42318; /* a figure outside its limit (the export page's red); the tooltip names the limit */
+			font-weight: 600;
+		}
+		.mark {
+			color: #8a4b00;
+		}
+		button.copyName {
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			box-sizing: border-box;
+			min-width: 18px;
+			min-height: 18px;
+			border: none;
+			background: none;
+			color: rgb(150, 150, 150);
+			padding: 0 3px;
+			margin: 0 2px;
+			cursor: pointer;
+			vertical-align: middle;
+			font: inherit;
+			line-height: 1;
+		}
+		tr:hover .copyName, .copyName:focus-visible {
+			color: #111;
+		}
+		button.copyName.pending, button.copyName.failed {
+			color: red;
+		}
+		button.copyName.copied {
+			color: #0a6b2c;
+		}
+		#notes {
+			margin: 6px 0 0;
+		}
+		#notes summary {
+			cursor: pointer;
+		}
+		#notes ul {
+			margin: 2px 0 2px 18px;
+			padding: 0;
+		}
+
+		/* sold recently: a chart card (insights.html's idiom; the dataviz palette's blue and red pair) */
+		.chart {
+			--surface: #fcfcfb;
+			--ink: #0b0b0b;
+			--ink2: #52514e;
+			--grid: #e1e0d9;
+			--axis: #c3c2b7;
+			background: var(--surface);
+			border: 1px solid rgba(11, 11, 11, 0.1);
+			border-radius: 8px;
+			padding: 12px 14px 10px;
+			margin: 14px 0;
+			max-width: min(1180px, calc(100vw - 16px));
+			box-sizing: border-box;
+		}
+		.chartHead {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 6px 16px;
+			align-items: center;
+			justify-content: space-between;
+		}
+		.chart h2 {
+			font-size: 15px;
+			margin: 0;
+		}
+		.ctls {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 6px 14px;
+			align-items: center;
+		}
+		.ctls label {
+			display: inline-flex;
+			align-items: center;
+			gap: 5px;
+			white-space: nowrap;
+		}
+		.seg {
+			display: inline-flex;
+			border: 1px solid #999;
+			border-radius: 4px;
+			overflow: hidden;
+		}
+		.seg button {
+			border: 0;
+			border-radius: 0;
+			background: #f6f6f6;
+			min-width: 3.4em;
+		}
+		.seg button + button {
+			border-left: 1px solid #999;
+		}
+		.seg button[aria-pressed=true] {
+			background: #184f95;
+			color: #fff;
+			font-weight: 600;
+		}
+		.seg button[aria-pressed=true]:hover {
+			background: #184f95;
+		}
+		#soldTotals {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 2px 16px;
+			align-items: baseline;
+			margin: 8px 0 2px;
+			font-variant-numeric: tabular-nums;
+		}
+		#soldTotals .tot {
+			white-space: nowrap;
+		}
+		#soldTotals .tot b {
+			font-weight: 600;
+		}
+		#soldTotals .tot.main b {
+			font-size: 14px;
+		}
+		.legend {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 4px 16px;
+			margin: 6px 0 4px;
+			color: var(--ink2);
+		}
+		.legend .key {
+			display: inline-flex;
+			align-items: center;
+			gap: 6px;
+		}
+		.sw {
+			display: inline-block;
+			width: 12px;
+			height: 12px;
+			flex: none;
+			box-sizing: border-box;
+		}
+		.sw.profit {
+			border-radius: 50%;
+			background: #2a78d6;
+		}
+		.sw.loss {
+			border-radius: 1px;
+			background: #e34948;
+		}
+		.sw.pendProfit {
+			border-radius: 50%;
+			border: 2px solid #2a78d6;
+			background: #fcfcfb;
+		}
+		.sw.pendLoss {
+			border-radius: 1px;
+			border: 2px solid #e34948;
+			background: #fcfcfb;
+		}
+		.sw.pendUnknown {
+			border-radius: 50%;
+			border: 2px solid #52514e;
+			background: #fcfcfb;
+		}
+		.sw.tick {
+			width: 3px;
+			height: 14px;
+			background: #52514e;
+		}
+		.sw.hollowTick {
+			width: 6px;
+			height: 14px;
+			border: 1.25px solid #52514e;
+			background: #fcfcfb;
+		}
+		.chartBody {
+			position: relative;
+			margin-top: 4px;
+			min-height: 40px;
+		}
+		.chartBody svg {
+			display: block;
+			max-width: 100%;
+			overflow: visible;
+		}
+		.chartState {
+			border: 1px dashed #bbb;
+			border-radius: 6px;
+			padding: 14px 16px;
+			background: #fafaf8;
+			color: #333;
+		}
+		.chartState h3 {
+			margin: 0 0 4px;
+			font-size: 14px;
+		}
+		.chartState p {
+			margin: 2px 0 4px;
+			max-width: 60em;
+		}
+		.foot {
+			margin: 6px 0 0;
+			color: var(--ink2);
+			max-width: 70em;
+		}
+		.foot p {
+			margin: 2px 0;
+		}
+		.tableWrap {
+			overflow: auto;
+			max-height: 420px;
+			border: 1px solid #e4e3dd;
+			border-radius: 4px;
+			margin-top: 8px;
+		}
+		table.data {
+			width: max-content;
+			min-width: 100%;
+		}
+		table.data caption {
+			text-align: left;
+			padding: 4px 8px;
+			color: var(--ink2);
+			caption-side: top;
+		}
+		table.data th {
+			position: sticky;
+			top: 0;
+			background: #f2f2f2;
+			border-bottom: 1px solid #bbb;
+			padding: 3px 8px;
+			font-weight: 600;
+			white-space: nowrap;
+			text-align: left;
+			z-index: 1;
+		}
+		table.data th.numeric, table.data td.numeric {
+			text-align: right;
+		}
+		table.data td {
+			padding: 2px 8px;
+			border-bottom: 1px solid #eee;
+			white-space: nowrap;
+		}
+		table.data tr:hover td {
+			background: #f6f9ff;
+		}
+		table.data tr.total td {
+			font-weight: 600;
+			border-top: 1px solid #bbb;
+		}
+
+		/* hit targets over the drawn marks: transparent, larger than the mark, focusable */
+		.hit {
+			fill: transparent;
+			stroke: none;
+			cursor: default;
+			outline: none;
+		}
+		.hit.on {
+			fill: rgba(11, 11, 11, 0.06);
+			stroke: #0b0b0b;
+			stroke-width: 1.5px;
+		}
+		.hit:focus {
+			fill: rgba(74, 114, 196, 0.12);
+			stroke: #4a72c4;
+			stroke-width: 2px;
+		}
+		#tip {
+			position: fixed;
+			z-index: 30;
+			pointer-events: none;
+			background: #fff;
+			color: #0b0b0b;
+			border: 1px solid rgba(11, 11, 11, 0.22);
+			border-radius: 6px;
+			box-shadow: 0 2px 10px rgba(0, 0, 0, 0.14);
+			padding: 6px 9px;
+			font-size: 12px;
+			max-width: 470px;
+			line-height: 1.35;
+		}
+		#tip .tt {
+			color: #52514e;
+			margin-bottom: 3px;
+		}
+		#tip .tr {
+			display: flex;
+			align-items: baseline;
+			gap: 7px;
+		}
+		#tip .tk {
+			display: inline-block;
+			flex: none;
+			width: 10px;
+			height: 10px;
+			align-self: center;
+		}
+		#tip .tk.profit {
+			border-radius: 50%;
+			background: #2a78d6;
+		}
+		#tip .tk.loss {
+			border-radius: 1px;
+			background: #e34948;
+		}
+		#tip .tk.hollow {
+			border-radius: 50%;
+			border: 2px solid #52514e;
+			box-sizing: border-box;
+		}
+		#tip .tv {
+			font-weight: 700;
+			font-variant-numeric: tabular-nums;
+			white-space: nowrap;
+		}
+		#tip .tn {
+			color: #52514e;
+		}
+		#tip .tx {
+			color: #52514e;
+			margin-top: 3px;
+		}
+		.sr {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			overflow: hidden;
+			clip: rect(0 0 0 0);
+			white-space: nowrap;
+		}
+	</style>
+	<script src="util.js"></script>
+	<script src="results-calc.js"></script>
+	<script src="results-shared.js"></script>
+	<script src="estimate.js"></script>
+	<script src="orders-calc.js"></script>
+	<script src="orders.js" defer></script>
+</head>
+<body>
+	<div id="envNotice" class="block"></div>
+	<div id="banners" class="block" aria-live="polite"></div>
+	<header id="pageHead" class="block">
+		<h1>Open orders</h1>
+		<a class="btn" id="toResults" href="results.html" title="the per-item results table">results</a>
+		<a class="btn" id="toInsights" href="insights.html" title="charts of the same trade data">insights</a>
+	</header>
+	<section id="characters" class="block" aria-label="Characters" hidden>
+		<div id="chips"></div>
+	</section>
+	<div id="stateBox" class="block"></div>
+	<div id="live" hidden>
+		<div id="refreshBar" class="block">
+			<span id="statusLine"></span>
+			<button type="button" id="refreshNow">Refresh now</button>
+			<label title="every five minutes while this page is open: your open orders, then the books of the items you have listed"><input type="checkbox" id="refreshOpen"> refresh while open</label>
+			<span id="tickNote" class="muted" role="status"></span>
+		</div>
+		<div id="thresholds" class="block" role="group" aria-label="Verdict thresholds">
+			<label title="a queue ahead that clears on its own within this many hours is worth leaving alone">leave under <input type="number" id="thLeave" min="0" step="any" inputmode="decimal" aria-label="leave under, hours"> h</label>
+			<span class="dim" aria-hidden="true">&middot;</span>
+			<label title="an order at least this many days of trading behind the best price is worth undercutting">undercut over <input type="number" id="thUndercut" min="0" step="any" inputmode="decimal" aria-label="undercut over, days"> d</label>
+			<span class="dim" aria-hidden="true">&middot;</span>
+			<label title="net revenue divided by landed cost, as on the export page. Matching the best price below this makes an order 'reconsider'">ROI floor <input type="number" id="thRoi" min="1" step="any" inputmode="decimal" aria-label="ROI floor, times"> x <span class="dim">(the export page&rsquo;s)</span></label>
+			<span class="dim" aria-hidden="true">&middot;</span>
+			<label title="who counts as competition: sell orders at the order's own station, or anywhere in its region">competition <select id="thScope"><option value="station">this station</option><option value="region">whole region</option></select></label>
+			<span id="thNote" class="muted" role="status"></span>
+		</div>
+		<section id="openSection" aria-labelledby="openHead">
+			<h2 class="sectionHead" id="openHead">Open sell orders <span id="openCount" class="dim"></span> <button type="button" class="linkish" id="defaultOrder" hidden>back to the default order</button></h2>
+			<div id="openNote" class="block muted"></div>
+			<table id="orders" aria-label="Open sell orders" hidden>
+				<thead><tr id="sortRow"></tr></thead>
+				<tbody></tbody>
+			</table>
+			<details id="notes" class="block" hidden></details>
+		</section>
+		<section id="soldSection" class="chart" aria-labelledby="soldHead">
+			<div class="chartHead">
+				<h2 id="soldHead">Sold recently</h2>
+				<div class="ctls">
+					<div class="seg" id="winSeg" role="group" aria-label="Window"></div>
+					<label title="a tick at each price change of ours, and a hollow tick at each moment someone priced below us, on each item's row"><input type="checkbox" id="showEvents"> show order events</label>
+				</div>
+			</div>
+			<div id="soldTotals"></div>
+			<div id="soldLegend" class="legend" role="list" aria-label="Legend"></div>
+			<div id="soldBody" class="chartBody"></div>
+			<div id="soldFoot" class="foot dim"></div>
+			<div id="soldTable"></div>
+		</section>
+	</div>
+	<!-- results-shared.js's loader wires a window bar by id and never shows it here: this page has its own window toggle -->
+	<div id="windowBar" hidden>
+		<select id="windowSel"></select>
+		<span id="dateWrap" hidden><input id="sinceDate" type="date"></span>
+		<span id="routeWrap"><select id="startStation"></select><select id="endStation"></select></span>
+		<span id="routeFixed"></span>
+		<input id="countBonuses" type="checkbox">
+	</div>
+	<div id="tip" role="presentation" hidden></div>
+</body>
+</html>

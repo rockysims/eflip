@@ -2,7 +2,9 @@
 // common, so neither carries a copy: the ISK and date formatting, the guarded localStorage, the server
 // calls, the window bar (run or since-date, route, "count hauler bonuses"), and the loader that reads the
 // linked characters' ledgers, runs, snapshots, destination prices and item names, then works the results
-// out with results-calc.js. Plain script, one global (`resultsShared`), no build step.
+// out with results-calc.js. It also fills a page's `#envNotice` container, when it has one, with the
+// notice for an unset EFLIP_DATA_DIR or ESI_USER_AGENT (GET /api/config's `env`). Plain script, one
+// global (`resultsShared`), no build step.
 //
 // Usage (after util.js and results-calc.js, before the page's own script):
 //   const shared = resultsShared.create({ render, renderStatus, typesChanged, reloaded });
@@ -723,5 +725,37 @@ const resultsShared = (() => {
 		};
 	};
 
-	return { constants: { STATIONS, DAY_MS, DASH, MINUS, ARROW, SNAPSHOT_MARGIN_DAYS }, storage, ls, fmt: { nf, nf2, isNum, esc, fmtIsk, fmtExact, fmtQty, fmtPct, fmtPct0, fmtDays, fmtRate, ago, clock, stamp, ymd, toMs }, setHtml, setText, api, widenNext, create };
+	//--- the environment notice (results, insights and orders pages; the export page prints the same lines)
+
+	// GET /api/config says whether the two optional settings that matter are in the environment. A bar under
+	// the page's top, in the page's `#envNotice` container, says so for as long as either is unset: not a
+	// dialog, not dismissible. The wording is the plan's (docs/order-monitor-plan.md, UI 2); the export page
+	// prints the same two sentences. `env` is `config.env`: {dataDir, dataDirFromEnv, userAgentFromEnv}.
+	const envNoticeLines = (env) => {
+		const lines = [];
+		if (!env || typeof env !== 'object') return lines;
+		if (env.dataDirFromEnv === false && typeof env.dataDir === 'string') {
+			lines.push(`Synced data is in <code>${esc(env.dataDir)}</code> because EFLIP_DATA_DIR is not set. Add <code>EFLIP_DATA_DIR=/path</code> to .env so every checkout shares one store.`);
+		}
+		if (env.userAgentFromEnv === false) lines.push('ESI_USER_AGENT is not set; CCP asks for a contact in it.');
+		return lines;
+	};
+	const renderEnvNotice = (env, el = document.getElementById('envNotice')) => {
+		if (!el) return;
+		const html = envNoticeLines(env)
+			.map(line => `<div class="envNote"><span class="sev"><span aria-hidden="true">⚠</span> Note:</span><span>${line}</span></div>`).join('');
+		setHtml(el, html);
+	};
+	const initEnvNotice = async () => {
+		const el = document.getElementById('envNotice');
+		if (!el) return;
+		try {
+			const cfg = await api('/api/config');
+			renderEnvNotice(cfg && cfg.env, el);
+		} catch (e) { /* the page's own load reports an unreachable server */ }
+	};
+	if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initEnvNotice);
+	else initEnvNotice();
+
+	return { constants: { STATIONS, DAY_MS, DASH, MINUS, ARROW, SNAPSHOT_MARGIN_DAYS }, storage, ls, fmt: { nf, nf2, isNum, esc, fmtIsk, fmtExact, fmtQty, fmtPct, fmtPct0, fmtDays, fmtRate, ago, clock, stamp, ymd, toMs }, setHtml, setText, api, widenNext, create, renderEnvNotice };
 })();

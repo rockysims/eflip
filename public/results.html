@@ -189,6 +189,26 @@
 			font-weight: bold;
 		}
 
+		/* env notice: results-shared.js fills #envNotice while EFLIP_DATA_DIR or ESI_USER_AGENT is unset */
+		#envNotice .envNote {
+			display: flex;
+			flex-wrap: wrap;
+			align-items: baseline;
+			gap: 4px 10px;
+			padding: 6px 10px;
+			margin: 0 0 6px;
+			border-left: 4px solid #a45f00;
+			background: #fff6e0;
+		}
+		#envNotice .envNote .sev {
+			font-weight: bold;
+		}
+		#envNotice code {
+			background: rgba(0, 0, 0, 0.06);
+			padding: 0 3px;
+			border-radius: 3px;
+		}
+
 		/* window bar */
 		#windowBar {
 			display: flex;
@@ -460,6 +480,7 @@
 	<script src="results.js" defer></script>
 </head>
 <body>
+	<div id="envNotice" class="block"></div>
 	<div id="banners" class="block" aria-live="polite"></div>
 	<section id="characters" class="block" aria-label="Characters">
 		<div id="chips"></div>
@@ -483,6 +504,7 @@
 		<label class="check"><input id="showSoldOut" type="checkbox" /> show sold out</label>
 		<label class="check" title="include the donations paid to a courier's hauler in the haul cost"><input id="countBonuses" type="checkbox" /> count hauler bonuses</label>
 		<a class="btn" id="toInsights" href="insights.html" title="charts of the same window">insights</a>
+		<a class="btn" id="toOrders" href="orders.html" title="open sell orders and recent sales">orders</a>
 		<span id="tableNote" class="muted" role="status"></span>
 	</div>
 	<div id="runInfo" class="block"></div>

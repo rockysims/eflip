@@ -462,7 +462,7 @@ test('fee estimate: this order\'s relist fees, else the character\'s on the type
 // a tax of 25 % (so matching at 200 nets 150) and, unless `landed` is null, one unit left at `landed`.
 // `episode` adds an ended order undercut after that many ms (the type's time on top); `fees` are this
 // order's fee rows.
-const verdictPieces = ({ type = T2, orderId = 50, ahead, trade = 1, landed = 100, remain = 5, episode = null, fees = null }) => {
+const verdictPieces = ({ type = T2, orderId = 50, ahead, trade = 1, landed = 100, remain = 5, episode = null, fees = null, history = flatHistory(8) }) => {
 	const issued = ago(10 * HOUR);
 	const pieces = {
 		openOrders: [mine({ id: orderId, type, price: 210, remain, issued })],
@@ -470,7 +470,7 @@ const verdictPieces = ({ type = T2, orderId = 50, ahead, trade = 1, landed = 100
 			theirs({ id: orderId, type, price: 210, remain, issued }),
 			...(ahead > 0 ? [theirs({ id: orderId * 100 + 1, type, price: 200.01, remain: ahead, issued: ago(20 * HOUR) })] : [])
 		]) } },
-		history: { [type]: flatHistory(8) },
+		history: { [type]: history },
 		sells: Array.from({ length: 5 }, () => sellFact({ type, date: ago(20 * DAY), qty: trade, price: 205 })),
 		lots: landed === null ? [] : [lotFact({ type, qty: 1, unitPrice: landed })],
 		relists: fees === null ? [] : [relistFact({ orderId, type, fees })],
@@ -519,6 +519,22 @@ test('verdict leave: the queue clears within leaveHours (strictly), or no more a
 	assert.equal(typical.verdict, 'leave');
 	assert.equal(typical.reason, 'no more ahead than a typical trade');
 	assert.equal(verdictRow({ ahead: 4, trade: 3 }).verdict, 'maybe');
+});
+
+test('verdict leave by the typical trade only while less than undercutDays behind (decision 14)', () => {
+	// the SKIN case: one unit ahead, typical trade 1, a sale every four or five days
+	const sparse = [1, 6, 11, 16, 21, 26].map(age => historyDay(age, 1, 1));
+	const r = verdictRow({ ahead: 1, trade: 1, history: sparse });
+	assert.equal(r.unitsAhead, 1);
+	assert.equal(r.typicalTrade, 1);
+	assert.ok(r.dailyVolume > 0.2 && r.dailyVolume < 0.25, String(r.dailyVolume));
+	assert.ok(r.daysBehind > 4, String(r.daysBehind));
+	assert.equal(r.verdict, 'undercut'); // no fee estimate, no time on top
+	const demoted = verdictRow({ ahead: 1, trade: 1, history: sparse, episode: 3 * HOUR, fees: [[ago(30 * HOUR), 100], [ago(20 * HOUR), 60]] });
+	assert.equal(demoted.verdict, 'maybe');
+	assert.match(demoted.reason, /^others undercut within ~3 h/);
+	// no volume at all: days behind unknown, so not leave either
+	assert.equal(verdictRow({ ahead: 1, trade: 1, history: [historyDay(40, 1, 1)] }).verdict, 'maybe');
 });
 
 test('verdict reconsider: matching nets no more than the landed cost, or under the ROI floor; skipped without a cost', () => {
@@ -600,7 +616,7 @@ const matchFixture = () => ({
 	openOrders: { [GRANT]: [] },
 	orderLogs: { [GRANT]: {
 		70: logEntry({ path: [[ago(30 * HOUR), 100 * M, 5, ago(30 * HOUR)], [ago(20 * HOUR), 99 * M, 5, ago(21 * HOUR)]] }),
-		71: logEntry({ path: [[ago(30 * HOUR), 99 * M, 3, ago(25 * HOUR)]] }),
+		71: logEntry({ path: [[ago(24 * HOUR), 99 * M, 3, ago(25 * HOUR)]] }),
 		72: logEntry({ loc: ELSEWHERE, path: [[ago(30 * HOUR), 97 * M, 3, ago(30 * HOUR)]] }),
 		73: logEntry({ type: T2, path: [[ago(30 * HOUR), 98 * M, 3, ago(30 * HOUR)]] })
 	} }
@@ -612,20 +628,23 @@ test('sale-to-order matching: unique by the logged price at the sale time, null 
 		sellFact({ date: ago(10 * HOUR), qty: 1, price: 99 * M, txId: 2 }),  // 70 and 71 both asked 99 M
 		sellFact({ date: ago(10 * HOUR), qty: 1, price: 98 * M, txId: 3 }),  // nobody of type T asked 98 M
 		sellFact({ date: ago(31 * HOUR), qty: 1, price: 100 * M, txId: 4 }), // before any logged issued
-		sellFact({ date: ago(5 * HOUR), qty: 1, price: 97 * M, txId: 5 })    // the only 97 M order, at another station
+		sellFact({ date: ago(5 * HOUR), qty: 1, price: 97 * M, txId: 5 }),   // the only 97 M order, at another station
+		sellFact({ type: T2, date: ago(10 * HOUR), qty: 1, price: 96 * M, txId: 6 }) // no logged 96 M; 73 the only T2 order open
 	];
 	const out = run({ ...matchFixture(), facts: { sells, lots: [], relists: [] } });
 	const by = Object.fromEntries(out.sales.map(s => [s.sellTxId, [s.orderId, s.orderMatch]]));
 	assert.deepEqual(by[1], [70, 'unique']);
 	assert.deepEqual(by[2], [null, 'ambiguous']);
-	assert.deepEqual(by[3], [null, 'none']);
-	assert.deepEqual(by[4], [null, 'none']);
+	assert.deepEqual(by[3], [null, 'none']); // no price matches and three type-T orders were open
+	assert.deepEqual(by[4], [null, 'none']); // no price matches and no order was open yet
 	assert.deepEqual(by[5], [72, 'unique']); // results-calc sell rows carry no location
+	assert.deepEqual(by[6], [73, 'byTime']);
 	assert.ok(out.warnings.some(w => w.startsWith('1 sale(s) match more than one order')));
 
 	// a sale row that does carry its location is held to it
 	const located = run({ ...matchFixture(), facts: { sells: [{ ...sells[4], locationId: D }], lots: [], relists: [] } });
 	assert.equal(located.sales[0].orderId, null);
+	assert.equal(located.sales[0].orderMatch, 'none'); // 70 and 71 were both open at the station
 });
 
 test('sales in the window: one per transaction, net = gross - tax - broker - relist, newest first', () => {
@@ -670,10 +689,12 @@ test('pending fill: units the log saw go that no matched transaction covers yet;
 		sellFact({ type: T3, date: ago(5.5 * HOUR), qty: 2, price: 50 * M })
 	];
 	const out = run({ ...pendingFixture(), observedTaxRate: 0.04, facts: { sells, lots: [lotFact({ type: T3, qty: 2, unitPrice: 30 * M })], relists: [] } });
+	// the last fill is the one the wallet has not caught up with: its observation time
 	assert.equal(rowOf(out, 7464705828).lastFillAt, ago(2 * HOUR));
+	assert.equal(rowOf(out, 7464705828).lastFillObserved, true);
 	assert.deepEqual(out.pending, [{
-		orderId: 7464705828, characterId: GRANT, typeId: T3, locationId: D, date: ago(2 * HOUR),
-		qty: 2, unitPrice: 50 * M, gross: 100 * M, filledPerLog: 4, filledPerTx: 2,
+		orderId: 7464705828, characterId: GRANT, typeId: T3, locationId: D, date: ago(2 * HOUR), observed: true,
+		qty: 2, unitPrice: 50 * M, gross: 100 * M, filledPerLog: 4, filledPerTx: 2, allocated: 0,
 		estNet: 2 * 50 * M * 0.96, estProfit: 2 * (50 * M * 0.96 - 30 * M)
 	}]);
 	assert.equal(out.totals.pendingUnits, 2);
@@ -681,6 +702,72 @@ test('pending fill: units the log saw go that no matched transaction covers yet;
 	const caught = run({ ...pendingFixture(), facts: { sells: [...sells, sellFact({ type: T3, date: ago(2.2 * HOUR), qty: 2, price: 50 * M })], lots: [], relists: [] } });
 	assert.deepEqual(caught.pending, []);
 	assert.equal(caught.totals.pendingUnits, 0);
+	// now every fill is in the wallet: the newest matched sale's own time
+	assert.equal(rowOf(caught, 7464705828).lastFillAt, ago(2.2 * HOUR));
+	assert.equal(rowOf(caught, 7464705828).lastFillObserved, false);
+});
+
+// Grant's 7471777610 (type 85398): logged at 37,240 (issued 11-21) and next at 37,190 (issued 11-25),
+// 348 units gone between the two sightings; the wallet sold them at 37,210, a price the log never saw.
+const SKIN = 85398;
+const skinFixture = () => ({
+	openOrders: { [GRANT]: [mine({ id: 7471777610, type: SKIN, price: 37190, remain: 652, total: 1000, issued: '2026-11-25T07:55:00Z' })] },
+	orderLogs: { [GRANT]: {
+		7400000001: logEntry({ path: [['2026-11-20T00:00:00Z', 100 * M, 1, '2026-11-19T00:00:00Z']] }), // logging began 11-20
+		7471777610: logEntry({ type: SKIN, total: 1000, path: [
+			['2026-11-21T10:00:00Z', 37240, 1000, '2026-11-21T09:00:00Z'],
+			['2026-11-25T08:00:00Z', 37190, 652, '2026-11-25T07:55:00Z']
+		] })
+	} }
+});
+const skinSales = () => [
+	sellFact({ type: SKIN, date: '2026-11-24T15:00:00Z', qty: 200, price: 37210, txId: 41 }),
+	sellFact({ type: SKIN, date: '2026-11-24T15:20:00Z', qty: 148, price: 37210, txId: 42 })
+];
+
+test('a sale at a price the log never saw matches the one order open then (byTime) and is not pending too', () => {
+	const out = run({ ...skinFixture(), facts: { sells: skinSales(), lots: [], relists: [] } });
+	assert.deepEqual(out.sales.map(s => [s.sellTxId, s.orderId, s.orderMatch]), [[42, 7471777610, 'byTime'], [41, 7471777610, 'byTime']]);
+	assert.deepEqual(out.pending, []);
+	assert.equal(out.totals.pendingUnits, 0);
+	const r = rowOf(out, 7471777610);
+	assert.equal(r.lastFillAt, '2026-11-24T15:20:00Z'); // the sale, not the sighting of 11-25 08:00
+	assert.equal(r.lastFillObserved, false);
+});
+
+test('pending never double counts: unmatched sales are taken from the type\'s orders, oldest drop first', () => {
+	// a second SKIN order open at the time: the fallback is not unique, the sales stay unmatched
+	const fixture = skinFixture();
+	fixture.openOrders[GRANT].push(mine({ id: 7471777611, type: SKIN, price: 37300, remain: 5, issued: '2026-11-22T00:00:00Z' }));
+	fixture.orderLogs[GRANT][7471777611] = logEntry({ type: SKIN, path: [['2026-11-22T01:00:00Z', 37300, 5, '2026-11-22T00:00:00Z']] });
+	const out = run({ ...fixture, facts: { sells: skinSales(), lots: [], relists: [] } });
+	assert.deepEqual(out.sales.map(s => s.orderMatch), ['none', 'none']);
+	assert.deepEqual(out.pending, []);
+	const r = rowOf(out, 7471777610);
+	assert.equal(r.lastFillAt, '2026-11-25T08:00:00Z'); // no sale of its own: the observed drop
+	assert.equal(r.lastFillObserved, true);
+
+	// two orders of T2 with drops of 2 (older) and 3; 4 units sold at a price neither logged
+	const two = {
+		openOrders: { [GRANT]: [
+			mine({ id: 81, type: T2, price: 100, remain: 3, total: 5, issued: ago(40 * HOUR) }),
+			mine({ id: 82, type: T2, price: 110, remain: 2, total: 5, issued: ago(40 * HOUR) })
+		] },
+		orderLogs: { [GRANT]: {
+			81: logEntry({ type: T2, total: 5, path: [[ago(30 * HOUR), 100, 5, ago(40 * HOUR)], [ago(10 * HOUR), 100, 3, ago(40 * HOUR)]] }),
+			82: logEntry({ type: T2, total: 5, path: [[ago(30 * HOUR), 110, 5, ago(40 * HOUR)], [ago(5 * HOUR), 110, 2, ago(40 * HOUR)]] })
+		} }
+	};
+	const sold = [sellFact({ type: T2, date: ago(12 * HOUR), qty: 4, price: 105 })];
+	const split = run({ ...two, facts: { sells: sold, lots: [], relists: [] } });
+	assert.equal(split.sales[0].orderMatch, 'none');
+	assert.deepEqual(split.pending.map(p => [p.orderId, p.qty, p.filledPerLog, p.filledPerTx, p.allocated]), [[82, 1, 3, 0, 2]]);
+	assert.equal(split.totals.pendingUnits, (2 + 3) - 4); // drops since logging began less every sale since
+
+	// 4 units matched to 81, which the log saw drop by only 2: the excess comes off 82 as well
+	const over = run({ ...two, facts: { sells: [sellFact({ type: T2, date: ago(12 * HOUR), qty: 4, price: 100 })], lots: [], relists: [] } });
+	assert.equal(over.sales[0].orderMatch, 'unique');
+	assert.deepEqual(over.pending.map(p => [p.orderId, p.qty]), [[82, 1]]);
 });
 
 test('sale clusters: inside the gap they merge, outside a new one starts, signs are kept, types never mix', () => {
@@ -732,12 +819,22 @@ test('share of Domain volume over the window\'s days that have history, whole da
 	const history = { [T]: [{ date: '2026-11-22', average: 100, highest: 100, lowest: 100, order_count: 3, volume: 99 },
 		{ date: '2026-11-23', average: 100, highest: 100, lowest: 100, order_count: 3, volume: 10 },
 		{ date: '2026-11-24', average: 100, highest: 100, lowest: 100, order_count: 3, volume: 10 }] };
-	const out = run({ facts: { sells, lots: [], relists: [] }, history, thresholds: { windowMs: 2 * DAY } });
+	// a listed type that sold nothing in the window
+	history[T3] = [{ date: '2026-11-24', average: 100, highest: 100, lowest: 100, order_count: 9, volume: 50 }];
+	const listed = { [GRANT]: [mine({ id: 9, type: T3, price: 100, remain: 1, issued: ago(HOUR) })] };
+	const out = run({ openOrders: listed, facts: { sells, lots: [], relists: [] }, history, thresholds: { windowMs: 2 * DAY } });
 	assert.deepEqual(windowDays(NOW_MS, 2 * DAY), ['2026-11-23', '2026-11-24', '2026-11-25']);
 	assert.deepEqual(out.share.byType[T], { share: 4 / 20, qty: 4, volume: 20, days: ['2026-11-23', '2026-11-24'] });
 	assert.deepEqual(out.share.byType[T2], { share: null, qty: null, volume: null, days: [] });
+	assert.deepEqual(out.share.byType[T3], { share: 0, qty: 0, volume: 50, days: ['2026-11-24'] });
+	// overall is the table's: exactly the type-day rows that have a volume
+	const rowsWithVolume = out.salesByTypeDay.filter(r => r.volume !== null);
+	const tableShare = rowsWithVolume.reduce((acc, r) => acc + r.dayQty, 0) / rowsWithVolume.reduce((acc, r) => acc + r.volume, 0);
+	assert.equal(out.share.overall.share, tableShare);
 	assert.deepEqual(out.share.overall, { share: 4 / 20, qty: 4, volume: 20 });
 	assert.equal(out.totals.share, 0.2);
+	// window: every history day of the window for every listed or sold type, days without our sales too
+	assert.deepEqual(out.share.window, { share: 4 / 70, qty: 4, volume: 70 });
 	assert.equal(out.totals.units, 5); // the window's sales: 32, 33, 34, 35
 	assert.deepEqual(out.salesByTypeDay.map(r => [r.day, r.typeId, r.qty, r.dayQty, r.volume, r.share]), [
 		['2026-11-25', T2, 1, 1, null, null],
@@ -779,7 +876,7 @@ test('empty input: empty output, never a throw; now is required', () => {
 	assert.deepEqual(out.salesClusters, []);
 	assert.deepEqual(out.pending, []);
 	assert.deepEqual(out.salesByTypeDay, []);
-	assert.deepEqual(out.share, { overall: { share: null, qty: 0, volume: 0 }, byType: {} });
+	assert.deepEqual(out.share, { overall: { share: null, qty: 0, volume: 0 }, window: { share: null, qty: 0, volume: 0 }, byType: {} });
 	assert.deepEqual(out.timeOnTop, { overall: { episodes: 0, undercutEpisodes: 0, medianTimeOnTop: null, est: false }, byType: {} });
 	assert.deepEqual(out.totals, { count: 0, units: 0, gross: 0, net: 0, profit: 0, relistFees: 0, pendingUnits: 0, share: null });
 	assert.deepEqual(out.asOf, { orders: null, books: null, transactions: null });
