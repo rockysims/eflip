@@ -209,3 +209,17 @@ See the chat message of 2026-11-25 (batched, with suggested answers). Answers ge
   and the days-of-supply tooltip shows the blended 1.11/day and "stock trend +23.3/day"; rivals
   marked, "observed f=0.02 (events gap 12 h): 0 observed · 1.21 model" → 1.18. Mark I Compact
   Reactor Control Unit (8263, no log): no marks, "no observation", every figure as before.
+
+## Answers at the M1 review gate (Rocky, 2026-11-25)
+
+1. Dotted underline as the mark: "agreed".
+2. Window max(days to clear, 3), capped at 60: "sounds good".
+3. Tooltips: "could be more concise. lets show 20% observed instead of '2/day observed · 0.50/day
+   model' and just remove the volume gap part. basically make them more concise". Done the same
+   day: rivals "40% observed", daily profit "demand 40% observed", avg days idle "2% observed (6
+   samples)"; the figures behind the blend stay in the report and the saved run.
+4. M2: "start when ready (not sure I understand about 'retention')". Retention = how long the raw
+   hourly pages stay on disk before deletion (about 46 MB an hour, so not forever) and how far back
+   each type's folded log keeps its history; the 24-hour measurement sets both from real growth.
+   Two amendments made when briefing P2.1: fetch all orders (not sell-only) so buy orders never look
+   vanished in the shared logs; measure against a 24-hour raw window rather than 48.

@@ -103,9 +103,10 @@ raw; 358 book logs on this machine), Rocky's answers and the rough edges.
 7. **Marking.** A blended or observed cell gets class `observed` (dotted underline) and a tooltip
    "observed f=0.62 · observed 1.9/day · model 2.4/day" in that column's words. Never colour alone
    (`docs/ui-decisions/README.md`, a11y rule).
-8. **M2 storage.** Hourly, the destination region's sell-order pages (`order_type=sell`, fewer than
-   the 194 all-order pages) are stored raw and folded per type into the existing book logs, one
-   sample per type per snapshot. Raw regional pages are kept 48 hours; the rebuild-from-raw
+8. **M2 storage.** Hourly, the destination region's order pages (`order_type=all`, 194 for Domain:
+   all orders, so the shared logs keep seeing buy orders; amended 2026-11-25) are stored raw and
+   folded per type into the existing book logs, one sample per type per snapshot. Raw regional pages
+   are kept 24 hours (amended from 48 the same day; P2.1 measures first); the rebuild-from-raw
    invariant holds inside that window and the folded logs are the durable record. Path entries
    older than 90 days are pruned per type, after the measurement phase confirms the growth rate.
 9. **M2 budget and manners.** At most ~400 `market-order` tokens a snapshot; the job defers while

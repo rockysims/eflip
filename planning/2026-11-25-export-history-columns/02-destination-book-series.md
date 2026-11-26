@@ -16,6 +16,14 @@ the folded logs are durable, pruned to 90 days of path entries.
 Out of scope: the source region (we buy there), buy orders, moving the export page's own book
 loading to the server (a later follow-up noted in the trade-results plan), notifications.
 
+## Amendments at the M1 review gate (2026-11-25)
+
+- Fetch ALL orders (`order_type=all`, 194 pages for Domain), not sell-only: the per-type book logs
+  hold buy orders too (the orders page carries them), and a sell-only sample would make every buy
+  order look vanished until the next per-type check. Cost 388 tokens a snapshot, about 46 MB raw.
+- The raw window to measure against is 24 hours (about 1.1 GB rolling), not 48. P2.1 deletes
+  nothing; P2.2 sets the number from the measurement.
+
 ## Measured inputs (notes.md)
 
 Domain all orders: 194 pages, ~238 KB each, 388 tokens a snapshot; sell-only pages are fewer

@@ -611,29 +611,17 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		daysToClear: (row) => `beyond the ${row.daysToComplete}-day horizon`
 	};
 	// Observed figures (the book log's, blended into the estimate by covered time; estimate.js, public/market-stats.js).
-	// observedGap: "events gap 3 h" / "volume gap 24 h" from the coverage the report carries.
-	const observedGap = (report, part) => {
-		const hours = report.observedCoverage && report.observedCoverage[part] ? report.observedCoverage[part].gapHours : null;
-		return hours === null || hours === undefined ? '' : ` (${part} gap ${nf2.format(hours)} h)`;
-	};
-	const orQ = (v, unit = '') => v === null || v === undefined ? '?' : `${nf2.format(v)}${unit}`;
-	// What a cell blended with observation says beside its own tooltip, or null when none of it was observed.
-	const rivalsMark = (r) => r.report.observedFractionEvents > 0
-		? `observed f=${r.report.observedFractionEvents.toFixed(2)}${observedGap(r.report, 'events')}: ${orQ(r.report.rivalsObserved)} observed · ${orQ(r.report.rivalsModel)} model`
-		: null;
-	const demandMark = (r) => r.report.observedFractionVolume > 0
-		? `demand observed f=${r.report.observedFractionVolume.toFixed(2)}${observedGap(r.report, 'volume')}: ${orQ(r.report.dailyDemandObserved, '/day')} observed · ${orQ(r.report.dailyDemandModel, '/day')} model`
-		: null;
-	// "observed 2.6 of 3 days (events gap 3 h, 61 samples, median gap 1 h)": what the observed figures stand on
+	// What a blended cell says beside its own tooltip: the share of the window that was observed ("40% observed"),
+	// or null when none of it was. Kept short on purpose (Rocky, 2026-11-25): the figures behind the blend are in
+	// the report and the saved run, not in the tooltip.
+	const rivalsMark = (r) => r.report.observedFractionEvents > 0 ? `${pct(r.report.observedFractionEvents)} observed` : null;
+	const demandMark = (r) => r.report.observedFractionVolume > 0 ? `demand ${pct(r.report.observedFractionVolume)} observed` : null;
+	// "2% observed (6 samples)": what the avg days idle figure stands on; the share is the events coverage
 	const coverageWords = (r) => {
 		const cov = r.report.observedCoverage;
 		if (!cov) return 'no observation';
-		const events = cov.events || {};
-		const parts = [];
-		if (events.gapHours !== null && events.gapHours !== undefined) parts.push(`events gap ${nf2.format(events.gapHours)} h`);
-		parts.push(`${nf.format(cov.samples)} sample${cov.samples === 1 ? '' : 's'}`);
-		if (cov.medianGapHours !== null && cov.medianGapHours !== undefined) parts.push(`median gap ${nf2.format(cov.medianGapHours)} h`);
-		return `observed ${orQ(events.coveredDays)} of ${nf2.format(cov.windowDays)} days (${parts.join(', ')})`;
+		const f = cov.events && Number.isFinite(cov.events.fraction) ? cov.events.fraction : 0;
+		return `${pct(f)} observed (${nf.format(cov.samples)} sample${cov.samples === 1 ? '' : 's'})`;
 	};
 	const nf1 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
 	// "+12", "-3.4": signed, one decimal at most, no minus zero
@@ -641,7 +629,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		const r = Math.round(v * 10) / 10;
 		return r > 0 ? `+${nf1.format(r)}` : nf1.format(r === 0 ? 0 : r);
 	};
-	const BLENDED_HELP = 'Blended with what the book log observed when it covers part of the window; dotted underline marks it, the tooltip shows both figures';
+	const BLENDED_HELP = 'Blended with what the book log observed when it covers part of the window; a dotted underline marks it and the tooltip gives the observed share';
 	// `help` is a string, or a function for text that depends on the run (read on every header render).
 	// `display(row)` replaces fmt(val(row)) as the cell's text where the number alone is not enough (avg days idle
 	// reads "≥ 1.5" for a censored value); sorting and the column filters still use val. `mark(row)` is the cell's
