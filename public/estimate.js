@@ -35,6 +35,7 @@
 
 	// Returns a string, like util.roundNonZero.
 	const roundNonZero = (num, nonZeroDigits = 2) => {
+		if (num < 0) return '-' + roundNonZero(-num, nonZeroDigits);
 		const numStr = '' + num;
 		if (numStr.indexOf('e') !== -1) return numStr;
 

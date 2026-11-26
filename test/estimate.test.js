@@ -329,6 +329,16 @@ test('target 0 buys nothing', () => {
 	assert.equal(report.filteredReason, 'not profitable');
 });
 
+test('a loss keeps its digits: negative mils are not cut to -0', () => {
+	assert.equal(roundMils(-2940, 3), '-0.00294');
+	assert.equal(roundMils(-12345, 3), '-0.0123');
+	// a cheap item bought toward a target past the ROI floor: 9,500 ISK a unit against a 9,000 ISK best dest sell
+	const report = computeItemReport({ srcOrders: [sellOrder(9500, 100)], destOrders: [sellOrder(9000, 3)], destDays: flatHistory(1, 30, 10000, 10), now: NOW, targetVolume: 20 });
+	assert.equal(report.volume, 20);
+	assert.ok(report.profitPerItemMil < 0, `profitPerItemMil ${report.profitPerItemMil}`);
+	assert.ok(report.dailyProfitMil < 0, `dailyProfitMil ${report.dailyProfitMil}`);
+});
+
 test('always-show ignores the ROI stop but still respects the cap, and bypasses filters', () => {
 	const srcOrders = [sellOrder(6 * M, 10), sellOrder(1 * M, 10), sellOrder(4 * M, 10), sellOrder(7 * M, 100)];
 	const report = computeItemReport({ srcOrders, destOrders: baseDest(), destDays: baseDays(), now: NOW, config: { isAlwaysShow: true } });
