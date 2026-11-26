@@ -724,6 +724,22 @@ test('/sso/callback rejects a missing, mismatched, unknown, reused or expired st
 	assert.equal(ctx.fetch.callsTo(TOKEN_URL).length, 1);
 });
 
+// Two sign-ins open in two tabs: the second login's cookie replaced the first's. Finishing the first tab
+// fails it, but must not clear the cookie the second tab still needs.
+test('/sso/callback for another sign-in leaves the state cookie in place', async (t) => {
+	const ctx = await startApp(t, { handlers: { [TOKEN_URL]: () => jsonResponse(200, tokenBody()) } });
+	const first = await login(ctx);
+	const second = await login(ctx); // the cookie the browser holds now
+	const stale = await callback(ctx, first, { cookie: second });
+	assert.equal(stale.headers.location, '/results.html?ssoError=state');
+	// the browser keeps the cookie unless this answer cleared it
+	const jar = cookieFrom(stale) === undefined ? second : cookieFrom(stale) || null;
+	assert.equal(jar, second);
+	const res = await callback(ctx, second, { cookie: jar });
+	assert.equal(res.headers.location, `/results.html?linked=${CHARACTER_ID}`);
+	assert.equal(cookieFrom(res), '', 'the matched callback clears it');
+});
+
 test('/sso/callback passes CCP errors on as a short code', async (t) => {
 	const ctx = await startApp(t);
 	const res = await ctx.get('/sso/callback?error=access_denied&error_description=nope');
