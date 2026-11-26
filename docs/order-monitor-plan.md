@@ -7,8 +7,9 @@ Branch: `claude/order-monitoring-undercut-8e457f`, fast-forwarded onto `feature/
 (`/api/watch`, `/api/order-log`, `/api/market?log=1`, `/api/config` env report),
 `public/results-shared.js` (env notice, page links), `public/results.html`, `public/insights.html`
 (a link), `public/export.js` (env notice line), `scripts/sync.js` (`--watch`), `README.md`. Out of
-scope: `index.*`, `jack.js`, `missing.*`, `resell.*`, `reprocess.js`, and everything under "Out of
-scope" below.
+scope: `index.*`, `jack.js`, `missing.*`, `resell.*`, `reprocess.js` (these legacy pages and scripts
+were removed on 2026-11-26; `/` redirects to `export.html`), and everything under "Out of scope"
+below.
 
 Goal: while the game is open, see at a glance what has sold recently and what it made; which sell
 orders have been undercut, by how much and for how long; whether updating each one is worth its

@@ -31,7 +31,7 @@ Without `EVE_CLIENT_ID` and `EVE_CLIENT_SECRET`, every `/sso` route and every `/
 npm start
 ```
 
-Then open http://localhost:5001/export.html (export planning), http://localhost:5001/results.html (trade results), http://localhost:5001/insights.html (charts of the trade results) or http://localhost:5001/orders.html (order monitor).
+Then open http://localhost:5001/export.html (export planning), http://localhost:5001/results.html (trade results), http://localhost:5001/insights.html (charts of the trade results) or http://localhost:5001/orders.html (order monitor). The bare http://localhost:5001/ redirects to `export.html`; there is no other landing page.
 
 The server binds `127.0.0.1:5001` by default. To change `HOST` or `PORT`, set them in `.env` and make the callback URL match (`EVE_CALLBACK_URL` and the developer application).
 

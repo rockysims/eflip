@@ -66,4 +66,30 @@ test('server app', async (t) => {
 		assert.equal(res.status, 200);
 		assert.deepEqual(await res.json(), { ok: true });
 	});
+
+	await t.test('GET / redirects to the export page, with or without a query', async () => {
+		for (const url of ['/', '/?from=bookmark']) {
+			const res = await fetch(`${base}${url}`, { redirect: 'manual' });
+			assert.equal(res.status, 302, url);
+			assert.equal(res.headers.get('location'), '/export.html', url);
+		}
+	});
+
+	await t.test('the pre-rework root page is gone, and the pages beside it still serve', async () => {
+		// The page that was here fetched hundreds of Jita books from ESI on load. The 200s show public/
+		// resolves from this working directory, so the 404 is the file missing and not the folder.
+		const gone = await fetch(`${base}/index.html`);
+		assert.equal(gone.status, 404);
+		for (const page of ['export.html', 'orders.html', 'results.html', 'insights.html', 'util.js']) {
+			const res = await fetch(`${base}/${page}`);
+			assert.equal(res.status, 200, page);
+		}
+	});
+
+	await t.test('the other retired pages and scripts answer 404 too', async () => {
+		for (const file of ['index.js', 'jack.js', 'reprocess.js', 'missing.html', 'missing.js', 'resell.html', 'resell.js']) {
+			const res = await fetch(`${base}/${file}`);
+			assert.equal(res.status, 404, file);
+		}
+	});
 });

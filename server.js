@@ -17,6 +17,11 @@ const createApp = (options = {}) => {
 	// theirs would never act.
 	app.use('/file', bodyParser.json({limit: '5mb'}));
 
+	// The root is the export page, the README's main one. It answers before the static middleware: the
+	// pre-rework root page (index.html) fetched hundreds of Jita books from ESI on load, and an accidental
+	// visit spent the market-order rate-limit bucket the sync shares.
+	app.get('/', (req, res) => res.redirect(302, '/export.html'));
+
 	//static setup
 	app.use(express.static('public'));
 

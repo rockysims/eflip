@@ -43,7 +43,7 @@ In: `public/estimate.js`, `public/export.js`, `public/export.html`, a new `publi
 
 Out: the orders page and its verdicts (order monitor plan), competitor profiles, structure markets,
 source-side (Jita) history, notifications, anything in `index.*`, `jack.js`, `missing.*`,
-`resell.*`, `reprocess.js`.
+`resell.*`, `reprocess.js` (those files were removed on 2026-11-26).
 
 ## Discovery
 

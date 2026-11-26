@@ -3,7 +3,8 @@
 Branch: `claude/export-html-improvements-5cbab1`. Scope: `public/export.html`,
 `public/export.js`, `public/util.js`, plus a new `public/estimate.js` and
 `test/estimate.test.js`. `exportAndSold.*`, `missing.*`, `resell.*`, `index.*`,
-`server.js` are out of scope.
+`server.js` are out of scope (the four page families are gone now; `missing.*`, `resell.*` and
+`index.*` were removed on 2026-11-26).
 
 Principle: every number shown to the user comes from ESI (station orders and
 region history). Fuzzwork aggregates are used only to decide which types get a
