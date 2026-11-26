@@ -44,8 +44,11 @@
 //   now             ms since the epoch (or an ISO string). Required: compute throws without it.
 //
 // OUTPUT (rule 10): {rows, sales, salesClusters, pending, salesByTypeDay, share, timeOnTop: {overall,
-//   byType}, totals, feeRates, asOf: {orders, books, transactions}, warnings, taxRate, thresholds}.
-//   Dates are ISO strings, durations ms, prices and amounts ISK, nothing rounded (the page formats).
+//   byType}, presence, totals, feeRates, asOf: {orders, books, transactions}, warnings, taxRate,
+//   thresholds}. Dates are ISO strings, durations ms, prices and amounts ISK, nothing rounded (the page
+//   formats; the reason tokens and sentences of rule 7 are the only text).
+//   The module also exports fmtCompactDuration(ms), the duration notation of the reason tokens:
+//   '<1min', '35min', '1.1h', '12h', '2.6d', '14d' (one decimal under 10, no space).
 //   rows, one per open sell order of characterIds, sorted per rule 7 (undercut, maybe, reconsider,
 //   leave, top; then daysBehind descending, nulls last; then orderId):
 //     rule 1  orderId, characterId, typeId, locationId, regionId, stationName, price, volumeRemain,
@@ -55,20 +58,50 @@
 //             facts.relists), listingFee (the first), feeTotal (all), lastFillAt and lastFillObserved:
 //             the last observed volumeRemain drop (true) while the wallet has not covered it, else the
 //             newest sale matched to the order (false), else the last observed drop (true).
+//     state   (decision 16) price, volumeRemain and issued are the order's newest known state: the
+//             feed row's, unless the book of its type and region lists the same order_id (a sell row)
+//             with an `issued` more than ISSUED_EPS (2 s) later, when all three come from the book row
+//             (the public book's `issued` jitters by a second between samples, so within 2 s the two
+//             are the same `issued`); or with the same `issued`, a lower volume_remain and a later
+//             fetch than the feed's (openOrders[cid].fetchedAt, else the order log's lastSeen; with
+//             neither known the lower remain alone, as decision 13 makes a drop newer by itself), when
+//             volumeRemain comes from the book. stateFrom 'book' | 'orders'; stateAt (ISO) the book's
+//             fetchedAt on a book row, else the feed's fetchedAt (null when not given); feed {price,
+//             volumeRemain, issued, fetchedAt}: the orders feed's own values on a book row, else null.
+//             Every later rule reads the merged state (position, episodes, onTopFor, margins, the fee,
+//             sale matching, presence), and the pending-fill drop after the last logged entry of a book
+//             row is dated stateAt. asOf is not affected. The badge notInBook: the book was fetched more
+//             than 60 s after the feed row (its fetchedAt, else the log's lastSeen) and does not list
+//             the order, at an NPC station (locationId < 1e9; structure books are not public); the row's
+//             figures still rest on the feed and its verdict is unchanged.
+//     lots    (decision 22) [{lotId, runId (null when none), remainingQty, date}]: the type's lots with
+//             units left (the FIFO remainder landedCost is taken over, remainingQty as it counts it),
+//             newest first by date; read from facts.lots as given.
 //     rule 2  bookFetchedAt, unitsAhead, ordersAhead, rank (1 + ordersAhead), bestPrice (lowest in scope,
 //             ours included, our other orders not), gapToBest = (price - bestPrice) / bestPrice,
 //             cheaperElsewhere {orders, units} (station scope; null for region), ownAhead {orders,
 //             units} (our other orders ahead, left out of the figures above). All null without a book.
 //     rule 3  undercutAt (among the orders ahead issued after ours, the earliest moment one went below
 //             us: its first logged price below ours issued after ours, else its current issued; null
-//             when every order ahead predates ours), undercutBy {orderId, locationId, price,
+//             when every order ahead predates ours. An order the book log shows priced below ours at
+//             our issued (its entry with the latest `issued`, or `at` when that is missing, at or before
+//             ours) and below ours at every entry since predates ours too, whatever its current issued
+//             says: sellers re-issue orders at the same price, which moves `issued` alone; without a
+//             book-log record of it, its current issued decides), undercutBy {orderId, locationId, price,
 //             volumeRemain, issued (current), gap = (price - theirs) / theirs}, reUndercuts (its price
 //             changes issued after ours that left it below us, the first included; null without it
 //             in the book log), priceWar (two of those within 24 h).
 //     rule 4  dailyVolume, typicalTrade, typicalTradeFrom ('sales' | 'history' | null), daysBehind,
 //             myRate7d.
 //     rule 5  episodes, undercutEpisodes, medianTimeOnTop, timeOnTopEst (of the type at this station),
-//             onTopFor (nothing ahead and the current episode not undercut: now - issued).
+//             onTopFor (nothing ahead and the current episode not undercut: now - issued; when that
+//             episode startedBehind, now - from of the type's last presence segment if it is top, known
+//             and runs to now, else null). An episode that began with a competitor already priced
+//             below it (present then, by the book log, and priced below by its path at the episode's
+//             start) never was on top: startedBehind, with timeOnTop 0 and undercut false, left out of
+//             these statistics. A competitor's path entry
+//             at the same price as its entry before (a re-issue: `issued` moves without a price change,
+//             by a 1 s jitter or a seller re-issuing its orders) is never the undercut.
 //     rule 6  taxRate, landedCost, landedUnits, marginNow, matchPrice (null when nothing is ahead),
 //             marginIfMatch, roiIfMatch = marginIfMatch / landedCost, expectedSalesBeforeUndercut,
 //             expectedGainBeforeUndercut, and the fee (decision 15): feeRate (the character's relist-fee
@@ -77,9 +110,21 @@
 //             oldest of those), feeRateEst (fewer than 5), feeEstimate = feeRate × (matchPrice, or price
 //             on a top row) × volumeRemain with feeEstimateFrom 'rate'; without a rate the median of this
 //             order's relist fees ('order'), else of the character's on the type ('type'), else null.
-//     rule 7  verdict, reason (short phrase), badges: subset of priceWar, nocost, nofee, est (time on
-//             top from under three episodes), nobook, nobooklog, nohistory, nolog (no order log). The
-//             typical-trade `leave` needs a known daysBehind under undercutDays (decision 14).
+//     rule 7  verdict, reason (decision 21: a compact token of the one deciding figure), reasonText (the
+//             sentence that spells it out), badges: subset of priceWar, nocost, nofee, est (time on
+//             top from under three episodes), nobook, nobooklog, nohistory, nolog (no order log),
+//             notInBook (decision 16). The typical-trade `leave` needs a known daysBehind under
+//             undercutDays (decision 14). The tokens, by verdict:
+//               undercut, and maybe between the limits: days behind, fmtCompactDuration ('2.6d')
+//               leave, the queue clears within leaveHours: the same duration ('6h')
+//               leave, no more ahead than a typical trade: unitsAhead / typicalTrade, '50%'
+//               reconsider: matchPrice × (1 - taxRate) / landedCost, cut to two decimals, '1.21x'
+//                 ('0.93x' below cost; the export page's revenue / cost multiple; cut, not rounded,
+//                 so that 1.4999 under a 1.5x floor reads '1.49x')
+//               maybe, the fee outweighs the gain before the next undercut: 'fee 3.3× gain' (fee /
+//                 expectedGainBeforeUndercut, one decimal)
+//               maybe without data: 'no book', 'no history', 'no volume'
+//               top: '' (nothing ahead), 'own ahead' (only our own orders are ahead)
 //   sales (rule 8): one per wallet transaction (results-calc rows of one sellTxId merged) in [now -
 //     windowMs, now], newest first: {date, sellTxId, typeId, characterId, qty, unitPrice, gross, tax,
 //     brokerShare, relistShare, net = gross - tax - brokerShare - relistShare, profit, orderId,
@@ -103,7 +148,30 @@
 //     of every day of the window that has a history row, for every type listed or sold.
 //   timeOnTop (rule 5): overall {episodes, undercutEpisodes, medianTimeOnTop, est}; byType[typeId] the
 //     same plus onTopFor, bookLogSince and list (episodes {orderId, characterId, locationId, price,
-//     start, end, current, undercut, undercutAt, undercutBy, undercutPrice, timeOnTop}).
+//     start, end, current, undercut, undercutAt, undercutBy, undercutPrice, timeOnTop, startedBehind};
+//     the counts and the median leave out the startedBehind ones, the list keeps them).
+//   presence (decision 18): {[typeId]: {segments, bookLogSince}} for every type with a sell order of
+//     the pooled characters (order logs, and the one-entry records of feed rows without a log) open at
+//     some moment of [now - windowMs, now]. segments: contiguous stretches inside that window, oldest
+//     first, never overlapping, {from, to, state: 'top' | 'listed', known, orderIds, below,
+//     lowestBelow, cause}; a gap between two is a stretch with no sell order of ours. Our order is
+//     open over openSpanOf (its log's firstSeen or first issued to its end) and counts while priceAt
+//     prices it. A competitor (a sell order of the book log that is not ours: at the same station as
+//     our order, or anywhere in the region under scope 'region') is present from the earlier of its
+//     first logged issued and firstSeen until the first book-log sample after its lastSeen (to now
+//     when there is none), priced by its path as priceAt prices ours. below: the competitors priced
+//     under our lowest counted order at its station (the region's lowest under scope 'region'),
+//     summed over the stations; state 'top' when none, else 'listed'. known: false before the book
+//     log's first sample (and without a book log), when state is 'listed' and below and lowestBelow
+//     are null. orderIds: our orders of the type counted at the segment's start (ascending);
+//     lowestBelow: the lowest price below over the segment (null when none). Boundaries are every own
+//     open and end, own and competing issued, competitor appearance and disappearance, the book
+//     log's first sample and the window's edges; adjacent segments with the same state, known and
+//     below merge (keeping the first's cause and orderIds). cause, of the change into the segment:
+//     'listed' (an order of ours came in), 'ourPrice' (one of ours changed price), 'ended' (one of
+//     ours ended, others remain), 'undercut' (more competitors below), 'cleared' (fewer), 'unknown'
+//     (the window's start, or the book log's first sample). bookLogSince: the first sample of the
+//     type's book logs (null without one).
 //   totals: {count, units, gross, net, profit, relistFees, pendingUnits, share} for the window.
 //   feeRates (decision 15): {[characterId]: {[locationId]: {rate, rows, since, est, observations:
 //     [{date, rate, orderId, typeId}]}}} per pooled character with an observation: observations are
@@ -143,6 +211,9 @@
 	const FEE_MATCH_MS = 2500;        // decision 15: a brokers_fee row within this of a logged price cut's issued
 	const FEE_RATE_MAX = 0.05;        // ...a rate outside (0, 5 %] is a mismatch
 	const FEE_RATE_ROWS = 5;          // ...the rate is the median of the newest this many; fewer flag est
+	const ISSUED_EPS = 2000;          // decision 16: a book `issued` within this of the feed's is the same (a 1 s jitter)
+	const NOT_IN_BOOK_MS = MINUTE_MS; // decision 16: a book this much newer than the feed row should list the order
+	const STRUCTURE_ID_MIN = 1e9;     // location ids from here on are structures, whose books are not public
 	const VERDICTS = ['undercut', 'maybe', 'reconsider', 'leave', 'top'];
 
 	//--- helpers
@@ -190,12 +261,35 @@
 	const recencyWeight = (age, halfLifeDays) => Math.pow(0.5, age / halfLifeDays);
 	const samePrice = (a, b) => a !== null && b !== null && Math.abs(a - b) < PRICE_EPS;
 
-	// Text for reasons only; every numeric field stays unrounded.
-	const fmtHours = (hours) => {
-		if (hours < 1) return `${Math.max(1, Math.round(hours * 60))} min`;
-		return hours < 10 ? `${Math.round(hours * 10) / 10} h` : `${Math.round(hours)} h`;
+	// Text for reasons only (decision 21); every numeric field stays unrounded. One decimal under 10.
+	const oneDecimalUnder10 = (x) => (x < 10 ? Math.round(x * 10) / 10 : Math.round(x));
+	// The reason tokens' durations: '<1min', '35min', '1.1h', '12h', '2.6d', '14d'.
+	const fmtCompactDuration = (ms) => {
+		if (typeof ms !== 'number' || !Number.isFinite(ms)) return '';
+		const minutes = ms / MINUTE_MS;
+		if (minutes < 1) return '<1min';
+		if (ms < HOUR_MS) return `${Math.max(1, Math.round(minutes))}min`;
+		if (ms < DAY_MS) return `${oneDecimalUnder10(ms / HOUR_MS)}h`;
+		return `${oneDecimalUnder10(ms / DAY_MS)}d`;
 	};
-	const fmtDays = (daysValue) => (daysValue < 1 ? fmtHours(daysValue * 24) : `${Math.round(daysValue * 10) / 10} d`);
+	// The same duration in words, for the sentences: 'under a minute', '35 minutes', '1.1 hours', '2.6 days'.
+	const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+	const spokenDuration = (ms) => {
+		if (ms < MINUTE_MS) return 'under a minute';
+		if (ms < HOUR_MS) return plural(Math.max(1, Math.round(ms / MINUTE_MS)), 'minute');
+		if (ms < DAY_MS) return plural(oneDecimalUnder10(ms / HOUR_MS), 'hour');
+		return plural(oneDecimalUnder10(ms / DAY_MS), 'day');
+	};
+	// Counts and rates: one decimal under 10, grouped ('0.2', '5', '1,234').
+	const fmtCount = (x) => oneDecimalUnder10(x).toLocaleString('en-US');
+	// ISK to three significant figures, grouped ('~50,000', '166,000').
+	const fmtIsk = (x) => {
+		const a = Math.abs(x);
+		if (a < 1000) return Math.round(x).toLocaleString('en-US');
+		const step = Math.pow(10, Math.floor(Math.log10(a)) - 2);
+		return (Math.round(x / step) * step).toLocaleString('en-US', { maximumFractionDigits: 0 });
+	};
+	const fmtMultiple = (x) => `${Math.round(x * 100) / 100}x`; // the export page's '1.5x'
 
 	const thresholdsOf = (overrides, warnings) => {
 		const t = { ...defaultThresholds };
@@ -228,16 +322,44 @@
 		synthetic: false
 	});
 
+	// A book-log order is present (decision 18; rule 5's startedBehind) from the earlier of its first
+	// logged `issued` and its firstSeen until the first sample after its lastSeen, the first that no
+	// longer listed it (goneMs; null while no sample has come since: present to now).
 	const parseBookLog = (log) => {
 		if (!isObj(log)) return null;
+		const samples = (Array.isArray(log.samples) ? log.samples : []).map(s => toMs(isObj(s) ? s.at : s)).filter(ms => ms !== null).sort((a, b) => a - b);
 		const orders = [];
 		for (const [id, rec] of entriesOf(log.orders)) {
 			if (!isObj(rec)) continue;
-			orders.push({ orderId: idNum(id), isBuy: rec.isBuy === true, locationId: idNum(rec.locationId), path: parsePath(rec.path) });
+			const path = parsePath(rec.path);
+			const firstSeenMs = toMs(rec.firstSeen);
+			let lastSeenMs = toMs(rec.lastSeen);
+			if (lastSeenMs === null) for (const e of path) lastSeenMs = maxOf(lastSeenMs, e.atMs);
+			let appearMs = firstSeenMs;
+			for (const e of path) if (e.issuedMs !== null && (appearMs === null || e.issuedMs < appearMs)) appearMs = e.issuedMs;
+			orders.push({
+				orderId: idNum(id), isBuy: rec.isBuy === true, locationId: idNum(rec.locationId), path,
+				firstSeenMs, lastSeenMs, appearMs, goneMs: lastSeenMs === null ? null : firstAfter(samples, lastSeenMs)
+			});
 		}
-		const samples = (Array.isArray(log.samples) ? log.samples : []).map(s => toMs(isObj(s) ? s.at : s)).filter(ms => ms !== null).sort((a, b) => a - b);
-		return { orders, samples, byId: new Map(orders.map(o => [o.orderId, o])) };
+		// what the log covers from: its first sample, else (a log without samples) its first sighting
+		let sinceMs = samples.length > 0 ? samples[0] : null;
+		if (sinceMs === null) for (const o of orders) if (o.firstSeenMs !== null && (sinceMs === null || o.firstSeenMs < sinceMs)) sinceMs = o.firstSeenMs;
+		return { orders, samples, sinceMs, byId: new Map(orders.map(o => [o.orderId, o])) };
 	};
+	// The first value of an ascending list greater than x, or null (binary search: a book log may hold
+	// thousands of samples).
+	const firstAfter = (sorted, x) => {
+		let lo = 0;
+		let hi = sorted.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >> 1;
+			if (sorted[mid] > x) hi = mid;
+			else lo = mid + 1;
+		}
+		return lo < sorted.length ? sorted[lo] : null;
+	};
+	const presentAt = (c, ms) => c.appearMs !== null && c.appearMs <= ms && (c.goneMs === null || ms < c.goneMs);
 
 	// Rule 8: the price an order of ours asked at `ms`: the path entry with the latest `issued` at or
 	// before `ms` (`issued` dates a price exactly; `at` only says when it was seen). Null before the
@@ -277,24 +399,37 @@
 		!o.isBuy && !ownIds.has(o.orderId) && (scope === 'region' || o.locationId === locationId));
 
 	// Rule 5: the first competing `issued` inside the episode (after its start, before its end) with a
-	// price below the episode's price. Null while none has (censored).
+	// price below the episode's price. Null while none has (censored). Only a price change (or an
+	// order's first entry) can be the undercut: `issued` also moves at the same price (a 1 s jitter
+	// between samples, sellers re-issuing their orders), and such a re-issue is no new undercut.
 	const firstUndercut = (ep, competitors) => {
 		let best = null;
 		for (const c of competitors) {
-			for (const e of c.path) {
-				if (e.price === null || e.issuedMs === null) continue;
+			c.path.forEach((e, i) => {
+				if (e.price === null || e.issuedMs === null) return;
+				if (i > 0 && c.path[i - 1].price !== null && c.path[i - 1].price === e.price) return;
 				if (e.price < ep.price && e.issuedMs > ep.start && e.issuedMs < ep.end && (best === null || e.issuedMs < best.at)) {
 					best = { at: e.issuedMs, orderId: c.orderId, price: e.price };
 				}
-			}
+			});
 		}
 		return best;
 	};
 
+	// Rule 5: an episode that began with a competitor already priced below it (present at its start,
+	// priced by its path then) never was on top.
+	const startedBehind = (ep, competitors) => competitors.some(c => {
+		if (!presentAt(c, ep.start)) return false;
+		const p = priceAt(c, ep.start);
+		return p !== null && p < ep.price;
+	});
+
+	// The statistics describe stretches that started on top: startedBehind episodes are left out.
 	const timeOnTopStats = (episodes) => {
-		const cut = episodes.filter(e => e.undercut);
+		const counted = episodes.filter(e => !e.startedBehind);
+		const cut = counted.filter(e => e.undercut);
 		const med = median(cut.map(e => e.timeOnTop));
-		return { episodes: episodes.length, undercutEpisodes: cut.length, medianTimeOnTop: med, est: med !== null && cut.length < EST_UNDER };
+		return { episodes: counted.length, undercutEpisodes: cut.length, medianTimeOnTop: med, est: med !== null && cut.length < EST_UNDER };
 	};
 
 	// Rule 3: the undercutter's price changes in the book log since our `issued` that left it below us
@@ -315,13 +450,115 @@
 		return { count: times.length, priceWar };
 	};
 
+	//--- presence (decision 18)
+
+	// The presence segments of one type inside [fromMs, toMs]. owns: [{rec, span, groupKey}], our sell
+	// orders of the type; groups: Map groupKey -> {log (parsed book log, or null), competitors}, one per
+	// station (scope 'station') or region (scope 'region') we have orders at. Every moment where
+	// anything can change is a boundary; between two, the state is evaluated once, at the earlier.
+	const presenceSegments = (owns, groups, fromMs, toMs) => {
+		const cuts = new Set([fromMs, toMs]);
+		const add = (ms) => { if (ms !== null && ms > fromMs && ms < toMs) cuts.add(ms); };
+		for (const { rec, span } of owns) {
+			add(span.start);
+			add(span.end);
+			for (const e of rec.path) add(e.issuedMs);
+		}
+		for (const g of groups.values()) {
+			if (g.log !== null) add(g.log.sinceMs);
+			for (const c of g.competitors) {
+				add(c.appearMs);
+				add(c.goneMs);
+				for (const e of c.path) add(e.issuedMs);
+			}
+		}
+		const times = [...cuts].sort((a, b) => a - b);
+
+		const evaluate = (at) => {
+			const own = [];
+			for (const { rec, span, groupKey } of owns) {
+				if (span.start > at || (span.end !== null && at >= span.end)) continue;
+				const price = priceAt(rec, at);
+				if (price !== null) own.push({ orderId: rec.orderId, price, groupKey });
+			}
+			if (own.length === 0) return null;
+			const lowest = new Map();
+			for (const x of own) if (!lowest.has(x.groupKey) || x.price < lowest.get(x.groupKey)) lowest.set(x.groupKey, x.price);
+			let known = true;
+			let below = 0;
+			let lowestBelow = null;
+			for (const [key, low] of lowest) {
+				const g = groups.get(key);
+				if (!g || g.log === null || g.log.sinceMs === null || g.log.sinceMs > at) {
+					known = false;
+					continue;
+				}
+				for (const c of g.competitors) {
+					if (!presentAt(c, at)) continue;
+					const p = priceAt(c, at);
+					if (p === null || !(p < low)) continue;
+					below++;
+					if (lowestBelow === null || p < lowestBelow) lowestBelow = p;
+				}
+			}
+			if (!known) return { own, known, state: 'listed', below: null, lowestBelow: null };
+			return { own, known, state: below > 0 ? 'listed' : 'top', below, lowestBelow };
+		};
+
+		// the cause of the change into a piece, from the piece before it (null across a gap): our orders
+		// first, then the book log's first sample, then the competitors
+		const causeOf = (at, cur, prev) => {
+			if (at === fromMs) return 'unknown';
+			const before = new Map(prev === null ? [] : prev.own.map(x => [x.orderId, x.price]));
+			if (cur.own.some(x => !before.has(x.orderId))) return 'listed';
+			if (cur.own.some(x => before.get(x.orderId) !== x.price)) return 'ourPrice';
+			const now = new Set(cur.own.map(x => x.orderId));
+			if (prev.own.some(x => !now.has(x.orderId))) return 'ended';
+			if (prev.known !== cur.known || !cur.known) return 'unknown';
+			if (cur.below > prev.below) return 'undercut';
+			if (cur.below < prev.below) return 'cleared';
+			return 'unknown';
+		};
+
+		const segments = [];
+		let prev = null;
+		for (let i = 0; i + 1 < times.length; i++) {
+			const at = times[i];
+			const cur = evaluate(at);
+			if (cur === null) {
+				prev = null;
+				continue;
+			}
+			const cause = causeOf(at, cur, prev);
+			const last = segments.length > 0 ? segments[segments.length - 1] : null;
+			if (prev !== null && last !== null && last.toMs === at && last.state === cur.state && last.known === cur.known && last.below === cur.below) {
+				last.toMs = times[i + 1];
+				if (cur.lowestBelow !== null && (last.lowestBelow === null || cur.lowestBelow < last.lowestBelow)) last.lowestBelow = cur.lowestBelow;
+			} else {
+				segments.push({
+					fromMs: at, toMs: times[i + 1], state: cur.state, known: cur.known,
+					orderIds: [...new Set(cur.own.map(x => x.orderId))].sort((a, b) => a - b),
+					below: cur.below, lowestBelow: cur.lowestBelow, cause
+				});
+			}
+			prev = cur;
+		}
+		return segments.map(g => ({
+			from: iso(g.fromMs), to: iso(g.toMs), state: g.state, known: g.known, orderIds: g.orderIds,
+			below: g.below, lowestBelow: g.lowestBelow, cause: g.cause
+		}));
+	};
+
 	//--- position (rule 2) and undercut (rule 3)
 
 	// Units ahead: strictly lower price, or equal price issued earlier (decision 12). Our own other
 	// orders are counted apart (ownAhead), never as competition. The undercutter is the order ahead
 	// issued after us that went below us first: `firstBelow(orderId)` (from the book log, optional)
 	// dates that at its first logged price below ours issued after ours, else its current `issued`.
-	const positionOf = (o, bookOrders, ownIds, scope, firstBelow = () => null) => {
+	// `belowBefore(orderId)` (from the book log, optional) is true when the log shows the order priced
+	// below ours at or before our `issued`: it was ahead when we set our price, so it predates ours
+	// whatever its current `issued` says (a same-price re-issue moves `issued` alone).
+	const positionOf = (o, bookOrders, ownIds, scope, firstBelow = () => null, belowBefore = () => false) => {
 		const myIssuedMs = toMs(o.issued);
 		const isAhead = (b) => b.price < o.price || (b.price === o.price && (myIssuedMs === null || (toMs(b.issued) !== null && toMs(b.issued) < myIssuedMs)));
 		const sells = bookOrders.filter(b => isObj(b) && b.is_buy_order !== true && idNum(b.order_id) !== o.orderId && num(b.price) !== null && num(b.volume_remain) > 0);
@@ -336,7 +573,7 @@
 		if (myIssuedMs !== null) {
 			for (const b of ahead) {
 				const issuedMs = toMs(b.issued);
-				if (issuedMs === null || issuedMs <= myIssuedMs) continue;
+				if (issuedMs === null || issuedMs <= myIssuedMs || belowBefore(idNum(b.order_id))) continue;
 				const logged = firstBelow(idNum(b.order_id));
 				const ms = logged !== null && logged < issuedMs ? logged : issuedMs;
 				if (undercutter === null || ms < undercutter.ms) undercutter = { ms, issuedMs, b };
@@ -406,6 +643,9 @@
 
 	//--- economics (rule 6)
 
+	// A lot's FIFO remainder: its remainingQty, else qty less soldQty.
+	const remainingOf = (l) => (num(l.remainingQty) !== null ? l.remainingQty : (num(l.qty) || 0) - (num(l.soldQty) || 0));
+
 	// Landed cost per unit over the FIFO remainder of the type's lots (qty-weighted); null when none
 	// remains.
 	const landedCostOf = (lots, typeId) => {
@@ -413,13 +653,30 @@
 		let cost = 0;
 		for (const l of lots) {
 			if (!isObj(l) || idNum(l.typeId) !== typeId) continue;
-			const rem = num(l.remainingQty) !== null ? l.remainingQty : (num(l.qty) || 0) - (num(l.soldQty) || 0);
+			const rem = remainingOf(l);
 			if (!(rem > 0)) continue;
 			units += rem;
 			cost += ((num(l.unitPrice) || 0) + (num(l.haulPerUnit) || 0) + (num(l.buyFeePerUnit) || 0)) * rem;
 		}
 		return units > 0 ? { landedCost: cost / units, units } : { landedCost: null, units: 0 };
 	};
+
+	// Decision 22: the lots behind a row, the type's lots with units left (those landedCostOf takes the
+	// cost over), newest first by date; ids and dates as facts.lots gives them.
+	const lotsLeftOf = (lots, typeId) => lots
+		.filter(l => isObj(l) && idNum(l.typeId) === typeId && remainingOf(l) > 0)
+		.map(l => ({
+			lotId: l.lotId === undefined ? null : l.lotId, runId: l.runId === undefined ? null : l.runId,
+			remainingQty: remainingOf(l), date: l.date === undefined ? null : l.date
+		}))
+		.sort((a, b) => {
+			const am = toMs(a.date);
+			const bm = toMs(b.date);
+			if (am === bm) return 0;
+			if (am === null) return 1;
+			if (bm === null) return -1;
+			return bm - am;
+		});
 
 	// An order's fee rows by date: the first is the listing, later ones relists (results-calc rule 5).
 	const feesOf = (relist) => (Array.isArray(relist.fees) ? relist.fees : [])
@@ -485,28 +742,58 @@
 
 	//--- verdict (rule 7)
 
+	// Decision 21: {verdict, reason, reasonText}: reason is a compact token of the one deciding figure,
+	// reasonText the sentence that spells it out (the page's verdict tooltip opens with it).
+	const unitsText = (n) => `${fmtCount(n)} unit${oneDecimalUnder10(n) === 1 ? '' : 's'}`;
+	const behindText = (r) => `${unitsText(r.unitsAhead)} ahead at ${fmtCount(r.dailyVolume)} a day`;
 	const verdictOf = (r, t) => {
-		if (r.ordersAhead === null) return { verdict: 'maybe', reason: 'no book yet' };
-		if (r.ordersAhead === 0) return { verdict: 'top', reason: r.ownAhead && r.ownAhead.orders > 0 ? 'only our own orders ahead' : 'nothing ahead' };
-		if (r.daysBehind !== null && r.daysBehind * 24 < t.leaveHours) return { verdict: 'leave', reason: `the queue ahead clears in ~${fmtHours(r.daysBehind * 24)}` };
+		const out = (verdict, reason, reasonText) => ({ verdict, reason, reasonText });
+		if (r.ordersAhead === null) return out('maybe', 'no book', 'no book of this item yet, so its place in the queue is unknown');
+		if (r.ordersAhead === 0) {
+			return r.ownAhead && r.ownAhead.orders > 0
+				? out('top', 'own ahead', 'only our own orders are ahead, which do not count')
+				: out('top', '', 'nothing is priced below this order');
+		}
+		const behindMs = r.daysBehind === null ? null : r.daysBehind * DAY_MS;
+		if (behindMs !== null && r.daysBehind * 24 < t.leaveHours) {
+			return out('leave', fmtCompactDuration(behindMs), `${behindText(r)}: the queue ahead clears in about ${spokenDuration(behindMs)}`);
+		}
 		// decision 14: one unit ahead of an item that sells every five days is still days behind
 		if (r.typicalTrade !== null && r.unitsAhead <= r.typicalTrade && r.daysBehind !== null && r.daysBehind < t.undercutDays) {
-			return { verdict: 'leave', reason: 'no more ahead than a typical trade' };
+			const pct = r.typicalTrade > 0 ? Math.round(r.unitsAhead / r.typicalTrade * 100) : 100;
+			const verb = oneDecimalUnder10(r.unitsAhead) === 1 ? 'is' : 'are';
+			return out('leave', `${pct}%`, `${unitsText(r.unitsAhead)} ahead ${verb} ${pct} % of a typical trade of ${unitsText(r.typicalTrade)}`);
 		}
 		if (r.landedCost !== null && r.matchPrice !== null) {
 			const netIfMatch = r.matchPrice * (1 - r.taxRate);
-			if (netIfMatch <= r.landedCost) return { verdict: 'reconsider', reason: 'below cost' };
+			// the export page's revenue / cost multiple at the match price, cut (not rounded) to two
+			// decimals so that a figure under the floor never reads as the floor ('1.49x', not '1.50x')
+			const multiple = r.landedCost > 0 ? `${(Math.floor(netIfMatch / r.landedCost * 100 + 1e-9) / 100).toFixed(2)}x` : null;
+			if (netIfMatch <= r.landedCost) {
+				return out('reconsider', multiple === null ? 'below cost' : multiple,
+					`matching returns ${multiple === null ? 'no more than' : multiple} the landed cost, at or below cost`);
+			}
 			// minRoi is the export page's revenue / cost ratio, so roiIfMatch (margin / cost) < minRoi - 1
-			if (netIfMatch < t.minRoi * r.landedCost) return { verdict: 'reconsider', reason: 'below the ROI floor' };
+			if (netIfMatch < t.minRoi * r.landedCost) {
+				return out('reconsider', multiple, `matching returns ${multiple} the landed cost, under the ${fmtMultiple(t.minRoi)} floor`);
+			}
 		}
 		if (r.daysBehind !== null && r.daysBehind >= t.undercutDays) {
-			if (r.expectedGainBeforeUndercut !== null && r.feeEstimate !== null && r.expectedGainBeforeUndercut < r.feeEstimate) {
-				return { verdict: 'maybe', reason: `others undercut within ~${fmtHours(r.medianTimeOnTop / HOUR_MS)}; the fee outweighs the expected sales` };
+			const gain = r.expectedGainBeforeUndercut;
+			if (gain !== null && r.feeEstimate !== null && gain < r.feeEstimate) {
+				return out('maybe', gain > 0 ? `fee ${(r.feeEstimate / gain).toFixed(1)}× gain` : 'fee > gain',
+					`about ${unitsText(r.expectedSalesBeforeUndercut)} ${oneDecimalUnder10(r.expectedSalesBeforeUndercut) === 1 ? 'sells' : 'sell'} `
+					+ `in the ~${spokenDuration(r.medianTimeOnTop)} before others undercut again, `
+					+ `worth ~${fmtIsk(gain)} ISK against a ~${fmtIsk(r.feeEstimate)} ISK fee`);
 			}
-			return { verdict: 'undercut', reason: `${fmtDays(r.daysBehind)} behind` };
+			return out('undercut', fmtCompactDuration(behindMs), `${behindText(r)}: ${spokenDuration(behindMs)} behind`);
 		}
-		if (r.daysBehind === null) return { verdict: 'maybe', reason: r.dailyVolume === null ? 'no history' : 'no volume in the history window' };
-		return { verdict: 'maybe', reason: `${fmtDays(r.daysBehind)} behind` };
+		if (r.daysBehind === null) {
+			return r.dailyVolume === null
+				? out('maybe', 'no history', 'no market history of this item, so how long the queue ahead takes is unknown')
+				: out('maybe', 'no volume', 'no volume in the history window, so the queue ahead may never clear');
+		}
+		return out('maybe', fmtCompactDuration(behindMs), `${behindText(r)}: ${spokenDuration(behindMs)} behind`);
 	};
 
 	const compareRows = (a, b) => {
@@ -682,10 +969,13 @@
 
 		// open orders and order logs
 		const openByChar = new Map();
+		const feedAtByChar = new Map();
 		let ordersAsOf = null;
 		for (const [cid, value] of entriesOf(input.openOrders)) {
 			const rows = Array.isArray(value) ? value : (isObj(value) && Array.isArray(value.orders) ? value.orders : []);
-			if (isObj(value) && !Array.isArray(value)) ordersAsOf = maxOf(ordersAsOf, toMs(value.fetchedAt));
+			const fetchedMs = isObj(value) && !Array.isArray(value) ? toMs(value.fetchedAt) : null;
+			ordersAsOf = maxOf(ordersAsOf, fetchedMs);
+			feedAtByChar.set(idNum(cid), fetchedMs);
 			openByChar.set(idNum(cid), rows.filter(isObj));
 		}
 		const logById = new Map();
@@ -713,36 +1003,88 @@
 		// from its row so that sales can be matched to it and its current episode is known
 		const open = [];
 		for (const cid of characterIds) {
+			const feedAtMs = feedAtByChar.has(cid) ? feedAtByChar.get(cid) : null;
 			for (const o of openByChar.get(cid) || []) {
 				if (o.is_buy_order === true) continue;
 				const orderId = idNum(o.order_id);
 				const typeId = idNum(o.type_id);
-				const price = num(o.price);
-				if (orderId === null || typeId === null || price === null) continue;
+				const feedPrice = num(o.price);
+				if (orderId === null || typeId === null || feedPrice === null) continue;
 				const locationId = idNum(o.location_id);
-				let rec = logById.get(orderId) || null;
-				const hasLog = rec !== null;
-				const issuedMs = toMs(o.issued);
-				if (rec === null) {
-					rec = {
-						orderId, characterId: cid, typeId, locationId, regionId: idNum(o.region_id), isBuy: false,
-						volumeTotal: num(o.volume_total), firstSeenMs: null, lastSeenMs: null,
-						path: [{ atMs: null, price, volumeRemain: num(o.volume_remain), issuedMs }], end: null, synthetic: true
-					};
-					logById.set(orderId, rec);
-				} else if (issuedMs !== null && rec.path.every(e => e.issuedMs === null || e.issuedMs < issuedMs)) {
-					// the row is newer than the log: its price change opens the current episode
-					rec = { ...rec, path: [...rec.path, { atMs: maxOf(ordersAsOf, issuedMs), price, volumeRemain: num(o.volume_remain), issuedMs }] };
-					logById.set(orderId, rec);
-				}
+				const logged = logById.get(orderId) || null;
+				const hasLog = logged !== null;
 				const station = isObj(stations[locationId]) ? stations[locationId] : null;
 				let regionId = idNum(o.region_id);
-				if (regionId === null) regionId = rec.regionId;
+				if (regionId === null && logged !== null) regionId = logged.regionId;
 				if (regionId === null && station) regionId = idNum(station.regionId);
 				if (regionId === null && isObj(books[typeId]) && Object.keys(books[typeId]).length === 1) regionId = idNum(Object.keys(books[typeId])[0]);
+
+				// decision 16: the book's state of the order when it is newer than the feed's. A later
+				// `issued` (by more than the 1 s jitter) is a newer price; at the same `issued` a lower
+				// remain from a later fetch is a newer fill (decision 13: a drop is newer by itself, so
+				// without any feed time the lower remain is taken).
+				const feedRemain = num(o.volume_remain);
+				const feedIssuedMs = toMs(o.issued);
+				const feedSeenMs = feedAtMs !== null ? feedAtMs : (logged !== null ? logged.lastSeenMs : null);
+				const bookEntry = isObj(books[typeId]) && regionId !== null ? books[typeId][regionId] : null;
+				const book = isObj(bookEntry) && Array.isArray(bookEntry.orders) ? bookEntry : null;
+				const bookAtMs = book === null ? null : toMs(book.fetchedAt);
+				const bookRow = book === null ? null : book.orders.find(b => isObj(b) && b.is_buy_order !== true && idNum(b.order_id) === orderId) || null;
+				let price = feedPrice;
+				let volumeRemain = feedRemain;
+				let issuedMs = feedIssuedMs;
+				let stateFrom = 'orders';
+				if (bookRow !== null && feedIssuedMs !== null) {
+					const bookPrice = num(bookRow.price);
+					const bookRemain = num(bookRow.volume_remain);
+					const bookIssuedMs = toMs(bookRow.issued);
+					if (bookPrice !== null && bookRemain !== null && bookIssuedMs !== null) {
+						if (bookIssuedMs - feedIssuedMs > ISSUED_EPS) {
+							price = bookPrice;
+							volumeRemain = bookRemain;
+							issuedMs = bookIssuedMs;
+							stateFrom = 'book';
+						} else if (Math.abs(bookIssuedMs - feedIssuedMs) <= ISSUED_EPS && feedRemain !== null && bookRemain < feedRemain
+							&& (feedSeenMs === null || (bookAtMs !== null && bookAtMs > feedSeenMs))) {
+							volumeRemain = bookRemain;
+							stateFrom = 'book';
+						}
+					}
+				}
+				const stateAtMs = stateFrom === 'book' ? bookAtMs : feedAtMs;
+				// a newer book (by a minute) that no longer lists an order at an NPC station: filled or cancelled
+				const notInBook = book !== null && bookRow === null && bookAtMs !== null && feedSeenMs !== null && bookAtMs - feedSeenMs > NOT_IN_BOOK_MS
+					&& locationId !== null && locationId < STRUCTURE_ID_MIN;
+
+				let rec = logged;
+				if (rec === null) {
+					const path = [{ atMs: null, price: feedPrice, volumeRemain: feedRemain, issuedMs: feedIssuedMs }];
+					if (issuedMs !== feedIssuedMs) path.push({ atMs: bookAtMs, price, volumeRemain, issuedMs });
+					else path[0].volumeRemain = volumeRemain;
+					rec = {
+						orderId, characterId: cid, typeId, locationId, regionId: idNum(o.region_id), isBuy: false,
+						volumeTotal: num(o.volume_total), firstSeenMs: null, lastSeenMs: null, path, end: null, synthetic: true
+					};
+					logById.set(orderId, rec);
+				} else {
+					if (feedIssuedMs !== null && rec.path.every(e => e.issuedMs === null || e.issuedMs < feedIssuedMs)) {
+						// the row is newer than the log: its price change opens the current episode
+						rec = { ...rec, path: [...rec.path, { atMs: maxOf(ordersAsOf, feedIssuedMs), price: feedPrice, volumeRemain: feedRemain, issuedMs: feedIssuedMs }] };
+					}
+					if (issuedMs !== feedIssuedMs && rec.path.every(e => e.issuedMs === null || e.issuedMs < issuedMs)) {
+						// and the book is newer still: its price change, seen at the book's fetch
+						const lastAtMs = rec.path.reduce((acc, e) => maxOf(acc, e.atMs), null);
+						rec = { ...rec, path: [...rec.path, { atMs: maxOf(maxOf(bookAtMs, issuedMs), lastAtMs), price, volumeRemain, issuedMs }] };
+					}
+					logById.set(orderId, rec);
+				}
 				open.push({
-					o: { orderId, typeId, locationId, price, issued: o.issued }, characterId: cid, regionId, rec, hasLog, issuedMs,
-					volumeRemain: num(o.volume_remain), volumeTotal: num(o.volume_total), stationName: station && typeof station.name === 'string' ? station.name : null
+					o: { orderId, typeId, locationId, price, issued: iso(issuedMs) }, characterId: cid, regionId, rec, hasLog, issuedMs,
+					volumeRemain, volumeTotal: num(o.volume_total), stationName: station && typeof station.name === 'string' ? station.name : null,
+					stateFrom, stateAtMs, notInBook,
+					feed: stateFrom === 'book' ? { price: feedPrice, volumeRemain: feedRemain, issued: iso(feedIssuedMs), fetchedAt: iso(feedAtMs) } : null,
+					// the pending-fill drop after the last logged entry is dated when the remain was seen
+					currentAtMs: stateFrom === 'book' && bookAtMs !== null ? bookAtMs : (ordersAsOf === null ? nowMs : ordersAsOf)
 				});
 			}
 		}
@@ -769,13 +1111,16 @@
 			const competitors = competitorsIn(log, rec.locationId, ownIds, t.scope);
 			for (const ep of episodesOf(rec, nowMs)) {
 				if (ep.start < nowMs - LOOKBACK_MS) continue;
-				const cut = firstUndercut(ep, competitors);
+				// listed behind a cheaper competitor: never on top, so no undercut and no time on top
+				const behind = startedBehind(ep, competitors);
+				const cut = behind ? null : firstUndercut(ep, competitors);
 				episodes.push({
 					orderId: rec.orderId, characterId: rec.characterId, typeId: rec.typeId, locationId: rec.locationId,
 					price: ep.price, startMs: ep.start, endMs: ep.end, current: ep.current,
 					undercut: cut !== null, undercutAtMs: cut === null ? null : cut.at,
 					undercutBy: cut === null ? null : cut.orderId, undercutPrice: cut === null ? null : cut.price,
-					timeOnTop: (cut === null ? ep.end : cut.at) - ep.start
+					timeOnTop: behind ? 0 : (cut === null ? ep.end : cut.at) - ep.start,
+					startedBehind: behind
 				});
 			}
 		}
@@ -810,7 +1155,7 @@
 			const typeSales = (salesByCharType.get(key) || []).filter(s => s.ms > logStart - ORDERS_CACHE_MS);
 			const accounts = recs.map(rec => {
 				const x = openById.get(rec.orderId);
-				const drops = rec.synthetic ? [] : dropsOf(rec, logStart, x ? x.volumeRemain : null, ordersAsOf === null ? nowMs : ordersAsOf);
+				const drops = rec.synthetic ? [] : dropsOf(rec, logStart, x ? x.volumeRemain : null, x ? x.currentAtMs : (ordersAsOf === null ? nowMs : ordersAsOf));
 				const filledPerLog = sum(drops, d => d.units);
 				const filledPerTx = sum(typeSales.filter(s => s.orderId === rec.orderId), s => s.qty);
 				return { orderId: rec.orderId, drops, filledPerLog, filledPerTx, allocated: 0, residual: filledPerLog - filledPerTx };
@@ -855,11 +1200,47 @@
 			feeRateAll.set(cid, feeRateOf(list));
 		}
 
+		// decision 18: presence, per type with a sell order of ours open inside the window (before the rows:
+		// a row listed behind a cheaper order dates its time on top by it)
+		const presenceFrom = nowMs - t.windowMs;
+		const ownsByType = new Map();
+		for (const rec of logById.values()) {
+			if (rec.isBuy || !charSet.has(rec.characterId) || rec.typeId === null) continue;
+			const span = openSpanOf(rec);
+			if (span.start === null || span.start > nowMs || (span.end !== null && span.end <= presenceFrom)) continue;
+			const regionId = openById.has(rec.orderId) && openById.get(rec.orderId).regionId !== null ? openById.get(rec.orderId).regionId : regionOfRec(rec);
+			const groupKey = t.scope === 'region' ? `${regionId}` : `${regionId}:${rec.locationId}`;
+			if (!ownsByType.has(rec.typeId)) ownsByType.set(rec.typeId, []);
+			ownsByType.get(rec.typeId).push({ rec, span, groupKey, regionId });
+		}
+		const presence = {};
+		for (const typeId of [...ownsByType.keys()].sort((a, b) => a - b)) {
+			const owns = ownsByType.get(typeId);
+			const groups = new Map();
+			for (const own of owns) {
+				if (groups.has(own.groupKey)) continue;
+				const log = own.regionId === null ? null : bookLogOf(typeId, own.regionId);
+				const competitors = log === null ? [] : competitorsIn(log, own.rec.locationId, ownIds, t.scope)
+					.filter(c => c.appearMs !== null && c.appearMs <= nowMs && (c.goneMs === null || c.goneMs > presenceFrom));
+				groups.set(own.groupKey, { log, competitors });
+			}
+			const sinces = [...groups.values()].map(g => (g.log === null ? null : g.log.sinceMs)).filter(ms => ms !== null);
+			presence[typeId] = {
+				segments: presenceSegments(owns, groups, presenceFrom, nowMs),
+				bookLogSince: sinces.length > 0 ? iso(Math.min(...sinces)) : null
+			};
+		}
+
 		// rows (rules 1-7)
 		const landedByType = new Map();
 		const landedOf = (typeId) => {
 			if (!landedByType.has(typeId)) landedByType.set(typeId, landedCostOf(lots, typeId));
 			return landedByType.get(typeId);
+		};
+		const lotsByType = new Map();
+		const lotsOf = (typeId) => {
+			if (!lotsByType.has(typeId)) lotsByType.set(typeId, lotsLeftOf(lots, typeId));
+			return lotsByType.get(typeId).map(l => ({ ...l }));
 		};
 		const relistById = new Map(relists.map(r => [idNum(r.orderId), r]));
 		const rows = [];
@@ -892,6 +1273,7 @@
 			const bookEntry = isObj(books[typeId]) && x.regionId !== null ? books[typeId][x.regionId] : null;
 			const book = isObj(bookEntry) && Array.isArray(bookEntry.orders) ? bookEntry : null;
 			if (book === null) badges.push('nobook');
+			if (x.notInBook) badges.push('notInBook');
 			const log = bookLogOf(typeId, x.regionId);
 			if (log === null) badges.push('nobooklog');
 			const firstBelow = (orderId) => {
@@ -902,7 +1284,22 @@
 				}
 				return best;
 			};
-			const pos = book === null ? null : positionOf(o, book.orders, ownIds, t.scope, firstBelow);
+			// rule 3: an order the log shows below ours when we set our price, and below it at every change
+			// since, was ahead all along: a same-price re-issue after ours is no undercut
+			const belowBefore = (orderId) => {
+				if (log === null || x.issuedMs === null || !log.byId.has(orderId)) return false;
+				let atOurs = null;
+				let aboveSince = false;
+				for (const e of log.byId.get(orderId).path) {
+					const ms = e.issuedMs !== null ? e.issuedMs : e.atMs;
+					if (e.price === null || ms === null) continue;
+					if (ms <= x.issuedMs) {
+						if (atOurs === null || ms >= atOurs.ms) atOurs = { ms, price: e.price };
+					} else if (e.price >= o.price) aboveSince = true;
+				}
+				return atOurs !== null && atOurs.price < o.price && !aboveSince;
+			};
+			const pos = book === null ? null : positionOf(o, book.orders, ownIds, t.scope, firstBelow, belowBefore);
 			let reUndercuts = null;
 			let priceWar = false;
 			if (pos !== null && pos.undercutBy !== null && log !== null && log.byId.has(pos.undercutBy.orderId)) {
@@ -925,11 +1322,19 @@
 			const stats = statsByTypeLoc.get(`${typeId}:${o.locationId}`) || { episodes: 0, undercutEpisodes: 0, medianTimeOnTop: null, est: false };
 			if (stats.est) badges.push('est');
 			const currentEp = episodes.find(e => e.orderId === o.orderId && e.current) || null;
-			const onTopFor = pos !== null && pos.ordersAhead === 0 && !(currentEp && currentEp.undercut) && x.issuedMs !== null
+			let onTopFor = pos !== null && pos.ordersAhead === 0 && !(currentEp && currentEp.undercut) && x.issuedMs !== null
 				? nowMs - x.issuedMs : null;
+			if (pos !== null && pos.ordersAhead === 0 && currentEp && currentEp.startedBehind) {
+				// listed behind a cheaper order: on top only since that order left or moved up, by the type's
+				// presence (its last segment, top and known, running to now); else unknown
+				const segs = presence[typeId] ? presence[typeId].segments : [];
+				const last = segs.length > 0 ? segs[segs.length - 1] : null;
+				onTopFor = last !== null && last.state === 'top' && last.known && last.to === iso(nowMs) ? nowMs - toMs(last.from) : null;
+			}
 
 			// rule 6
 			const { landedCost, units: landedUnits } = landedOf(typeId);
+			const rowLots = lotsOf(typeId);
 			if (landedCost === null) badges.push('nocost');
 			const matchPrice = pos !== null && pos.ordersAhead > 0 ? pos.bestPrice - 0.01 : null;
 			// decision 15: the character's rate at this station, else over all its stations, times the
@@ -952,6 +1357,7 @@
 			const row = {
 				orderId: o.orderId, characterId: x.characterId, typeId, locationId: o.locationId, regionId: x.regionId, stationName: x.stationName,
 				price: o.price, volumeRemain: x.volumeRemain, volumeTotal: x.volumeTotal, issued: iso(x.issuedMs),
+				stateFrom: x.stateFrom, stateAt: iso(x.stateAtMs), feed: x.feed,
 				firstSeen: iso(rec.firstSeenMs), listedSince: iso(listedSince), listedFor: listedSince === null ? null : nowMs - listedSince,
 				relistCount: x.hasLog ? priceChanges(rec.path) : null,
 				relistFees: relist ? sum(fees.slice(1), f => f.cost) : null,
@@ -983,11 +1389,13 @@
 				feeRate: rate === null ? null : rate.rate, feeRateRows: rate === null ? 0 : rate.rows,
 				feeRateSince: rate === null ? null : rate.since, feeRateScope: rate === null ? null : rate.scope,
 				feeRateEst: rate !== null && rate.est,
-				expectedSalesBeforeUndercut, expectedGainBeforeUndercut
+				expectedSalesBeforeUndercut, expectedGainBeforeUndercut,
+				lots: rowLots
 			};
 			const v = verdictOf(row, t);
 			row.verdict = v.verdict;
 			row.reason = v.reason;
+			row.reasonText = v.reasonText;
 			row.badges = badges;
 			rows.push(row);
 		}
@@ -1008,7 +1416,8 @@
 				list: list.slice().sort((a, b) => a.startMs - b.startMs || a.orderId - b.orderId).map(e => ({
 					orderId: e.orderId, characterId: e.characterId, locationId: e.locationId, price: e.price,
 					start: iso(e.startMs), end: iso(e.endMs), current: e.current, undercut: e.undercut,
-					undercutAt: iso(e.undercutAtMs), undercutBy: e.undercutBy, undercutPrice: e.undercutPrice, timeOnTop: e.timeOnTop
+					undercutAt: iso(e.undercutAtMs), undercutBy: e.undercutBy, undercutPrice: e.undercutPrice, timeOnTop: e.timeOnTop,
+					startedBehind: e.startedBehind
 				}))
 			};
 		}
@@ -1128,7 +1537,7 @@
 		const txAsOf = allSales.reduce((acc, s) => maxOf(acc, s.ms), null);
 
 		return {
-			rows, sales, salesClusters, pending, salesByTypeDay, share, timeOnTop, totals, feeRates,
+			rows, sales, salesClusters, pending, salesByTypeDay, share, timeOnTop, presence, totals, feeRates,
 			asOf: { orders: iso(ordersAsOf), books: iso(booksAsOf), transactions: iso(txAsOf) },
 			warnings, taxRate, thresholds: t
 		};
@@ -1137,11 +1546,12 @@
 	return {
 		defaultThresholds,
 		compute,
+		fmtCompactDuration,
 		// exposed for tests
 		_internal: {
 			toMs, iso, median, recencyWeight, dayAge, priceAt, priceChanges, openSpanOf, dropsOf, episodesOf, firstUndercut,
 			reUndercutsOf, positionOf, dailyVolumeOf, typicalTradeOf, landedCostOf, feeObservationsOf, feeRateOf, feeEstimateOf, verdictOf,
-			compareRows, mergeSales, clusterSales, windowDays
+			compareRows, mergeSales, clusterSales, windowDays, presenceSegments, parseBookLog
 		}
 	};
 });

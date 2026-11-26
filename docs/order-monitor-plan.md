@@ -420,10 +420,127 @@ Gate: tests pass; the export page shows the notice with the variable unset.
 
 Done 2026-11-26: `public/export.js` (`showEnvNotice`, called on the page-load `/api/config` read before the configured check, so the notice shows before SSO; the text as UI 2 gives it, with a bold "Note:" label; textContent only), `public/export.html` (`#envNotice`, between the controls and the progress line, and its amber style), `README.md` (the opening sentence and the Running list name `orders.html`; an "Order monitor" section; `--watch` under Syncing with the launchd note; `EFLIP_DATA_DIR` and `ESI_USER_AGENT` after the setup steps; the `ledger/` entries for the two logs and `esi-cache/public/_watch.json`). As built, where it differs: the export page has no sync note, since its page-load sync is silent, so the notice has its own line above the progress line rather than under one. Gate: `node --test test/*.test.js` 352 pass. In the browser on the local server (both variables set) nothing renders; with `/api/config` faked in an iframe, both lines show with both flags false, one line shows for each flag alone, and nothing shows when both are set, when `env` is absent or when the read fails.
 
+### Phase 5 — round 2 after Rocky's review of the live page (2026-11-26)
+
+Rocky's notes on `orders.html` after a day's use, and what each becomes (decisions 16-22 below
+record the reasoning). Two agents in parallel: the module (`public/orders-calc.js`,
+`test/orders-calc.test.js`; opus) and the page (`public/orders.js`, `public/orders.html`; opus);
+the page reads every new module field as optional, as in Phase 3, so either can land first. Fable
+does the one-line results-page change, reviews, runs the gate, smoke-tests the page on the local
+data and commits.
+
+**Module contract (new output; everything existing stays as it is).**
+
+1. *Own-order state from the book when it is newer* (decision 16). For each open sell order of the
+   feed, the book of its type and region is searched for the same `order_id`. When that book row's
+   `issued` is later than the feed row's, the row's `price`, `volumeRemain` and `issued` come from
+   the book; when its `issued` is equal, its `volume_remain` lower and the book's `fetchedAt` later
+   than the feed's, `volumeRemain` comes from the book. Either way `stateFrom: 'book'`, `stateAt`
+   (the book's `fetchedAt`, ISO) and `feed: {price, volumeRemain, issued, fetchedAt}` (the orders
+   feed's values) are set; otherwise `stateFrom: 'orders'`, `stateAt` the feed's `fetchedAt`,
+   `feed: null`. The merged state is what every later rule sees (position, episodes, `onTopFor`,
+   margins, the fee), and the pending-fill drop after the last logged entry is dated `stateAt`, not
+   the feed's time. When the book was fetched more than 60 s after the feed row and does not hold
+   the order, and the order sits at an NPC station (`locationId < 1e9`; structure books are not
+   public), the row gets the badge `notInBook`; its figures still rest on the feed and its verdict
+   is unchanged. `asOf` is unchanged.
+2. *Presence* (decision 18): `presence: {[typeId]: {segments, bookLogSince}}` for every type with a
+   sell order of the pooled characters open at any moment of `[now - windowMs, now]`. `segments`
+   are contiguous, non-overlapping, oldest first, each `{from, to (ISO), state: 'top' | 'listed',
+   known (boolean), orderIds (our open orders of the type then), below (competing orders priced
+   below our lowest at its station then; null when not known), lowestBelow (their lowest price;
+   null), cause: 'listed' | 'ourPrice' | 'undercut' | 'cleared' | 'ended' | 'unknown'}`; a gap
+   between segments is a stretch with no sell order of ours. Our orders are the order logs' sell
+   entries (synthetic one-entry records for feed rows without a log), open over `openSpanOf`,
+   priced by `priceAt`. A competitor (a book-log sell order that is not ours, at the same station,
+   or anywhere in the region under `scope: 'region'`) is present from the earlier of its first
+   logged `issued` and `firstSeen` until the first book-log sample after its `lastSeen` (now when
+   none), and priced by its path (the entry with the latest `issued` at or before the moment, as
+   `priceAt`). `state` is `top` when none of them is priced below our lowest open order of the type
+   at that station, else `listed`; `known` is false before the book log's first sample (then `state`
+   is `listed`, `below` null). Boundaries are every own open or end, own `issued`, competitor
+   appearance, disappearance and `issued`, and the window's edges; adjacent segments with the same
+   `state`, `known` and `below` merge. Parse `firstSeen` and `lastSeen` from the book log for this.
+3. *Reason tokens* (decision 21): `reason` becomes a compact token and `reasonText` a sentence that
+   spells it out. The tokens, by verdict: `undercut` and the between-limits `maybe`: days behind as
+   a compact duration (`2.6d`, `1.1h`, `35min`; one decimal under 10, no space); `leave` for a queue
+   that clears soon: the same duration; `leave` for a queue no bigger than a typical trade: units
+   ahead over the typical trade as a whole percentage (`50%`); `reconsider`: the return at the
+   match price as the export page's multiple with two decimals (`1.21x`, `0.93x`; net revenue ÷
+   landed cost); the fee-outweighs `maybe`: `fee 3.3× gain` (fee ÷ expected gain, one decimal);
+   `maybe` without data: `no book`, `no history`, `no volume`; `top`: an empty string, or `own ahead`
+   when only our own orders are ahead. `reasonText` is the sentence the page's verdict tooltip puts
+   first (for example "13 units ahead at 5 a day: 2.6 days behind", "1 unit ahead is 50 % of a
+   typical trade of 2 units", "matching returns 1.21x the landed cost, under the 1.5x floor",
+   "about 0.2 units sell in the ~3 h before others undercut again, worth ~50,000 ISK against a
+   ~166,000 ISK fee"). Export a `fmtCompactDuration(ms)` on the module for the page.
+4. *Lots behind a row* (decision 22): `row.lots: [{lotId, runId, remainingQty, date}]`, the type's
+   lots with units left (the FIFO remainder the landed cost is taken over), newest first. Sales
+   already carry `lotIds`.
+
+**Page contract.**
+
+1. *Refresh and the book-derived state* (decision 16). "my price" and "remaining / total" cells
+   whose figure comes from the book carry the export page's dotted underline (ruling
+   2026-11-25--status--mark-blended-cells-with-a-dotted-underline) and say in the tooltip which
+   source says what and when ("1,234.00 per the book of 14:07 (set 14:05); the orders feed, cached
+   by ESI until 14:22, still says 1,300.00 from 13:50"). A `notInBook` row is dimmed, its badge
+   "not in book" explaining that the newest book no longer lists the order (filled or cancelled; the
+   orders feed confirms within 20 min). The status line adds, when any row reads from the book,
+   "· N orders newer per the books". The "Refresh now" outcome that found nothing newer names when
+   ESI can give more: the books 5 min after their last check, the orders at the feed's `expires`
+   (the watch answer carries it per character), and says that the books already carry the current
+   prices of our orders. No new button: ESI serves its cached copy to a forced call too, so there is
+   nothing a button could fetch sooner (decision 16).
+2. *Sold recently* (decision 17): rows sorted by the window's profit, highest first; items with only
+   pending fills after them, by estimated profit; a dashed vertical divider right of the time axis
+   and one more column, "total" (labelled in the axis row), with a dot (square for a loss) per item
+   whose area is the item's profit over the window on its own sqrt scale (the footnote says the
+   column has its own scale), the item's sales, units, gross, net, profit and pending estimate in
+   its tooltip, in the same hit layer as the sale marks. Narrow widths (under 640 px) keep the dot
+   and drop the figure that is written beside it on wider ones.
+3. *Presence lines* (decision 18) replace the order-event ticks: on each item row, near its bottom
+   edge, a 2 px line in the ink colour over each `presence` segment: solid for `top`, dotted for
+   `listed`, at reduced opacity when `known` is false, nothing where we had no sell order. Each
+   segment is a hit target (hover, focus, arrow keys) with a tooltip: the state, its span and
+   duration, our orders and prices, how many orders were below and the lowest, and the cause of the
+   change. The toggle reads "show when we were listed and on top" and is on by default (saved as
+   `showPresence`; the old `showEvents` key is ignored). The legend gains the two line styles and
+   "a gap: no sell order of ours"; the change ticks and hollow undercut boxes, their legend keys,
+   tooltips and CSS go.
+4. *Character column and sorting* (decision 19): a "character" column after "item" (first name,
+   full name in the tooltip), sortable like every other, hidden when a single character has rows.
+   The default order stays rule 7; the note above the table says "click a column title to sort".
+5. *Type id out of the item cell* (decision 20): the dim id after the name goes; the tooltip keeps
+   it. The same one-line change on `results.js` (Fable).
+6. *Reasons* (decision 21): the verdict cell shows the token; the verdict tooltip opens with
+   `reasonText`. The page's `dur` and `behindText` drop the space before the unit (`2.6d`, `1.1h`,
+   `35min`, `<1min`) so every duration on the page reads the same way as the reasons.
+7. *Export snapshot* (decision 22): an icon button beside copy-name on each open-order row that has a
+   run behind it (the newest `runId` among `row.lots`, whose run lists the type), and one on each
+   row of the sales table (the day's sales' `lotIds` → `facts.lots` → `runId`). It opens a small
+   panel anchored to the row (closed by Escape, by clicking outside, by its close button; focus moves
+   in and comes back): "<item> — export snapshot", "run <copied date> (<route>), <qty> copied of
+   <recommended> recommended (<stopReason>)", then a two-column table of the run row's prediction
+   against the figure the page has now: sell price vs my price (vs the day's average unit price on a
+   sales row), cost per item vs landed cost, profit per item vs margin now (vs the day's profit per
+   unit), days to clear vs listed for (vs days since listed), daily demand vs daily volume now,
+   competing volume then vs units ahead now; a dim line with the observed shares and "sold before"
+   when the row has them. The run rows are in `state.runs` already (GET /api/runs, without market
+   context); the context (the books then) is not shown in this round.
+
+Gate: `node --test test/*.test.js` green; Fable's browser check on the local data: the book-state
+merge (a price change of ours seen in the book before the feed, if one falls in the check, else the
+tooltips with a patched book), the presence lines against known undercut episodes, the total
+column against the table, the character column and sort, the reasons, the snapshot panel for an
+order with a run, the "Refresh now" wording, 800/1280 px.
+
 ## Agent roster
 
 - Phase 1 and 3: sonnet (clear briefs against existing patterns). Phase 2: opus (the verdict and
-  time-on-top semantics are the crux). Phase 4: haiku.
+  time-on-top semantics are the crux). Phase 4: haiku. Phase 5: opus for both agents (the
+  book-state merge and the presence segments are semantics; the page round is wide and touches
+  the hit layer and keyboard behaviour).
 - Sequencing: 1 and 2 in parallel (2 only adds files); 3 after both; 4 last. `lib/api.js` and
   `lib/sync.js` are touched by Phase 1 only.
 - Fable: reviews `orders-calc.js` and the derive invariant, reruns the gates, smoke-tests the page in
@@ -485,8 +602,53 @@ Done 2026-11-26: `public/export.js` (`showEnvNotice`, called on the page-load `/
     from Nov 25, when his Omega time ended), so the estimate is a per-character rate fitted from
     the newest observed relists and applied to any order; one relist of anything at a station
     prices every order there.
+16. Our own orders' current state comes from the public book when the book is newer (2026-11-26,
+    Rocky: after updating orders, "Refresh now" appeared not to recheck them). ESI serves
+    `/characters/{id}/orders` from a 20-minute cache to every caller, forced or not, so no button
+    can fetch a fresher copy; but the regional book (5-minute cache) lists our orders too, with the
+    new `price`, `volume_remain` and `issued`. So the row takes the book's state when its `issued`
+    is later (or its remaining lower at the same `issued` and a later fetch), marks the cells that
+    read from the book, and an order the newer book no longer lists is flagged "not in book" (NPC
+    stations only: structure books are not public). The refresh note names when ESI can give more.
+17. The sales timeline sorts items by the window's profit, highest first, and ends in a "total"
+    column after a divider, one dot per item on its own scale (2026-11-26, Rocky: "a dot/square at
+    the end to show the total (with a divider to show it's now just another normal column)"; the
+    separate scale keeps the sale dots readable when one item's total dwarfs every sale).
+18. The order-event ticks give way to presence lines per item row: solid while one of our orders
+    is the lowest at its station, dotted while listed but undercut, blank with no sell order
+    (2026-11-26, Rocky: the ticks and hollow boxes "doesn't seem to be working well as a visual
+    language. how about a timeline (literal lines) near the bottom of each item row"). On by
+    default now that it is a thin line. A stretch before the book log covers the type is drawn as
+    listed at reduced opacity, since whether we were on top is unknown there.
+19. A sortable "character" column rather than a character-first default (2026-11-26, Rocky: "or
+    better yet make the columns sortable on click"; the columns already were, so the gap was the
+    column and the affordance). Hidden while one character has rows.
+20. The type id leaves the item cells of the orders and results pages for their tooltips
+    (2026-11-26, Rocky). Insights and export never showed it; search by id on results still works.
+21. Verdict reasons are compact tokens of one deciding figure each (2026-11-26, Rocky: "a
+    unified/concise presentation language (presumably something like "2.6d", "50%" ..., "1.1h")"):
+    a duration for days behind, a percentage of the typical trade, the return multiple against the
+    ROI floor, the fee-to-gain ratio, short words where there is no figure. The sentence moves to
+    the tooltip, and every duration on the page drops the space before its unit to match.
+22. An "export snapshot" panel per order and per sales row shows the export page's prediction for
+    the item at the run that planned it against the figure the page has now (2026-11-26, Rocky: "a
+    way to view the snapshot of the row from export.html"). The data exists: runs keep every
+    prediction field per row and `results-calc` already maps lots to runs through their batches. The
+    saved market context (the books at the time) is left out of this round; it needs
+    `/api/runs?context=1` or a per-run route, since the list strips it.
+
+23. A competing order's `issued` does move without a price change (2026-11-26, the 358 Domain book
+    logs on the development data: 14,193 orders, 18,384 path entries). Two forms: a jitter of exactly
+    one second between samples at the same price and volume (228 entries), and whole batches of
+    20-40 orders of one seller re-issued hours or days later at the same price (about 430 entries);
+    a handful of low-value orders even show `issued` moving backwards between samples. Every one of
+    the 2,077 price changes moved `issued` too. So: the book-versus-feed test of decision 16 treats
+    `issued` values within 2 s as the same; an order the book log shows priced below ours at or
+    before our `issued` is never the undercutter, whatever its current `issued` (rule 3); an
+    episode that began with a competitor already below us never counts as time on top (rule 5,
+    `startedBehind`), and a same-price re-issue is not a new undercut.
 
 ### Still open
 
-1. Whether a competing order's `issued` moves on anything but a price change. Rocky does not know
-   either; the book log will show it if it does.
+1. Resolved 2026-11-26 (decision 23): a competing order's `issued` moves without a price change,
+   by a one-second jitter and by same-price re-issues. The rules now allow for both.

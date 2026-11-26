@@ -131,7 +131,8 @@ test("Grant's order 7467834499 at 21.12 M behind no one is on top", () => {
 	assert.equal(r.marginIfMatch, null);
 	assert.equal(r.onTopFor, 6 * HOUR);
 	assert.equal(r.verdict, 'top');
-	assert.equal(r.reason, 'nothing ahead');
+	assert.equal(r.reason, '');
+	assert.equal(r.reasonText, 'nothing is priced below this order');
 	assert.equal(r.bookFetchedAt, ago(5 * MIN));
 });
 
@@ -175,7 +176,8 @@ test('position at the station: strictly cheaper, plus equal-priced orders issued
 	fixture.books[T][REGION].orders = fixture.books[T][REGION].orders.filter(b => [1, 2, 105].includes(b.order_id));
 	const alone = rowOf(run(fixture), 1);
 	assert.equal(alone.verdict, 'top');
-	assert.equal(alone.reason, 'only our own orders ahead');
+	assert.equal(alone.reason, 'own ahead');
+	assert.equal(alone.reasonText, 'only our own orders are ahead, which do not count');
 	assert.equal(alone.bestPrice, 100 * M);
 });
 
@@ -234,11 +236,16 @@ test('two re-undercuts more than 24 h apart are no price war; a change before ou
 	const bookLog = { samples: [], orders: {
 		301: bookLogOrder({ path: [
 			[ago(70 * HOUR), 102 * M, 1, ago(70 * HOUR)],
-			[ago(64 * HOUR), 99.8 * M, 1, ago(65 * HOUR)], // before our issued
+			[ago(64 * HOUR), 100.5 * M, 1, ago(65 * HOUR)], // before our issued, still above us
 			[ago(49 * HOUR), 99.7 * M, 1, ago(50 * HOUR)],
 			[ago(19 * HOUR), 99.6 * M, 1, ago(20 * HOUR)]
 		] })
 	} };
+	// a change below us before our issued is not counted either (such an order was ahead when we
+	// listed, so rule 3 never names it the undercutter; see the re-issue test below)
+	const early = pathOf([[ago(70 * HOUR), 102 * M, 1, ago(70 * HOUR)], [ago(64 * HOUR), 99.8 * M, 1, ago(65 * HOUR)], [ago(49 * HOUR), 99.7 * M, 1, ago(50 * HOUR)]])
+		.map(e => ({ atMs: Date.parse(e.at), price: e.price, volumeRemain: e.volumeRemain, issuedMs: Date.parse(e.issued) }));
+	assert.deepEqual(ordersCalc._internal.reUndercutsOf(early, 100 * M, NOW_MS - 60 * HOUR), { count: 1, priceWar: false });
 	const r = rowOf(run({
 		openOrders: { [GRANT]: [order] },
 		books: { [T]: { [REGION]: bookOf([theirs({ id: 301, price: 99.6 * M, issued: ago(20 * HOUR) })]) } },
@@ -637,16 +644,19 @@ test('verdict leave: the queue clears within leaveHours (strictly), or no more a
 	const r = verdictRow({ ahead: 2 }); // 2 / 8 days = 6 h
 	assert.equal(r.daysBehind, 0.25);
 	assert.equal(r.verdict, 'leave');
-	assert.equal(r.reason, 'the queue ahead clears in ~6 h');
+	assert.equal(r.reason, '6h');
+	assert.equal(r.reasonText, '2 units ahead at 8 a day: the queue ahead clears in about 6 hours');
 
 	const atLimit = verdictRow({ ahead: 2 }, { thresholds: { leaveHours: 6 } });
 	assert.equal(atLimit.verdict, 'maybe');
-	assert.equal(atLimit.reason, '6 h behind');
+	assert.equal(atLimit.reason, '6h');
+	assert.equal(atLimit.reasonText, '2 units ahead at 8 a day: 6 hours behind');
 
 	const typical = verdictRow({ ahead: 3, trade: 3 }); // 9 h behind, 3 ahead = one typical trade
 	assert.equal(typical.typicalTrade, 3);
 	assert.equal(typical.verdict, 'leave');
-	assert.equal(typical.reason, 'no more ahead than a typical trade');
+	assert.equal(typical.reason, '100%');
+	assert.equal(typical.reasonText, '3 units ahead are 100 % of a typical trade of 3 units');
 	assert.equal(verdictRow({ ahead: 4, trade: 3 }).verdict, 'maybe');
 });
 
@@ -661,7 +671,8 @@ test('verdict leave by the typical trade only while less than undercutDays behin
 	assert.equal(r.verdict, 'undercut'); // no fee estimate, no time on top
 	const demoted = verdictRow({ ahead: 1, trade: 1, history: sparse, episode: 3 * HOUR, fees: [[ago(30 * HOUR), 100], [ago(20 * HOUR), 60]] });
 	assert.equal(demoted.verdict, 'maybe');
-	assert.match(demoted.reason, /^others undercut within ~3 h/);
+	assert.equal(demoted.reason, `fee ${(60 / demoted.expectedGainBeforeUndercut).toFixed(1)}× gain`);
+	assert.match(demoted.reason, /^fee \d+\.\d× gain$/);
 	// no volume at all: days behind unknown, so not leave either
 	assert.equal(verdictRow({ ahead: 1, trade: 1, history: [historyDay(40, 1, 1)] }).verdict, 'maybe');
 });
@@ -671,11 +682,13 @@ test('verdict reconsider: matching nets no more than the landed cost, or under t
 	assert.equal(belowCost.matchPrice, 200);
 	assert.equal(belowCost.marginIfMatch, 0);
 	assert.equal(belowCost.verdict, 'reconsider');
-	assert.equal(belowCost.reason, 'below cost');
+	assert.equal(belowCost.reason, '1.00x');
+	assert.equal(belowCost.reasonText, 'matching returns 1.00x the landed cost, at or below cost');
 
 	const belowFloor = verdictRow({ ahead: 4, trade: 3, landed: 100.01 }); // 150 / 100.01 < 1.5
 	assert.equal(belowFloor.verdict, 'reconsider');
-	assert.equal(belowFloor.reason, 'below the ROI floor');
+	assert.equal(belowFloor.reason, '1.49x'); // 1.49985, cut rather than rounded up to the floor
+	assert.equal(belowFloor.reasonText, 'matching returns 1.49x the landed cost, under the 1.5x floor');
 
 	const atFloor = verdictRow({ ahead: 4, trade: 3, landed: 100 }); // 150 / 100 = 1.5: not below
 	assert.equal(atFloor.roiIfMatch, 0.5);
@@ -692,11 +705,13 @@ test('verdict undercut from undercutDays behind (inclusive); maybe below it', ()
 	const at = verdictRow({ ahead: 16, trade: 3 });
 	assert.equal(at.daysBehind, 2);
 	assert.equal(at.verdict, 'undercut');
-	assert.equal(at.reason, '2 d behind');
+	assert.equal(at.reason, '2d');
+	assert.equal(at.reasonText, '16 units ahead at 8 a day: 2 days behind');
 	const below = verdictRow({ ahead: 15, trade: 3 });
 	assert.equal(below.daysBehind, 15 / 8);
 	assert.equal(below.verdict, 'maybe');
-	assert.equal(below.reason, '1.9 d behind');
+	assert.equal(below.reason, '1.9d');
+	assert.equal(below.reasonText, '15 units ahead at 8 a day: 1.9 days behind');
 });
 
 test('verdict undercut is demoted to maybe when the expected gain before the next undercut is below the fee', () => {
@@ -709,7 +724,8 @@ test('verdict undercut is demoted to maybe when the expected gain before the nex
 	assert.equal(demoted.expectedGainBeforeUndercut, 50);
 	assert.equal(demoted.feeEstimate, 60);
 	assert.equal(demoted.verdict, 'maybe');
-	assert.equal(demoted.reason, 'others undercut within ~3 h; the fee outweighs the expected sales');
+	assert.equal(demoted.reason, 'fee 1.2× gain');
+	assert.equal(demoted.reasonText, 'about 1 unit sells in the ~3 hours before others undercut again, worth ~50 ISK against a ~60 ISK fee');
 
 	const kept = verdictRow({ ...spec, fees: [[ago(30 * HOUR), 100], [ago(20 * HOUR), 40]] });
 	assert.equal(kept.verdict, 'undercut');
@@ -1033,7 +1049,7 @@ test('a type with no book, history, log, lots or fees still gets its row, with n
 	}
 	assert.equal(r.listedFor, 6 * HOUR); // from its issued when nothing else is known
 	assert.equal(r.verdict, 'maybe');
-	assert.equal(r.reason, 'no book yet');
+	assert.equal(r.reason, 'no book');
 	assert.deepEqual(r.badges, ['nolog', 'nobook', 'nobooklog', 'nohistory', 'nocost', 'nofee']);
 	assert.ok(out.warnings.some(w => w.includes('no order log')));
 });
@@ -1064,4 +1080,350 @@ test('helpers: median, priceAt', () => {
 	assert.equal(priceAt(rec, 50), 10);
 	assert.equal(priceAt(rec, 260), 9); // issued dates the price, though it was seen only at 300
 	assert.equal(priceAt(rec, 401), null);
+});
+
+//--- Phase 5: own-order state from the book (decision 16)
+
+// Our order 21 at 110 from 20 h ago, 5 left, as the orders feed (fetched 15 min ago) and its log say.
+const stateInput = ({ bookRow = null, bookAt = ago(3 * MIN), feedAt = ago(15 * MIN), loc = D, extra = [] } = {}) => {
+	const feedRow = mine({ id: 21, price: 110, remain: 5, issued: ago(20 * HOUR), loc });
+	return {
+		openOrders: { [GRANT]: feedAt === null ? [feedRow] : { fetchedAt: feedAt, orders: [feedRow] } },
+		orderLogs: { [GRANT]: { 21: { ...logEntry({ loc, path: [[ago(19 * HOUR), 110, 5, ago(20 * HOUR)]] }), lastSeen: ago(15 * MIN) } } },
+		books: { [T]: { [REGION]: bookOf([...(bookRow === null ? [] : [theirs({ id: 21, total: 5, loc, ...bookRow })]), ...extra], bookAt) } }
+	};
+};
+
+test('book state: a later issued in the book gives the row its price, remain and issued; the feed is kept beside it', () => {
+	const ahead = theirs({ id: 601, price: 105, remain: 2, issued: ago(30 * HOUR) });
+	const out = run(stateInput({ bookRow: { price: 100, remain: 4, issued: ago(5 * MIN) }, extra: [ahead] }));
+	const r = rowOf(out, 21);
+	assert.equal(r.stateFrom, 'book');
+	assert.equal(r.stateAt, ago(3 * MIN));
+	assert.deepEqual(r.feed, { price: 110, volumeRemain: 5, issued: ago(20 * HOUR), fetchedAt: ago(15 * MIN) });
+	assert.equal(r.price, 100);
+	assert.equal(r.volumeRemain, 4);
+	assert.equal(r.volumeTotal, 5);
+	assert.equal(r.issued, ago(5 * MIN));
+	// every later rule reads the merged state: at the feed's 110 the order at 105 was ahead
+	assert.equal(r.ordersAhead, 0);
+	assert.equal(r.verdict, 'top');
+	assert.equal(r.onTopFor, 5 * MIN);
+	assert.equal(r.relistCount, 1);
+	assert.ok(!r.badges.includes('notInBook'));
+	// the unit gone since the log's last entry is a pending fill, seen at the book's fetch
+	assert.deepEqual(out.pending.map(p => [p.orderId, p.qty, p.date, p.unitPrice]), [[21, 1, ago(3 * MIN), 100]]);
+	assert.equal(out.asOf.orders, ago(15 * MIN)); // asOf is the feed's still
+
+	const feedOnly = rowOf(run({ ...stateInput(), books: {} }), 21);
+	assert.equal(feedOnly.stateFrom, 'orders');
+	assert.equal(feedOnly.stateAt, ago(15 * MIN));
+	assert.equal(feedOnly.feed, null);
+	assert.equal(feedOnly.price, 110);
+	assert.equal(feedOnly.issued, ago(20 * HOUR));
+});
+
+test('book state: at the same issued a lower remain from a later fetch is a fill; the pending drop is dated at the book', () => {
+	const sameIssued = { price: 110, remain: 3, issued: iso(NOW_MS - 20 * HOUR + 1000) }; // the book's 1 s jitter
+	const out = run(stateInput({ bookRow: sameIssued }));
+	const r = rowOf(out, 21);
+	assert.equal(r.stateFrom, 'book');
+	assert.equal(r.stateAt, ago(3 * MIN));
+	assert.equal(r.volumeRemain, 3);
+	assert.equal(r.price, 110);
+	assert.equal(r.issued, ago(20 * HOUR)); // the feed's: the same issued
+	assert.deepEqual(r.feed, { price: 110, volumeRemain: 5, issued: ago(20 * HOUR), fetchedAt: ago(15 * MIN) });
+	assert.equal(r.relistCount, 0);
+	// dated at the book's fetch, not at the feed's (15 min ago)
+	assert.deepEqual(out.pending.map(p => [p.qty, p.date]), [[2, ago(3 * MIN)]]);
+	assert.equal(r.lastFillAt, ago(3 * MIN));
+
+	// a book fetched before the feed: the feed's state
+	const older = rowOf(run(stateInput({ bookRow: sameIssued, bookAt: ago(20 * MIN) })), 21);
+	assert.equal(older.stateFrom, 'orders');
+	assert.equal(older.volumeRemain, 5);
+	assert.equal(older.stateAt, ago(15 * MIN));
+	assert.equal(older.feed, null);
+
+	// no feed time: the log's lastSeen (15 min ago) stands in for it; stateAt of a feed row is null
+	assert.equal(rowOf(run(stateInput({ bookRow: sameIssued, feedAt: null })), 21).stateFrom, 'book');
+	const noTime = rowOf(run(stateInput({ bookRow: sameIssued, feedAt: null, bookAt: ago(20 * MIN) })), 21);
+	assert.equal(noTime.stateFrom, 'orders');
+	assert.equal(noTime.stateAt, null);
+});
+
+test('book state: the feed stands when the book is older, the same or only jittered by a second', () => {
+	// the book still shows the price before ours (an earlier issued)
+	const stale = rowOf(run(stateInput({ bookRow: { price: 120, remain: 5, issued: ago(30 * HOUR) } })), 21);
+	assert.equal(stale.stateFrom, 'orders');
+	assert.equal(stale.price, 110);
+	// the same state, the issued 1 s later: the same issued (ISSUED_EPS), nothing newer
+	const jitter = rowOf(run(stateInput({ bookRow: { price: 110, remain: 5, issued: iso(NOW_MS - 20 * HOUR + 1000) } })), 21);
+	assert.equal(jitter.stateFrom, 'orders');
+	assert.equal(jitter.feed, null);
+	assert.equal(jitter.issued, ago(20 * HOUR));
+	assert.equal(jitter.relistCount, 0);
+	// a higher remain in the book at the same issued is never newer (decision 13)
+	assert.equal(rowOf(run(stateInput({ bookRow: { price: 110, remain: 6, issued: ago(20 * HOUR) } })), 21).stateFrom, 'orders');
+	// more than 2 s later is a new issued
+	assert.equal(rowOf(run(stateInput({ bookRow: { price: 110, remain: 5, issued: iso(NOW_MS - 20 * HOUR + 3000) } })), 21).stateFrom, 'book');
+});
+
+test('notInBook: a book a minute newer than the feed row that no longer lists the order, at an NPC station only', () => {
+	const other = theirs({ id: 602, price: 100, remain: 2, issued: ago(30 * HOUR) });
+	const gone = rowOf(run(stateInput({ extra: [other] })), 21);
+	assert.ok(gone.badges.includes('notInBook'));
+	assert.equal(gone.stateFrom, 'orders');
+	assert.equal(gone.price, 110); // figures on the feed
+	const listed = rowOf(run(stateInput({ bookRow: { price: 110, remain: 5, issued: ago(20 * HOUR) }, extra: [other] })), 21);
+	assert.equal(gone.verdict, listed.verdict);
+	assert.equal(gone.unitsAhead, listed.unitsAhead);
+	assert.ok(!listed.badges.includes('notInBook'));
+
+	// a structure's book is not public: an absent order says nothing
+	const citadel = 1035466617946;
+	const structure = rowOf(run(stateInput({ loc: citadel, extra: [theirs({ id: 602, price: 100, remain: 2, issued: ago(30 * HOUR), loc: citadel })] })), 21);
+	assert.ok(!structure.badges.includes('notInBook'));
+	// a book only 30 s newer than the feed row may predate the order's listing
+	assert.ok(!rowOf(run(stateInput({ feedAt: ago(3 * MIN), bookAt: ago(2.5 * MIN), extra: [other] })), 21).badges.includes('notInBook'));
+	// without a feed time, the log's lastSeen (15 min ago) dates the row
+	assert.ok(rowOf(run(stateInput({ feedAt: null, extra: [other] })), 21).badges.includes('notInBook'));
+	// no book at all: nobook, not notInBook
+	const noBook = rowOf(run({ ...stateInput(), books: {} }), 21);
+	assert.ok(noBook.badges.includes('nobook'));
+	assert.ok(!noBook.badges.includes('notInBook'));
+});
+
+//--- Phase 5: rule 3 and rule 5 against re-issued orders (a competitor's issued moves at the same price)
+
+test('undercut: a competitor below us since before our issued, re-issued at the same price after it, is no undercutter', () => {
+	const order = mine({ id: 1, price: 100 * M, remain: 5, issued: ago(10 * HOUR) });
+	const input = { openOrders: { [GRANT]: [order] }, books: { [T]: { [REGION]: bookOf([theirs({ id: 311, price: 99 * M, remain: 1, issued: ago(2 * HOUR) })]) } } };
+	// without a book-log record of it, its current issued decides
+	assert.equal(rowOf(run(input), 1).undercutAt, ago(2 * HOUR));
+
+	const samples = [{ at: ago(30 * HOUR), stored: true }, { at: ago(1 * HOUR), stored: true }];
+	const reissued = { samples, orders: { 311: bookLogOrder({ path: [[ago(30 * HOUR), 99 * M, 1, ago(31 * HOUR)], [ago(1 * HOUR), 99 * M, 1, ago(2 * HOUR)]] }) } };
+	const r = rowOf(run({ ...input, bookLogs: { [T]: { [REGION]: reissued } } }), 1);
+	assert.equal(r.ordersAhead, 1);
+	assert.equal(r.undercutAt, null);
+	assert.equal(r.undercutBy, null);
+	assert.equal(r.reUndercuts, null);
+
+	// below us when we listed, above us at 9 h, below again 2 h ago: an undercut after all
+	const back = { samples, orders: { 311: bookLogOrder({ path: [
+		[ago(30 * HOUR), 99 * M, 1, ago(31 * HOUR)], [ago(8 * HOUR), 101 * M, 1, ago(9 * HOUR)], [ago(1 * HOUR), 99 * M, 1, ago(2 * HOUR)]
+	] }) } };
+	const r2 = rowOf(run({ ...input, bookLogs: { [T]: { [REGION]: back } } }), 1);
+	assert.equal(r2.undercutAt, ago(2 * HOUR));
+	assert.equal(r2.undercutBy.orderId, 311);
+});
+
+test('time on top: an episode listed behind a cheaper competitor never was on top; a same-price re-issue is no undercut', () => {
+	// our 15: 100 M from 30 h ago behind 316 at 95 M (there since 40 h), 94 M from 20 h ago; 316 re-issued at 95 M 5 h ago
+	const input = {
+		openOrders: { [GRANT]: [mine({ id: 15, price: 94 * M, remain: 1, issued: ago(20 * HOUR) })] },
+		orderLogs: { [GRANT]: { 15: logEntry({ path: [[ago(29 * HOUR), 100 * M, 1, ago(30 * HOUR)], [ago(19 * HOUR), 94 * M, 1, ago(20 * HOUR)]] }) } },
+		books: { [T]: { [REGION]: bookOf([theirs({ id: 316, price: 95 * M, issued: ago(5 * HOUR) })]) } },
+		bookLogs: { [T]: { [REGION]: { samples: [{ at: ago(40 * HOUR), stored: true }, { at: ago(1 * HOUR), stored: true }], orders: {
+			316: bookLogOrder({ path: [[ago(39 * HOUR), 95 * M, 1, ago(40 * HOUR)], [ago(4 * HOUR), 95 * M, 1, ago(5 * HOUR)]] })
+		} } } }
+	};
+	const out = run(input);
+	const byT = out.timeOnTop.byType[T];
+	const [behind, onTop] = byT.list;
+	assert.equal(behind.price, 100 * M);
+	assert.equal(behind.startedBehind, true);
+	assert.equal(behind.timeOnTop, 0);
+	assert.equal(behind.undercut, false);
+	assert.equal(behind.undercutAt, null);
+	assert.equal(onTop.startedBehind, false);
+	assert.equal(onTop.undercut, false); // 95 M is above 94 M, re-issued or not
+	assert.equal(onTop.timeOnTop, 20 * HOUR);
+	assert.equal(byT.episodes, 1); // the stats leave the startedBehind episode out
+	assert.deepEqual(out.timeOnTop.overall, { episodes: 1, undercutEpisodes: 0, medianTimeOnTop: null, est: false });
+	assert.equal(rowOf(out, 15).episodes, 1);
+	assert.equal(rowOf(out, 15).onTopFor, 20 * HOUR);
+
+	// firstUndercut takes a price change (or an order's first entry) below us, never a same-price re-issue
+	const { firstUndercut } = ordersCalc._internal;
+	const ep = { start: 100, price: 10, end: 1000 };
+	const comp = (path) => ({ orderId: 9, path: path.map(([issuedMs, price]) => ({ atMs: issuedMs, price, volumeRemain: 1, issuedMs })) });
+	assert.equal(firstUndercut(ep, [comp([[50, 9], [300, 9]])]), null);
+	assert.deepEqual(firstUndercut(ep, [comp([[50, 11], [300, 9], [400, 9]])]), { at: 300, orderId: 9, price: 9 });
+	assert.deepEqual(firstUndercut(ep, [comp([[300, 9]])]), { at: 300, orderId: 9, price: 9 });
+	assert.equal(firstUndercut(ep, [comp([[50, 11], [300, 11]])]), null);
+});
+
+test('onTopFor: an order listed behind a cheaper one is on top since that order left the book, not since its issued', () => {
+	// our 17 at 100 M from 30 h ago behind 317 at 95 M (there since 40 h); 317 last seen 6 h ago, gone by the 5 h sample
+	const out = run({
+		openOrders: { [GRANT]: { fetchedAt: ago(5 * MIN), orders: [mine({ id: 17, price: 100 * M, remain: 1, issued: ago(30 * HOUR) })] } },
+		orderLogs: { [GRANT]: { 17: logEntry({ path: [[ago(29 * HOUR), 100 * M, 1, ago(30 * HOUR)]] }) } },
+		books: { [T]: { [REGION]: bookOf([theirs({ id: 17, price: 100 * M, remain: 1, issued: ago(30 * HOUR) })], ago(4 * MIN)) } },
+		bookLogs: { [T]: { [REGION]: { samples: [ago(40 * HOUR), ago(6 * HOUR), ago(5 * HOUR)].map(at => ({ at, stored: true })), orders: {
+			317: bookLogOrder({ path: [[ago(39 * HOUR), 95 * M, 1, ago(40 * HOUR)], [ago(6 * HOUR), 95 * M, 1, ago(40 * HOUR)]] })
+		} } } }
+	});
+	const r = rowOf(out, 17);
+	assert.equal(r.verdict, 'top');
+	assert.equal(out.timeOnTop.byType[T].list[0].startedBehind, true);
+	assert.equal(r.onTopFor, 5 * HOUR); // now less 317's goneMs, not now less our issued (30 h)
+	assert.equal(out.timeOnTop.byType[T].onTopFor, 5 * HOUR);
+	assert.deepEqual(out.presence[T].segments.slice(-1).map(g => [g.from, g.to, g.state]), [[ago(5 * HOUR), NOW, 'top']]);
+});
+
+//--- Phase 5: presence (decision 18)
+
+// Type T over a 2-day window (hours ago): our 12 at 120 M, open from 50 h until filled at 44 h; no order
+// of ours from 44 h to 40 h; our 11 at 100 M from 40 h and at 94 M from 10 h. The book log starts at
+// 46 h. 901 sits at 130 M throughout; 902 comes in at 99 M at 30 h, re-issues at the same price at 25 h,
+// drops to 93 M at 5 h and is gone by the 2 h sample (last seen 3 h ago); 903 comes in at 98 M at 20 h;
+// 904 sits at 90 M at another station from 35 h. Our 13 (type T2) ended 72 h ago.
+const presenceFixture = () => {
+	const later = (rec, lastSeen) => ({ ...rec, lastSeen });
+	return {
+		openOrders: { [GRANT]: { fetchedAt: ago(5 * MIN), orders: [mine({ id: 11, price: 94 * M, remain: 1, issued: ago(10 * HOUR) })] } },
+		orderLogs: { [GRANT]: {
+			11: logEntry({ path: [[ago(39 * HOUR), 100 * M, 1, ago(40 * HOUR)], [ago(9 * HOUR), 94 * M, 1, ago(10 * HOUR)]] }),
+			12: logEntry({ path: [[ago(49 * HOUR), 120 * M, 1, ago(50 * HOUR)]], end: { state: 'expired', volumeRemain: 0, at: ago(44 * HOUR) } }),
+			13: logEntry({ type: T2, path: [[ago(80 * HOUR), 50 * M, 1, ago(80 * HOUR)]], end: { state: 'expired', volumeRemain: 0, at: ago(72 * HOUR) } })
+		} },
+		bookLogs: { [T]: { [REGION]: { samples: [ago(46 * HOUR), ago(2 * HOUR), ago(1 * HOUR)].map(at => ({ at, stored: true })), orders: {
+			11: bookLogOrder({ path: [[ago(39 * HOUR), 100 * M, 1, ago(40 * HOUR)], [ago(9 * HOUR), 94 * M, 1, ago(10 * HOUR)]] }), // ours
+			901: later(bookLogOrder({ path: [[ago(46 * HOUR), 130 * M, 1, ago(70 * HOUR)]] }), ago(1 * HOUR)),
+			902: later(bookLogOrder({ path: [
+				[ago(29 * HOUR), 99 * M, 1, ago(30 * HOUR)], [ago(24 * HOUR), 99 * M, 1, ago(25 * HOUR)], [ago(4 * HOUR), 93 * M, 1, ago(5 * HOUR)]
+			] }), ago(3 * HOUR)),
+			903: later(bookLogOrder({ path: [[ago(19 * HOUR), 98 * M, 1, ago(20 * HOUR)]] }), ago(1 * HOUR)),
+			904: later(bookLogOrder({ loc: ELSEWHERE, path: [[ago(34 * HOUR), 90 * M, 1, ago(35 * HOUR)]] }), ago(1 * HOUR))
+		} } } },
+		thresholds: { windowMs: 2 * DAY }
+	};
+};
+const segRow = (g) => [g.from, g.to, g.state, g.known, g.orderIds, g.below, g.lowestBelow, g.cause];
+
+test('presence: listed, undercut, re-priced on top, undercut and cleared; unknown before the book log; a gap with no order', () => {
+	const out = run(presenceFixture());
+	assert.deepEqual(Object.keys(out.presence).map(Number), [T]); // 13 ended before the window
+	assert.equal(out.presence[T].bookLogSince, ago(46 * HOUR));
+	assert.deepEqual(out.presence[T].segments.map(segRow), [
+		[ago(48 * HOUR), ago(46 * HOUR), 'listed', false, [12], null, null, 'unknown'],  // the window's edge, before the book log
+		[ago(46 * HOUR), ago(44 * HOUR), 'top', true, [12], 0, null, 'unknown'],         // the book log's first sample
+		// 44 h to 40 h: a gap, no sell order of ours
+		[ago(40 * HOUR), ago(30 * HOUR), 'top', true, [11], 0, null, 'listed'],
+		[ago(30 * HOUR), ago(20 * HOUR), 'listed', true, [11], 1, 99 * M, 'undercut'],   // 902's re-issue at 25 h merges in
+		[ago(20 * HOUR), ago(10 * HOUR), 'listed', true, [11], 2, 98 * M, 'undercut'],
+		[ago(10 * HOUR), ago(5 * HOUR), 'top', true, [11], 0, null, 'ourPrice'],
+		[ago(5 * HOUR), ago(2 * HOUR), 'listed', true, [11], 1, 93 * M, 'undercut'],
+		[ago(2 * HOUR), NOW, 'top', true, [11], 0, null, 'cleared']
+	]);
+});
+
+test('presence: region scope counts the cheaper order at another station; a wider window reaches back further', () => {
+	const region = run({ ...presenceFixture(), thresholds: { windowMs: 2 * DAY, scope: 'region' } });
+	assert.deepEqual(region.presence[T].segments.map(g => [g.from, g.state, g.below, g.lowestBelow, g.cause]), [
+		[ago(48 * HOUR), 'listed', null, null, 'unknown'],
+		[ago(46 * HOUR), 'top', 0, null, 'unknown'],
+		[ago(40 * HOUR), 'top', 0, null, 'listed'],
+		[ago(35 * HOUR), 'listed', 1, 90 * M, 'undercut'],
+		[ago(30 * HOUR), 'listed', 2, 90 * M, 'undercut'],
+		[ago(20 * HOUR), 'listed', 3, 90 * M, 'undercut'],
+		[ago(10 * HOUR), 'listed', 1, 90 * M, 'ourPrice'],
+		[ago(5 * HOUR), 'listed', 2, 90 * M, 'undercut'],
+		[ago(2 * HOUR), 'listed', 1, 90 * M, 'cleared']
+	]);
+
+	// a 7-day window: 12 from its opening at 50 h; 13 (no book log of T2) unknown over its whole span
+	const wide = run({ ...presenceFixture(), thresholds: { windowMs: 7 * DAY } });
+	assert.deepEqual(segRow(wide.presence[T].segments[0]), [ago(50 * HOUR), ago(46 * HOUR), 'listed', false, [12], null, null, 'listed']);
+	assert.deepEqual(wide.presence[T2], {
+		segments: [{ from: ago(80 * HOUR), to: ago(72 * HOUR), state: 'listed', known: false, orderIds: [13], below: null, lowestBelow: null, cause: 'listed' }],
+		bookLogSince: null
+	});
+	// an order of ours while another is open: 'listed' when it comes in, 'ended' when one of two goes
+	const two = presenceFixture();
+	two.orderLogs[GRANT][14] = logEntry({ path: [[ago(14 * HOUR), 97 * M, 1, ago(15 * HOUR)]], end: { state: 'cancelled', volumeRemain: 1, at: ago(12 * HOUR) } });
+	const withTwo = run(two).presence[T].segments.map(g => [g.from, g.state, g.orderIds, g.below, g.cause]);
+	assert.deepEqual(withTwo.slice(5, 8), [
+		[ago(15 * HOUR), 'top', [11, 14], 0, 'listed'],   // 14 at 97 M is under 902 (99 M) and 903 (98 M)
+		[ago(12 * HOUR), 'listed', [11], 2, 'ended'],    // 11 at 100 M is left behind both
+		[ago(10 * HOUR), 'top', [11], 0, 'ourPrice']
+	]);
+});
+
+//--- Phase 5: reason tokens (decision 21)
+
+test('fmtCompactDuration: minutes, hours and days, one decimal under 10, no space', () => {
+	const f = ordersCalc.fmtCompactDuration;
+	assert.equal(f(0), '<1min');
+	assert.equal(f(MIN - 1), '<1min');
+	assert.equal(f(MIN), '1min');
+	assert.equal(f(35 * MIN), '35min');
+	assert.equal(f(59.4 * MIN), '59min');
+	assert.equal(f(HOUR), '1h');
+	assert.equal(f(1.1 * HOUR), '1.1h');
+	assert.equal(f(9.94 * HOUR), '9.9h');
+	assert.equal(f(12 * HOUR), '12h');
+	assert.equal(f(23.4 * HOUR), '23h');
+	assert.equal(f(DAY), '1d');
+	assert.equal(f(2.6 * DAY), '2.6d');
+	assert.equal(f(14 * DAY), '14d');
+	assert.equal(f(null), '');
+	assert.equal(f(NaN), '');
+});
+
+test('reason tokens and their sentences for every verdict branch', () => {
+	const cases = [
+		[{ ahead: 13, trade: 3, history: flatHistory(5) }, {}, 'undercut', '2.6d', '13 units ahead at 5 a day: 2.6 days behind'],
+		[{ ahead: 1, trade: 1 }, {}, 'leave', '3h', '1 unit ahead at 8 a day: the queue ahead clears in about 3 hours'],
+		[{ ahead: 1, trade: 2 }, { thresholds: { leaveHours: 1 } }, 'leave', '50%', '1 unit ahead is 50 % of a typical trade of 2 units'],
+		[{ ahead: 4, trade: 3, landed: 120 }, {}, 'reconsider', '1.25x', 'matching returns 1.25x the landed cost, under the 1.5x floor'],
+		[{ ahead: 4, trade: 3, landed: 161 }, {}, 'reconsider', '0.93x', 'matching returns 0.93x the landed cost, at or below cost'],
+		[{ ahead: 16, trade: 3, episode: 3 * HOUR, fees: [[ago(30 * HOUR), 100], [ago(20 * HOUR), 165]] }, {}, 'maybe', 'fee 3.3× gain',
+			'about 1 unit sells in the ~3 hours before others undercut again, worth ~50 ISK against a ~165 ISK fee'],
+		[{ ahead: 12, trade: 3 }, {}, 'maybe', '1.5d', '12 units ahead at 8 a day: 1.5 days behind'],
+		[{ ahead: 16, trade: 3, history: [] }, {}, 'maybe', 'no history', 'no market history of this item, so how long the queue ahead takes is unknown'],
+		[{ ahead: 16, trade: 3, history: [historyDay(40, 1, 1)] }, {}, 'maybe', 'no volume', 'no volume in the history window, so the queue ahead may never clear'],
+		[{ ahead: 0 }, {}, 'top', '', 'nothing is priced below this order']
+	];
+	for (const [spec, over, verdict, reason, reasonText] of cases) {
+		const r = verdictRow(spec, over);
+		assert.deepEqual([r.verdict, r.reason, r.reasonText], [verdict, reason, reasonText], JSON.stringify(spec));
+	}
+	const noBook = rowOf(run({ openOrders: { [GRANT]: [mine({ id: 1, price: 100, remain: 1, issued: ago(HOUR) })] } }), 1);
+	assert.deepEqual([noBook.verdict, noBook.reason, noBook.reasonText], ['maybe', 'no book', 'no book of this item yet, so its place in the queue is unknown']);
+	// larger figures are grouped, ISK to three significant figures
+	const { verdictOf } = ordersCalc._internal;
+	const big = verdictOf({
+		ordersAhead: 3, unitsAhead: 1234, dailyVolume: 100, daysBehind: 12.34, typicalTrade: 5, landedCost: null, matchPrice: 99,
+		taxRate: 0.04, expectedSalesBeforeUndercut: 0.2, expectedGainBeforeUndercut: 50123, feeEstimate: 165843, medianTimeOnTop: 3 * HOUR
+	}, defaultThresholds);
+	assert.deepEqual(big, { verdict: 'maybe', reason: 'fee 3.3× gain', reasonText: 'about 0.2 units sell in the ~3 hours before others undercut again, worth ~50,100 ISK against a ~166,000 ISK fee' });
+	const behind = verdictOf({ ordersAhead: 3, unitsAhead: 1234, dailyVolume: 100, daysBehind: 12.34, typicalTrade: 5, landedCost: null, matchPrice: 99, expectedGainBeforeUndercut: null, feeEstimate: null }, defaultThresholds);
+	assert.deepEqual(behind, { verdict: 'undercut', reason: '12d', reasonText: '1,234 units ahead at 100 a day: 12 days behind' });
+});
+
+//--- Phase 5: the lots behind a row (decision 22)
+
+test('row.lots: the type\'s lots with units left, newest first, as facts.lots gives them', () => {
+	const lots = [
+		{ lotId: 'a', runId: 'r1', typeId: T, qty: 3, soldQty: 3, remainingQty: 0, unitPrice: 50, date: ago(5 * DAY) }, // sold out
+		{ lotId: 'b', runId: 'r1', typeId: T, qty: 4, soldQty: 1, remainingQty: 3, unitPrice: 60, date: ago(4 * DAY) },
+		{ lotId: 'c', typeId: T, qty: 2, soldQty: 0, unitPrice: 70, date: ago(1 * DAY) },                                // no run, no remainingQty
+		{ lotId: 'd', runId: 'r2', typeId: T, qty: 1, soldQty: 0, remainingQty: 1, unitPrice: 80, date: ago(2 * DAY) },
+		{ lotId: 'e', runId: 'r3', typeId: T2, qty: 9, soldQty: 0, remainingQty: 9, unitPrice: 1, date: ago(0.5 * DAY) }
+	];
+	const out = run({
+		openOrders: { [GRANT]: [mine({ id: 1, price: 100, remain: 1, issued: ago(HOUR) }), mine({ id: 2, type: T3, price: 100, remain: 1, issued: ago(HOUR) })] },
+		facts: { sells: [], lots, relists: [] }
+	});
+	const r = rowOf(out, 1);
+	assert.deepEqual(r.lots, [
+		{ lotId: 'c', runId: null, remainingQty: 2, date: ago(1 * DAY) },
+		{ lotId: 'd', runId: 'r2', remainingQty: 1, date: ago(2 * DAY) },
+		{ lotId: 'b', runId: 'r1', remainingQty: 3, date: ago(4 * DAY) }
+	]);
+	assert.equal(r.landedUnits, 6); // the same remainder the landed cost is taken over
+	assert.deepEqual(rowOf(out, 2).lots, []);
 });

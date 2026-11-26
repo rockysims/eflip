@@ -1,8 +1,11 @@
-// orders.js: the order monitor page (orders.html). Phase 3 of docs/order-monitor-plan.md ("UI").
+// orders.js: the order monitor page (orders.html). Phases 3 and 5 of docs/order-monitor-plan.md ("UI", "Page
+// contract").
 //
 // What it shows: the linked characters' open sell orders, each with where it stands in the queue, whether
 // and since when it was undercut, how fast others undercut it, what updating it would earn, and a verdict;
-// and what sold recently, as a timeline of sale clusters. Every figure is the user's own ESI data or ESI
+// and what sold recently, as a timeline of sale clusters with a total per item and, per item row, lines for
+// when we were listed and on top; and per order or sales row, the export run that planned it (a snapshot
+// panel). Every figure is the user's own ESI data or ESI
 // market data, read through the server's /api routes (no token ever reaches this page); the analysis is
 // orders-calc.js (pure, tested), the FIFO costs behind it are results-calc.js, and this file only loads,
 // asks, and draws.
@@ -39,11 +42,12 @@
 	const REDRAW_MS = MIN_MS;               // relative times and the timeline's right edge move on
 	const MARKET_CHUNK = 100;               // items per /api/market call (each answer carries their book logs)
 	const LOGIN_URL = '/sso/login?return=/orders.html';
+	// every duration on the page is compact, with no space before the unit (decision 21): '24h', '2.6d', '35min'
 	const WINDOWS = [
-		{ key: '24h', label: '24 h', ms: DAY_MS },
-		{ key: '2d', label: '2 d', ms: 2 * DAY_MS },
-		{ key: '7d', label: '7 d', ms: 7 * DAY_MS },
-		{ key: '30d', label: '30 d', ms: 30 * DAY_MS }
+		{ key: '24h', label: '24h', ms: DAY_MS },
+		{ key: '2d', label: '2d', ms: 2 * DAY_MS },
+		{ key: '7d', label: '7d', ms: 7 * DAY_MS },
+		{ key: '30d', label: '30d', ms: 30 * DAY_MS }
 	];
 	const REGION_NAMES = { Jita: 'The Forge', Amarr: 'Domain', Dodixie: 'Sinq Laison', Rens: 'Heimatar', Stacmon: 'Placid' };
 
@@ -53,6 +57,7 @@
 	const SURFACE = '#fcfcfb';
 	const GRID = '#e1e0d9';
 	const STRIPE = '#f4f3ef';
+	const AXIS = '#c3c2b7';
 	const PROFIT = '#2a78d6';
 	const LOSS = '#e34948';
 	const PLOT_STYLE = { background: 'transparent', color: INK2, fontSize: '12px', overflow: 'visible' };
@@ -60,17 +65,28 @@
 	//--- small formatting helpers
 
 	const price = (v) => (isNum(v) ? nf2.format(v) : DASH); // an exact price: a tick of 0.01 or 10 ISK must stay visible
+	// A duration the way the verdict reasons write it (decision 21): '<1min', '35min', '1.1h', '2.6d'; one decimal
+	// under 10, no space. The module's fmtCompactDuration when it has one, so both read alike; else the same here.
+	const compactDuration = (a) => {
+		if (a < MIN_MS) return '<1min';
+		const min = Math.round(a / MIN_MS);
+		if (min < 60) return `${min}min`;
+		const h = a / HOUR_MS;
+		const hr = h < 10 ? Math.round(h * 10) / 10 : Math.round(h);
+		if (hr < 24) return `${hr}h`;
+		const d = a / DAY_MS;
+		return `${d < 10 ? Math.round(d * 10) / 10 : Math.round(d)}d`;
+	};
 	const dur = (ms) => {
 		if (!isNum(ms)) return DASH;
 		const a = Math.abs(ms);
-		if (a < MIN_MS) return '<1 min';
-		if (a < HOUR_MS) return `${Math.round(a / MIN_MS)} min`;
-		if (a < DAY_MS) {
-			const h = a / HOUR_MS;
-			return `${h < 10 ? Math.round(h * 10) / 10 : Math.round(h)} h`;
+		if (typeof oc.fmtCompactDuration === 'function') {
+			try {
+				const s = oc.fmtCompactDuration(a);
+				if (typeof s === 'string' && s !== '') return s;
+			} catch (e) { /* the page's own form below */ }
 		}
-		const d = a / DAY_MS;
-		return `${d < 10 ? Math.round(d * 10) / 10 : Math.round(d)} d`;
+		return compactDuration(a);
 	};
 	const ageText = (ms, now) => (isNum(ms) ? `${dur(now - ms)} ago` : DASH);
 	const hasMoment = () => typeof moment === 'function';
@@ -136,7 +152,8 @@
 		scope: savedThresholds.scope === 'region' ? 'region' : 'station'
 	};
 	let winKey = WINDOWS.some(w => w.key === store.get('window', null)) ? store.get('window', null) : '7d';
-	let showEvents = store.get('showEvents', false) === true;
+	// the presence lines (decision 18), on by default; the Phase 3 `showEvents` key is ignored
+	let showPresence = store.get('showPresence', true) !== false;
 	let refreshOpen = store.get('refreshOpen', true) !== false;
 	let sort = store.get('sort', { key: null, dir: 'desc' });
 	if (!sort || typeof sort !== 'object') sort = { key: null, dir: 'desc' };
@@ -162,13 +179,15 @@
 	const tbodyEl = $('#orders tbody');
 	const notesEl = $('#notes');
 	const winSegEl = $('#winSeg');
-	const eventsChk = $('#showEvents');
+	const presenceChk = $('#showPresence');
+	const presenceLabelEl = $('#presenceLabel');
 	const soldTotalsEl = $('#soldTotals');
 	const soldLegendEl = $('#soldLegend');
 	const soldBodyEl = $('#soldBody');
 	const soldFootEl = $('#soldFoot');
 	const soldTableEl = $('#soldTable');
 	const tipEl = $('#tip');
+	const snapEl = $('#snap');
 
 	//--- the route (the same choice as the results page: its saved route, else the newest run's, else Jita to Amarr)
 
@@ -468,7 +487,40 @@
 	};
 
 	const STATUS_WORDS = { ok: 'ok', relink: 'needs re-linking', skipped: 'skipped', busy: 'busy with another sync', failed: 'failed', paused: 'paused', 'rate-limited': 'rate-limited' };
-	const summarizeTick = (result) => {
+	const QUIET = new Set(['not-due', 'not-modified']); // a check that brought nothing newer
+	const BOOK_CACHE_MS = 5 * MIN_MS;                   // ESI's cache of a regional book
+
+	// The newest moment the page's books were confirmed by ESI (stored or a 304): ESI's cache gives a newer copy
+	// at most five minutes after it.
+	const newestBookCheck = () => {
+		let best = null;
+		for (const byRegion of Object.values(data.books || {})) {
+			for (const b of Object.values(byRegion || {})) {
+				const ms = b && b.fetchedAt ? Date.parse(b.fetchedAt) : NaN;
+				if (Number.isFinite(ms) && (best === null || ms > best)) best = ms;
+			}
+		}
+		return best;
+	};
+
+	// When ESI can give more after a refresh that found nothing newer (decision 16): the books five minutes
+	// after their last check, each character's orders at the `expires` of its orders feed. No button can fetch
+	// either sooner (ESI serves its cached copy to a forced call too), and the books already list our orders.
+	const quietText = (result, at) => {
+		const bookMs = newestBookCheck();
+		const books = bookMs === null ? 'newer books within 5min' : `newer books from ${clock(Math.max(at, bookMs + BOOK_CACHE_MS))}`;
+		const exp = Object.entries(result.characters || {})
+			.map(([id, c]) => ({ name: (c.name || charName(id)).split(' ')[0], ms: c.expires ? Date.parse(c.expires) : NaN }))
+			.filter(x => Number.isFinite(x.ms))
+			.sort((a, b) => a.ms - b.ms);
+		const clocks = [...new Set(exp.map(x => clock(Math.max(at, x.ms))))];
+		const orders = exp.length === 0 ? 'newer orders within 20min'
+			: clocks.length === 1 ? `newer orders from ${clocks[0]}`
+			: `newer orders from ${exp.map(x => `${clock(Math.max(at, x.ms))} (${x.name})`).join(' and ')}`;
+		return `Refreshed ${clock(at)}: ESI had nothing newer yet. It can give ${books} and ${orders}; the books already carry the current prices of our orders.`;
+	};
+
+	const summarizeTick = (result, at = Date.now()) => {
 		const problems = [];
 		const details = [];
 		for (const [id, c] of Object.entries(result.characters || {})) {
@@ -485,10 +537,12 @@
 		const stop = result.stop;
 		if (stop && isNum(stop.until) && stop.until > Date.now()) problems.push(`paused until ${clock(stop.until)}`);
 		const title = details.join('\n');
-		if (problems.length > 0) return { kind: 'err', text: `Refreshed ${clock(Date.now())}, but ${problems.join('; ')}. The last good data stays on screen.`, title };
-		// ESI answers are cached (orders for up to 20 minutes, books for 5): a refresh inside that window makes no call
-		const quiet = m && !m.calls && Object.values(result.characters || {}).every(c => c.orders === 'not-due' || c.orders === 'not-modified');
-		return { kind: 'ok', text: quiet ? `Refreshed ${clock(Date.now())}: ESI had nothing newer for the orders and books yet (they are cached for up to 20 min and 5 min)` : `Refreshed ${clock(Date.now())}`, title };
+		if (problems.length > 0) return { kind: 'err', text: `Refreshed ${clock(at)}, but ${problems.join('; ')}. The last good data stays on screen.`, title };
+		// ESI answers are cached (orders for up to 20 minutes, books for 5): a refresh inside that window brings
+		// nothing newer, whether it made no call (not due) or ESI answered "not modified"
+		const quiet = Object.values(result.characters || {}).every(c => QUIET.has(c.orders))
+			&& (!m || asArray(m.types).every(t => QUIET.has(t.outcome)));
+		return { kind: 'ok', text: quiet ? quietText(result, at) : `Refreshed ${clock(at)}`, title };
 	};
 
 	const pausedUntil = () => {
@@ -533,14 +587,18 @@
 		renderStatusLine();
 		let watchNote = null;
 		if (!skipWatch) {
+			let result = null;
+			let at = Date.now();
 			try {
-				const result = await api('/api/watch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+				result = await api('/api/watch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+				at = Date.now();
 				data.watch = { ...result, running: false };
-				watchNote = summarizeTick(result);
 			} catch (e) {
 				watchNote = { kind: 'err', text: `Could not refresh: the server answered \u201c${e.message}\u201d. The figures below are from the last good read${refreshOpen ? `; the next try is at ${clock(Date.now() + REFRESH_MS)}` : '; press Refresh now to try again'}.` };
 			}
 			await loadOrdersData();
+			// summed up once the books are read again: a quiet refresh names when the newest of them can be newer
+			if (result) watchNote = summarizeTick(result, at);
 		}
 		const sales = await syncSales();
 		if (sales.ran) await loadOrdersData({ reloadLedger: true });
@@ -654,7 +712,12 @@
 			asOfSpan('books', a.books, BOOKS_STALE_MS, 'when the books of the listed items were last read from ESI (amber past 10 minutes)'),
 			salesSyncedSpan(a.transactions)
 		];
-		setHtml(statusLineEl, `${parts[0]} <span class="dim">&middot;</span> ${parts[1]} <span class="dim">&middot;</span> ${parts[2]} <span class="dim">(ESI holds sales back up to an hour)</span> <span class="dim">&middot;</span> <span>${next}</span>`);
+		// orders whose state the public book has newer than the orders feed (decision 16)
+		const newer = data.result.rows.filter(r => r.stateFrom === 'book').length;
+		const newerHtml = newer > 0
+			? ` <span class="dim">&middot;</span> <span class="st" title="${esc(`The public book lists a newer price or fewer units left for ${newer === 1 ? 'this order' : 'these orders'} than the orders feed, which ESI caches for up to 20 minutes. Those figures are underlined dotted in the table; the tooltip says which source says what.`)}">${esc(plural(newer, 'order'))} newer per the books</span>`
+			: '';
+		setHtml(statusLineEl, `${parts[0]} <span class="dim">&middot;</span> ${parts[1]}${newerHtml} <span class="dim">&middot;</span> ${parts[2]} <span class="dim">(ESI holds sales back up to an hour)</span> <span class="dim">&middot;</span> <span>${next}</span>`);
 	};
 
 	//--- rendering: the state box
@@ -690,26 +753,37 @@
 		top: 'Nothing is priced below this order.'
 	};
 	const BADGES = {
+		notInBook: { label: 'not in book', help: 'the newest book no longer lists this order: it was filled or cancelled (the orders feed confirms within 20 minutes). Its figures still rest on the orders feed' },
 		priceWar: { label: 'price war', help: 'the order that undercut this one changed its price at least twice within 24 hours', cls: 'war' },
 		nocost: { label: 'no cost', help: 'no lot of this item covers the unsold units, so margins and the ROI floor cannot be checked' },
-		nofee: { label: 'no fee', get help() { return hasFeeRates() ? 'no relist of yours is on record to take a relist-fee rate from, so no fee is estimated' : 'no earlier price-change fee of this order or this item to estimate from'; } },
+		nofee: { label: 'no fee', help: 'no relist of yours is on record to take a relist-fee rate from, so no fee is estimated' },
 		est: { label: 'est', help: 'time on top rests on fewer than three undercut episodes' },
 		nobook: { label: 'no book', help: 'no book is stored for this item yet; the next refresh takes one' },
 		nobooklog: { label: 'no book log', help: 'no book log for this item yet: when it was undercut and how fast others undercut are unknown' },
 		nohistory: { label: 'no history', help: 'no regional daily history stored for this item: daily volume and days behind are unknown' },
 		nolog: { label: 'no order log', help: 'no order log for this order yet: relists, the last fill and time on top are missing' }
 	};
-	const BADGE_ORDER = ['priceWar', 'nocost', 'nofee', 'est', 'nobook', 'nobooklog', 'nohistory', 'nolog'];
+	const BADGE_ORDER = ['notInBook', 'priceWar', 'nocost', 'nofee', 'est', 'nobook', 'nobooklog', 'nohistory', 'nolog'];
 
 	const stationOf = (r) => r.stationName || `station ${r.locationId}`;
 	const scopeWord = () => (thresholds.scope === 'region' ? 'in the region' : 'at the station');
-	const behindText = (days) => (isNum(days) ? (days === 0 ? '0' : days < 1 ? (days * 24 < 1 ? `${Math.max(1, Math.round(days * 1440))} min` : `${Math.round(days * 24 * 10) / 10} h`) : `${days < 10 ? Math.round(days * 10) / 10 : Math.round(days)} d`) : DASH);
+	const behindText = (days) => (isNum(days) ? (days === 0 ? '0' : dur(days * DAY_MS)) : DASH); // '2.6d', '1.1h', '35min'
+	const firstName = (id) => charName(id).split(' ')[0];
+
+	// The book-derived state of a row (decision 16; the module sets stateFrom, stateAt and feed). The book took
+	// over the price when its `issued` is later than the feed's; at the same `issued` only the units left.
+	const timeOf = (isoText) => (isoText && Number.isFinite(Date.parse(isoText)) ? clockOrDate(Date.parse(isoText)) : DASH);
+	const fromBook = (r) => r.stateFrom === 'book';
+	const priceFromBook = (r) => fromBook(r) && (!r.feed || Date.parse(r.feed.issued) !== Date.parse(r.issued));
+	const feedCacheText = (r) => {
+		const w = data.watch && data.watch.characters && data.watch.characters[r.characterId];
+		const ms = w && w.expires ? Date.parse(w.expires) : NaN;
+		return Number.isFinite(ms) ? `cached by ESI until ${clockOrDate(ms)}` : 'cached by ESI for up to 20 minutes';
+	};
 	const roiOf = (r) => (isNum(r.roiIfMatch) ? 1 + r.roiIfMatch : null); // net revenue / cost, the export page's "x"
 	const blank = (title = '') => ({ t: `<span class="dim">${DASH}</span>`, title });
 
-	// The module's relist-fee rate (plan decision 15) adds `feeRates` at the top level; before it does, the page
-	// keeps the older wording. The rate is a flat share of an order's remaining value, shown with three decimals.
-	const hasFeeRates = () => !!(data.result && data.result.feeRates !== undefined);
+	// The module's relist-fee rate (plan decision 15): a flat share of an order's remaining value, shown with three decimals.
 	const pct3 = (rate) => `${(rate * 100).toFixed(3)} %`;
 	const dayText = (ms) => (hasMoment() ? moment(ms).format('MMM D') : new Date(ms).toLocaleDateString());
 	const FEW_RELISTS = 5; // fewer observations than this and the rate is flagged as thin
@@ -723,30 +797,34 @@
 		return `${fmtExact(r.feeEstimate)}: ${pct3(r.feeRate)} of the remaining value (${price(unit)} × ${fmtQty(r.volumeRemain)}), the rate from ${rows} ${who}${since}${isNum(n) && n < FEW_RELISTS ? ' (few observations)' : ''}`;
 	};
 	const verdictTip = (r) => {
-		const lines = [`${r.verdict}: ${r.reason}.`, VERDICT_HELP[r.verdict]];
+		// the module's sentence first (decision 21); the token alone before it has one
+		const why = r.reasonText || r.reason || '';
+		const lines = [why ? `${r.verdict}: ${why}${/[.!?]$/.test(why) ? '' : '.'}` : `${r.verdict}.`, VERDICT_HELP[r.verdict]];
 		if (r.ordersAhead !== null) {
 			lines.push(`${fmtQty(r.unitsAhead)} ${r.unitsAhead === 1 ? 'unit' : 'units'} ahead in ${plural(r.ordersAhead, 'order')}${isNum(r.dailyVolume) ? ` at ${fmtRate(r.dailyVolume)} units a day in the region` : ''}${isNum(r.daysBehind) && r.daysBehind > 0 ? ` = ${behindText(r.daysBehind)} behind` : ''}.`);
-			lines.push(`Limits: leave under ${thresholds.leaveHours} h, undercut over ${thresholds.undercutDays} d, ROI floor ${thresholds.minRoi}x.`);
+			lines.push(`Limits: leave under ${thresholds.leaveHours}h, undercut over ${thresholds.undercutDays}d, ROI floor ${thresholds.minRoi}x.`);
 		}
 		if (isNum(r.expectedSalesBeforeUndercut)) {
-			lines.push(`Others undercut after about ${dur(r.medianTimeOnTop)}: ~${nf2.format(Math.round(r.expectedSalesBeforeUndercut * 10) / 10)} ${Math.round(r.expectedSalesBeforeUndercut * 10) / 10 === 1 ? 'unit sells' : 'units sell'} before then${isNum(r.expectedGainBeforeUndercut) ? `, worth ~${fmtExact(r.expectedGainBeforeUndercut)}` : ''}${isNum(r.feeEstimate) ? ` against a fee of ~${fmtExact(r.feeEstimate)}.` : hasFeeRates() ? '. No relist of yours at this station is on record yet, so the fee is not weighed.' : '. The relist fee is not known yet (no relist of this order or this item in the ledger), so it is not weighed.'}`);
+			lines.push(`Others undercut after about ${dur(r.medianTimeOnTop)}: ~${nf2.format(Math.round(r.expectedSalesBeforeUndercut * 10) / 10)} ${Math.round(r.expectedSalesBeforeUndercut * 10) / 10 === 1 ? 'unit sells' : 'units sell'} before then${isNum(r.expectedGainBeforeUndercut) ? `, worth ~${fmtExact(r.expectedGainBeforeUndercut)}` : ''}${isNum(r.feeEstimate) ? ` against a fee of ~${fmtExact(r.feeEstimate)}.` : '. No relist of yours at this station is on record yet, so the fee is not weighed.'}`);
 		}
 		if (r.priceWar) lines.push(`Price war: the order that undercut this one changed its price ${r.reUndercuts} times since.`);
 		return lines.filter(Boolean).join('\n');
 	};
 
 	const flagHtml = (b) => `<span class="flag ${BADGES[b].cls || ''}" title="${esc(BADGES[b].help)}">${esc(BADGES[b].label)}</span>`;
+	// The verdict, its reason token as is (decision 21: '2.6d', '50%', '1.21x', 'no book'; nothing when empty) and the badges.
 	const verdictCell = (r) => ({
-		t: `<span class="verdict v-${r.verdict}" title="${esc(verdictTip(r))}">${esc(r.verdict)}</span> <span class="reason dim" title="${esc(r.reason)}">${esc(r.reason)}</span>${BADGE_ORDER.filter(b => r.badges.includes(b)).map(flagHtml).join('')}`,
+		t: `<span class="verdict v-${r.verdict}" title="${esc(verdictTip(r))}">${esc(r.verdict)}</span>${r.reason ? ` <span class="reason dim" title="${esc(r.reasonText || r.reason)}">${esc(r.reason)}</span>` : ''}${BADGE_ORDER.filter(b => r.badges.includes(b)).map(flagHtml).join('')}`,
 		cls: 'text verdictCell stickV'
 	});
 
-	const itemCell = (r, c) => {
+	// The item name with its copy and export-snapshot buttons; the type id is in the tooltip only (decision 20).
+	const itemCell = (r) => {
 		const name = nameOf(r.typeId);
-		const who = c.manyChars ? ` <span class="dim" title="${esc(charName(r.characterId))}">${esc(charName(r.characterId).split(' ')[0])}</span>` : '';
 		const tip = `${name}\ntype ${r.typeId} · order ${r.orderId} · ${charName(r.characterId)} · ${stationOf(r)}`;
+		const snap = runForRow(r) ? snapButtonHtml('order', `snap-${r.orderId}`, name, `data-order-id="${r.orderId}"`) : '';
 		return {
-			t: `<span class="name" title="${esc(tip)}">${esc(name)}</span><button type="button" class="copyName" data-type-id="${r.typeId}" data-fk="copy-${r.orderId}" title="Copy name" aria-label="Copy name of ${esc(name)}">${COPY_ICON}</button> <span class="dim">${r.typeId}</span>${who}`,
+			t: `<span class="name" title="${esc(tip)}">${esc(name)}</span><button type="button" class="copyName" data-type-id="${r.typeId}" data-fk="copy-${r.orderId}" title="Copy name" aria-label="Copy name of ${esc(name)}">${COPY_ICON}</button>${snap}`,
 			cls: 'text nameCell stickI'
 		};
 	};
@@ -754,13 +832,27 @@
 		{ key: 'verdict', label: 'verdict', text: true, val: (r) => VERDICT_RANK[r.verdict], cell: verdictCell,
 			help: 'what to do with this order and why; the default order is undercut, maybe, reconsider, leave, top, then the longest queue first' },
 		{ key: 'item', label: 'item', text: true, val: (r) => nameOf(r.typeId).toLowerCase(), cell: itemCell,
-			help: 'item name and type id' },
+			help: 'item name (type id in the tooltip)' },
+		// decision 19: shown only while more than one character has open orders (ctx.manyChars)
+		{ key: 'character', label: 'character', text: true, manyOnly: true, val: (r) => charName(r.characterId).toLowerCase(),
+			help: 'whose order this is: the first name, the full name in the tooltip',
+			cell: (r) => ({ t: esc(firstName(r.characterId)), title: charName(r.characterId) }) },
 		{ key: 'remaining', label: 'remaining / total', val: (r) => r.volumeRemain,
-			help: 'units still for sale of the units listed',
-			cell: (r) => ({ t: `${fmtQty(r.volumeRemain)} <span class="dim">/ ${fmtQty(r.volumeTotal)}</span>`, title: `${fmtQty(r.volumeRemain)} of ${fmtQty(r.volumeTotal)} left` }) },
+			help: 'units still for sale of the units listed; underlined dotted when the public book is newer than the orders feed',
+			cell: (r) => (fromBook(r)
+				? {
+					t: `<span class="fromBook">${fmtQty(r.volumeRemain)}</span> <span class="dim">/ ${fmtQty(r.volumeTotal)}</span>`,
+					title: `${fmtQty(r.volumeRemain)} of ${fmtQty(r.volumeTotal)} left per the book of ${timeOf(r.stateAt)}; the orders feed, ${feedCacheText(r)}, still says ${r.feed ? `${fmtQty(r.feed.volumeRemain)} left (read ${timeOf(r.feed.fetchedAt)})` : 'an older figure'}`
+				}
+				: { t: `${fmtQty(r.volumeRemain)} <span class="dim">/ ${fmtQty(r.volumeTotal)}</span>`, title: `${fmtQty(r.volumeRemain)} of ${fmtQty(r.volumeTotal)} left` }) },
 		{ key: 'price', label: 'my price', val: (r) => r.price,
-			help: 'the price of this order now',
-			cell: (r) => ({ t: price(r.price), title: `${fmtExact(r.price)}, set ${r.issued ? whenText(Date.parse(r.issued)) : DASH}` }) },
+			help: 'the price of this order now; underlined dotted when the public book is newer than the orders feed',
+			cell: (r) => (priceFromBook(r)
+				? {
+					t: `<span class="fromBook">${price(r.price)}</span>`,
+					title: `${price(r.price)} per the book of ${timeOf(r.stateAt)} (set ${timeOf(r.issued)}); the orders feed, ${feedCacheText(r)}, still says ${r.feed ? `${price(r.feed.price)} from ${timeOf(r.feed.issued)}` : 'an older price'}`
+				}
+				: { t: price(r.price), title: `${fmtExact(r.price)}, set ${r.issued ? whenText(Date.parse(r.issued)) : DASH}` }) },
 		{ key: 'best', label: 'best price (gap)', val: (r) => r.bestPrice, pos: true,
 			help: 'the lowest sell price in the scope (this station or the whole region), our own order included, and in brackets how far this order\u2019s price is above it',
 			cell: (r) => {
@@ -841,16 +933,14 @@
 				return { t: `${money(r.marginIfMatch, true)} <span class="${below ? 'below' : 'dim'}">(${below ? '▼ ' : ''}${roi.toFixed(2)}x)</span>`, title: lines.join('\n') };
 			} },
 		{ key: 'fee', label: 'fee est.', val: (r) => r.feeEstimate,
-			help: () => (hasFeeRates()
-				? 'what changing this order\u2019s price probably costs: the relist fee is a flat share of the remaining order value, the same for every item, fitted from your newest relists at that station'
-				: 'what changing this order\u2019s price probably costs: the median of its own past price-change fees, else of the same item\u2019s'),
+			help: 'what changing this order\u2019s price probably costs: the relist fee is a flat share of the remaining order value, the same for every item, fitted from your newest relists at that station; without a rate of yours yet, the median of this order\u2019s or this item\u2019s past price-change fees',
 			cell: (r) => {
 				if (isNum(r.feeEstimate)) {
 					if (r.feeEstimateFrom === 'rate' && isNum(r.feeRate)) return { t: `~${esc(fmtIsk(r.feeEstimate))}`, title: feeRateTip(r) };
 					return { t: `~${esc(fmtIsk(r.feeEstimate))}`, title: `${fmtExact(r.feeEstimate)}: the median of ${r.feeEstimateFrom === 'order' ? 'this order\u2019s own' : 'this character\u2019s fees for this item\u2019s'} past price changes` };
 				}
 				if (isNum(r.feeRate)) return blank(`${pct3(r.feeRate)} of the remaining value at the new price, but there is no new price to work out (nothing is ahead)`);
-				return blank(hasFeeRates() ? `no relist fee observed yet for ${charName(r.characterId)} anywhere` : 'no earlier price-change fee to estimate from');
+				return blank(`no relist fee observed yet for ${charName(r.characterId)} anywhere, and no past price-change fee of this order or this item`);
 			} },
 		{ key: 'relists', label: 'relists (count · fees)', val: (r) => r.relistCount,
 			help: 'price changes of this order seen in its log, and the fees they cost (the listing fee is not counted)',
@@ -908,9 +998,10 @@
 			renderNotes();
 			return;
 		}
-		setHtml(openNoteEl, `${esc(verdictSummary(rows))} <span class="dim">· competition ${esc(scopeWord())} · hover a column title, a verdict or a figure for what it means</span>`);
+		setHtml(openNoteEl, `${esc(verdictSummary(rows))} <span class="dim">· competition ${esc(scopeWord())} · click a column title to sort · hover a column title, a verdict or a figure for what it means</span>`);
 		const ctx = { now, manyChars: new Set(rows.map(r => r.characterId)).size > 1 };
-		const head = COLUMNS.map(col => {
+		const shown = COLUMNS.filter(col => !col.manyOnly || ctx.manyChars);
+		const head = shown.map(col => {
 			const active = sort.key === col.key;
 			const arrow = active ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : '';
 			const stick = col.key === 'verdict' ? ' stickV' : col.key === 'item' ? ' stickI' : '';
@@ -920,8 +1011,7 @@
 		const body = sortedRows(rows).map(r => {
 			const noBook = r.ordersAhead === null;
 			const cells = [];
-			for (let i = 0; i < COLUMNS.length; i++) {
-				const col = COLUMNS[i];
+			for (const col of shown) {
 				if (noBook && col.pos) {
 					if (col.key === 'best') cells.push('<td class="text dim" colspan="3" title="the book of this item is not stored yet">no book yet; the next refresh takes one</td>');
 					if (['ahead', 'behind'].includes(col.key)) continue; // inside that colspan
@@ -932,12 +1022,14 @@
 				const cell = col.cell(r, ctx);
 				cells.push(`<td class="${col.text ? '' : 'numeric'}${cell.cls ? ` ${cell.cls}` : ''}"${cell.title ? ` title="${esc(cell.title)}"` : ''}>${cell.t}</td>`);
 			}
-			return `<tr data-order-id="${r.orderId}">${cells.join('')}</tr>`;
+			// a row the newest book no longer lists (filled or cancelled) is dimmed; its badge says why
+			return `<tr data-order-id="${r.orderId}"${r.badges.includes('notInBook') ? ' class="notInBook"' : ''}>${cells.join('')}</tr>`;
 		}).join('');
 		setHtml(tbodyEl, body);
 		// the item column is pinned right of the verdict column: its offset is that column's width
 		const vTh = sortRowEl.querySelector('th.stickV');
 		if (vTh) document.documentElement.style.setProperty('--stick-i', `${vTh.offsetWidth}px`);
+		syncSnapExpanded();
 		renderNotes();
 	};
 
@@ -983,6 +1075,7 @@
 	const COPY_ICON = svgIcon('<rect x="4.25" y="4.25" width="7" height="7" rx="1.5"/><path d="M7.75 3V2.25a1.5 1.5 0 0 0-1.5-1.5h-4a1.5 1.5 0 0 0-1.5 1.5v4a1.5 1.5 0 0 0 1.5 1.5H3"/>');
 	const COPIED_ICON = svgIcon('<path d="M2 6.5l2.5 2.5L10 3"/>');
 	const FAILED_ICON = svgIcon('<path d="M3 3l6 6M9 3l-6 6"/>');
+	const SNAP_ICON = svgIcon('<path d="M1 4.25h2.25l1-1.5h3.5l1 1.5H11v6H1z"/><circle cx="6" cy="7" r="1.75"/>'); // a camera: the export snapshot
 	const copyTimers = new WeakMap();
 	const setCopyState = (btn, icon, label, cls = null) => {
 		btn.innerHTML = icon;
@@ -1009,6 +1102,193 @@
 		} finally {
 			btn.classList.remove('pending');
 		}
+	});
+
+	//--- the export snapshot (decision 22): the export run's prediction for the item against what the page has now
+
+	// The lots of a row's type with units left, newest first (the module's row.lots); before the module has them,
+	// the same from the facts: the type's lots with units left.
+	let lotIndex = { key: null, byId: new Map() };
+	const lotsById = () => {
+		if (lotIndex.key !== data.factsKey) lotIndex = { key: data.factsKey, byId: new Map(asArray(data.facts && data.facts.lots).map(l => [l.lotId, l])) };
+		return lotIndex.byId;
+	};
+	const rowLots = (r) => (Array.isArray(r.lots) ? r.lots : asArray(data.facts && data.facts.lots).filter(l => l.typeId === r.typeId && l.remainingQty > 0));
+	// The newest run (by when it was copied) among these run ids that lists the type: {run, row}, or null.
+	const newestRunOf = (runIds, typeId) => {
+		const ids = new Set(runIds.filter(id => id !== null && id !== undefined).map(String));
+		if (ids.size === 0) return null;
+		let best = null;
+		for (const run of asArray(state.runs)) {
+			if (!run || !ids.has(String(run.id))) continue;
+			const row = asArray(run.rows).find(x => x && Number(x.typeId) === Number(typeId));
+			if (!row) continue;
+			const ms = Date.parse(run.copiedAt);
+			if (best === null || ms > best.ms) best = { run, row, ms };
+		}
+		return best;
+	};
+	const runForRow = (r) => newestRunOf(rowLots(r).map(l => l.runId), r.typeId);
+	const utcDay = (isoText) => new Date(Date.parse(isoText)).toISOString().slice(0, 10);
+	// A sales-table row: the day's sales of the type -> their lots -> the lots' runs.
+	const salesOfDay = (typeId, day) => (data.result ? data.result.sales.filter(s => s.typeId === typeId && utcDay(s.date) === day) : []);
+	const runForDay = (typeId, day) => {
+		const byId = lotsById();
+		const runIds = [];
+		for (const s of salesOfDay(typeId, day)) for (const id of asArray(s.lotIds)) if (byId.has(id)) runIds.push(byId.get(id).runId);
+		return newestRunOf(runIds, typeId);
+	};
+
+	const snapButtonHtml = (kind, fk, name, attrs) => `<button type="button" class="snapBtn" data-snap="${kind}" data-fk="${esc(fk)}" ${attrs} title="Export snapshot" aria-label="Export snapshot of ${esc(name)}" aria-haspopup="dialog" aria-expanded="false">${SNAP_ICON}</button>`;
+
+	const STOP_WORDS = { horizon: 'bound by demand', roi: 'cut by the ROI floor', book: 'the source station ran out', cost: 'cut by the spend cap', target: 'target reached' };
+	const pctObserved = (f) => `${Math.round(f * 1000) / 10}%`; // the export page's form
+	const mil = (v) => (isNum(v) ? v * 1e6 : null);           // a run's *Mil fields are millions of ISK
+
+	// What the panel compares: [label of the run's figure, the run's text, label of the figure now, its text, its title].
+	const snapLines = (row, now) => [
+		['sell price', fmtIsk(mil(row.sellPriceMil)), now.sell[0], now.sell[1], now.sell[2]],
+		['cost per item', fmtIsk(mil(row.costPerItemMil)), now.cost[0], now.cost[1], now.cost[2]],
+		['profit per item', fmtIsk(mil(row.profitPerItemMil), true), now.profit[0], now.profit[1], now.profit[2]],
+		['days to clear', isNum(row.daysToClear) ? dur(row.daysToClear * DAY_MS) : DASH, now.days[0], now.days[1], now.days[2]],
+		['daily demand', isNum(row.dailyDemand) ? fmtRate(row.dailyDemand) : DASH, now.demand[0], now.demand[1], now.demand[2]],
+		['competing volume', isNum(row.competingVolume) ? fmtQty(row.competingVolume) : DASH, now.competing[0], now.competing[1], now.competing[2]]
+	];
+	// The figures now: an open order's, or a sales row's (the day's sales of the type).
+	const nowOfOrder = (r) => ({
+		sell: ['my price', fmtIsk(r.price), fmtExact(r.price)],
+		cost: ['landed cost', fmtIsk(r.landedCost), isNum(r.landedCost) ? `${fmtExact(r.landedCost)} a unit: buy, haul and buy-order fee of the unsold units` : 'no lot covers the unsold units'],
+		profit: ['margin now', fmtIsk(r.marginNow, true), isNum(r.marginNow) ? `${fmtExact(r.marginNow)} a unit at the current price, after tax and the landed cost` : 'no landed cost'],
+		days: ['listed for', isNum(r.listedFor) ? dur(r.listedFor) : DASH, r.listedSince ? `since ${whenText(Date.parse(r.listedSince))}` : ''],
+		demand: ['daily volume now', isNum(r.dailyVolume) ? fmtRate(r.dailyVolume) : DASH, 'units a day traded in the region, recency-weighted'],
+		competing: ['units ahead now', isNum(r.unitsAhead) ? fmtQty(r.unitsAhead) : DASH, isNum(r.unitsAhead) ? `in ${plural(r.ordersAhead, 'order')} ahead ${scopeWord()}` : 'no book of this item yet']
+	});
+	const nowOfDay = (d) => {
+		const sales = salesOfDay(d.typeId, d.day);
+		const listed = sales.filter(s => isNum(s.daysSinceListed) && s.qty > 0);
+		const listedQty = listed.reduce((a, s) => a + s.qty, 0);
+		const daysListed = listedQty > 0 ? listed.reduce((a, s) => a + s.daysSinceListed * s.qty, 0) / listedQty : null;
+		const open = data.result.rows.find(r => r.typeId === d.typeId) || null;
+		const share = data.result.share && data.result.share.byType ? data.result.share.byType[d.typeId] : null;
+		const winVolume = share && isNum(share.volume) && share.days > 0 ? share.volume / share.days : null;
+		const per = (v) => (d.qty > 0 && isNum(v) ? v / d.qty : null);
+		return {
+			sell: ["the day's average price", fmtIsk(per(d.gross)), `${fmtExact(d.gross)} gross ÷ ${fmtQty(d.qty)} units`],
+			cost: ['landed cost of the units sold', fmtIsk(per(d.net - d.profit)), 'net − profit, per unit: buy, haul and buy-order fee'],
+			profit: ["the day's profit per unit", fmtIsk(per(d.profit), true), `${fmtExact(d.profit)} ÷ ${fmtQty(d.qty)} units`],
+			days: ['days since listed', isNum(daysListed) ? dur(daysListed * DAY_MS) : DASH, isNum(daysListed) ? 'from listing to sale, the mean over the units sold that day' : 'not known for these sales'],
+			demand: open && isNum(open.dailyVolume)
+				? ['daily volume now', fmtRate(open.dailyVolume), 'units a day traded in the region, recency-weighted']
+				: ['daily volume in the window', isNum(winVolume) ? fmtRate(winVolume) : DASH, isNum(winVolume) ? `units a day traded in the region over the ${share.days} days of the window the history covers` : 'no regional history of this item'],
+			competing: ['units ahead now', open && isNum(open.unitsAhead) ? fmtQty(open.unitsAhead) : DASH, open ? (isNum(open.unitsAhead) ? `ahead of our open order ${scopeWord()}` : 'no book of this item yet') : 'no open order of this item']
+		};
+	};
+
+	const snapPanelHtml = ({ typeId, run, row, now }) => {
+		const name = nameOf(typeId);
+		const route = run.route ? `${run.route.start} → ${run.route.end}` : 'route not recorded';
+		const rec = row.recommendation || {};
+		const recommended = isNum(row.recommended) ? row.recommended : rec.volume;
+		const stop = rec.floored ? 'nothing was worth buying' : STOP_WORDS[rec.stopReason] || 'limit not recorded';
+		const lines = snapLines(row, now).map(([a, av, b, bv, title]) => `<tr><th scope="row">${esc(a)} <span class="dim">vs ${esc(b)}</span></th><td class="numeric">${esc(av)}</td><td class="numeric"${title ? ` title="${esc(title)}"` : ''}>${esc(bv)}</td></tr>`).join('');
+		const seen = [];
+		if (isNum(row.observedFractionEvents) && row.observedFractionEvents > 0) seen.push(`rivals ${pctObserved(row.observedFractionEvents)} observed`);
+		if (isNum(row.observedFractionVolume) && row.observedFractionVolume > 0) seen.push(`demand ${pctObserved(row.observedFractionVolume)} observed`);
+		if (isNum(row.soldBeforeUnits) && row.soldBeforeUnits > 0) seen.push(`sold before: ${plural(row.soldBeforeUnits, 'unit')} in the 90 days before the run`);
+		return `<div class="snapHead"><h3 id="snapTitle">${esc(name)} — export snapshot</h3><button type="button" class="snapClose" data-act="snapClose">Close</button></div>
+			<p class="snapRun">run ${esc(isNum(Date.parse(run.copiedAt)) ? localTime(Date.parse(run.copiedAt)) : DASH)} (${esc(route)}), ${esc(fmtQty(row.qty))} copied of ${esc(fmtQty(recommended))} recommended (${esc(stop)})</p>
+			<table class="snapTable"><thead><tr><th scope="col"><span class="sr">figure</span></th><th scope="col" class="numeric">at the run</th><th scope="col" class="numeric">now</th></tr></thead><tbody>${lines}</tbody></table>
+			${seen.length > 0 ? `<p class="snapSeen dim">${esc(seen.join(' · '))}</p>` : ''}`;
+	};
+
+	// One panel, anchored to the button that opened it; Escape, a click outside and its Close button close it, and
+	// focus moves into it and back to that button (the button is found again by data-fk after a re-render).
+	let snapFk = null;
+	let snapOpener = null;
+	const syncSnapExpanded = () => {
+		for (const b of document.querySelectorAll('button.snapBtn[aria-expanded="true"]')) if (b.dataset.fk !== snapFk) b.setAttribute('aria-expanded', 'false');
+		if (snapFk === null) return;
+		const b = document.querySelector(`button.snapBtn[data-fk="${CSS.escape(snapFk)}"]`);
+		if (b) b.setAttribute('aria-expanded', 'true');
+	};
+	const placeSnap = (btn) => {
+		snapEl.style.left = '0px';
+		snapEl.style.top = '0px';
+		const b = btn.getBoundingClientRect();
+		const p = snapEl.getBoundingClientRect();
+		// the visible part of the page (on a phone the wide table makes the layout wider than the screen)
+		const vv = window.visualViewport;
+		const vx = vv ? vv.offsetLeft : 0;
+		const vy = vv ? vv.offsetTop : 0;
+		const vw = vv ? vv.width : window.innerWidth;
+		const vh = vv ? vv.height : window.innerHeight;
+		let x = b.left;
+		if (x + p.width > vx + vw - 8) x = Math.max(vx + 8, vx + vw - 8 - p.width);
+		let y = b.bottom + 4;
+		if (y + p.height > vy + vh - 8 && b.top - 4 - p.height >= vy + 8) y = b.top - 4 - p.height;
+		snapEl.style.left = `${Math.round(x + window.scrollX)}px`;
+		snapEl.style.top = `${Math.round(y + window.scrollY)}px`;
+	};
+	const closeSnap = (restoreFocus) => {
+		if (snapEl.hidden) return;
+		snapEl.hidden = true;
+		snapEl.replaceChildren();
+		const fk = snapFk;
+		const opener = snapOpener && snapOpener.isConnected ? snapOpener : fk ? document.querySelector(`button.snapBtn[data-fk="${CSS.escape(fk)}"]`) : null;
+		snapFk = null;
+		snapOpener = null;
+		syncSnapExpanded();
+		if (restoreFocus && opener) opener.focus();
+	};
+	const openSnap = (btn) => {
+		if (!data.result) return;
+		const typeId = Number(btn.dataset.typeId);
+		let spec = null;
+		if (btn.dataset.snap === 'order') {
+			const r = data.result.rows.find(x => x.orderId === Number(btn.dataset.orderId));
+			const found = r ? runForRow(r) : null;
+			if (found) spec = { kind: 'order', typeId: r.typeId, run: found.run, row: found.row, now: nowOfOrder(r) };
+		} else {
+			const d = data.result.salesByTypeDay.find(x => x.typeId === typeId && x.day === btn.dataset.day);
+			const found = d ? runForDay(d.typeId, d.day) : null;
+			if (found) spec = { kind: 'day', typeId: d.typeId, run: found.run, row: found.row, now: nowOfDay(d) };
+		}
+		if (!spec) return; // the run is gone since the button was drawn
+		hideTip();
+		snapEl.innerHTML = snapPanelHtml(spec);
+		snapEl.hidden = false;
+		snapFk = btn.dataset.fk;
+		snapOpener = btn;
+		syncSnapExpanded();
+		placeSnap(btn);
+		snapEl.focus();
+	};
+	const toggleSnap = (btn) => {
+		if (!snapEl.hidden && snapFk === btn.dataset.fk) { closeSnap(true); return; }
+		closeSnap(false);
+		openSnap(btn);
+	};
+	const onSnapClick = (e) => {
+		const btn = e.target.closest('button.snapBtn');
+		if (btn) toggleSnap(btn);
+	};
+	tbodyEl.addEventListener('click', onSnapClick);
+	soldTableEl.addEventListener('click', onSnapClick);
+	snapEl.addEventListener('click', (e) => {
+		if (e.target.closest('button[data-act="snapClose"]')) closeSnap(true);
+	});
+	// a click outside closes it (capture: the target is fixed before anything moves); focus goes back to the
+	// button only when the click did not put it somewhere else
+	document.addEventListener('click', (e) => {
+		if (snapEl.hidden || snapEl.contains(e.target) || e.target.closest('button.snapBtn')) return;
+		const a = document.activeElement;
+		closeSnap(!a || a === document.body || snapEl.contains(a));
+	}, true);
+	// Tab out of the panel closes it too, leaving focus where it went (not onto its own button: a click there toggles)
+	snapEl.addEventListener('focusout', (e) => {
+		const to = e.relatedTarget;
+		if (!to || snapEl.contains(to) || (to.dataset && to.dataset.fk === snapFk)) return;
+		closeSnap(false);
 	});
 
 	//--- the tooltip and the hit layer (insights.js's idiom: one tooltip, hover and focus alike, arrow keys)
@@ -1060,8 +1340,11 @@
 		tipEl.style.top = `${y}px`;
 	};
 	const tipText = (spec) => [spec.title, ...(spec.rows || []).map(r => `${r.value} ${r.name || ''}`.trim()), spec.note].filter(Boolean).join('. ');
+	// Escape closes the topmost thing: the tooltip, else the export snapshot panel
 	document.addEventListener('keydown', (e) => {
-		if (e.key === 'Escape' && !tipEl.hidden) hideTip();
+		if (e.key !== 'Escape') return;
+		if (!tipEl.hidden) hideTip();
+		else if (!snapEl.hidden) closeSnap(true);
 	});
 
 	// Plot draws the marks; this layer sits over them: transparent, larger than the mark, one tab stop for
@@ -1137,7 +1420,7 @@
 		const order = s.orderMatch === 'unique' ? `order ${s.orderId}`
 			: s.orderMatch === 'byTime' ? `${s.orderId ? `order ${s.orderId}, ` : ''}matched by time (the log never saw this price)`
 			: s.orderMatch === 'ambiguous' ? 'ambiguous (more than one order at this price)' : 'no match';
-		const listed = isNum(s.daysSinceListed) ? ` · listed ${nf2.format(Math.round(s.daysSinceListed * 10) / 10)} d before` : '';
+		const listed = isNum(s.daysSinceListed) ? ` · listed ${dur(s.daysSinceListed * DAY_MS)} before` : '';
 		return {
 			shape: s.profit < 0 ? 'loss' : 'profit',
 			value: fmtIsk(s.profit, true),
@@ -1158,71 +1441,164 @@
 		rows: [{ shape: 'hollow', value: isNum(p.estProfit) ? fmtIsk(p.estProfit, true) : DASH, name: `${whenText(Date.parse(p.date))}${p.observed === true ? ' (seen at the next check, so the fill is older)' : ''} · ${fmtQty(p.qty)} × ${price(p.unitPrice)} · est. net ${fmtIsk(p.estNet)}${isNum(p.estProfit) ? '' : ' · profit unknown: no landed cost'} · order ${p.orderId}` }],
 		note: 'the order log saw these units go; ESI holds wallet transactions back for up to an hour. An estimate, drawn hollow, until the sale arrives.'
 	});
-	const changeTip = (e) => ({
-		title: `${nameOf(e.typeId)}: we changed the price of order ${e.orderId}`,
-		rows: [{ value: `${price(e.from)} → ${price(e.to)}`, name: whenText(e.atMs) }]
-	});
-	const undercutTip = (e) => ({
-		title: `${nameOf(e.typeId)}: someone priced below order ${e.orderId}`,
-		rows: [{ value: `${price(e.undercutPrice)} < ${price(e.price)}`, name: `${whenText(e.atMs)}${e.undercutBy ? ` · by order ${e.undercutBy}` : ''}` }]
-	});
+	// The total column's tooltip (decision 17): the item's sales, units, gross, net and profit over the window,
+	// and the estimate of its pending fills.
+	const totalTip = (t, winLabel) => {
+		const rows = [];
+		if (t.count > 0) {
+			rows.push({ shape: t.profit < 0 ? 'loss' : 'profit', value: fmtIsk(t.profit, true), name: `profit from ${plural(t.count, 'sale')}, ${plural(t.qty, 'unit')}` });
+			rows.push({ value: fmtIsk(t.gross), name: 'gross' });
+			rows.push({ value: fmtIsk(t.net), name: 'net, after sales tax and broker fees' });
+		}
+		if (t.pendingCount > 0) {
+			const unknown = t.pendingCount - t.pendingKnown;
+			rows.push({ shape: 'hollow', value: isNum(t.pendingEst) ? fmtIsk(t.pendingEst, true) : DASH, name: `est. profit of ${plural(t.pendingQty, 'unit')} filled, not in the wallet yet${unknown > 0 ? ` (${plural(unknown, 'fill')} without a landed cost)` : ''}` });
+		}
+		return {
+			title: `${nameOf(t.typeId)}: total over the last ${winLabel}`,
+			rows,
+			note: t.count > 0
+				? 'The total column has its own scale: the mark’s area is the item’s profit over the window.'
+				: 'No completed sale in the window: the hollow mark is the estimate for the pending fills, on the total column’s own scale.'
+		};
+	};
 
-	// What the timeline shows: a mark per cluster and per pending fill, a row per item (newest first), and
-	// optionally the order events on those rows.
+	// The presence lines (decision 18): what began a stretch, in words ('unknown' and anything new: not known).
+	const CAUSE_WORDS = {
+		listed: 'we listed a sell order',
+		ourPrice: 'we changed a price',
+		undercut: 'someone priced below us',
+		cleared: 'the orders below ours went (filled, cancelled or repriced)',
+		ended: 'a sell order of ours ended (filled, cancelled or expired)'
+	};
+	// One of our orders at a moment: its log's price with the latest `issued` at or before it (as the module's
+	// priceAt), else the open row's price.
+	const ourOrderAt = (orderId, ms) => {
+		for (const [cid, log] of Object.entries(data.orderLogs || {})) {
+			const rec = log && log[orderId];
+			if (!rec) continue;
+			const path = asArray(rec.path);
+			let pick = null;
+			for (const e of path) {
+				const t = msOf(e.issued || e.at);
+				if (Number.isFinite(t) && t <= ms && (pick === null || t >= pick.t)) pick = { t, price: e.price };
+			}
+			return { orderId, characterId: Number(cid), price: pick ? pick.price : path.length > 0 ? path[0].price : null };
+		}
+		const row = data.result ? data.result.rows.find(r => String(r.orderId) === String(orderId)) : null;
+		return { orderId, characterId: row ? row.characterId : null, price: row ? row.price : null };
+	};
+	const presenceTip = (p, now) => {
+		const s = p.seg;
+		const known = s.known !== false;
+		const what = s.state === 'top' ? 'on top: the lowest sell order at the station was ours'
+			: known ? 'listed, but someone was priced below us'
+			: 'listed; whether on top is unknown (before the book log of this item)';
+		// the orders counted at the stretch's start; a price change of ours that kept the state merges into the
+		// stretch, so a price is shown as start → end when it moved
+		const ids = asArray(s.orderIds);
+		const many = (state.characters || []).length > 1;
+		const rows = [{ value: dur(p.toMs - p.fromMs), name: `${whenText(p.fromMs)} to ${now - p.toMs < MIN_MS ? 'now' : whenText(p.toMs)}` }];
+		for (const id of ids.slice(0, 4)) {
+			const a = ourOrderAt(id, p.fromMs);
+			const b = ourOrderAt(id, p.toMs - 1);
+			const moved = isNum(a.price) && isNum(b.price) && a.price !== b.price;
+			rows.push({ value: moved ? `${price(a.price)} → ${price(b.price)}` : price(a.price), name: `our order ${id}${many && a.characterId !== null ? ` (${firstName(a.characterId)})` : ''}` });
+		}
+		if (ids.length > 4) rows.push({ value: `+${ids.length - 4}`, name: 'more orders of ours' });
+		if (known && isNum(s.below)) {
+			rows.push({ value: s.below === 0 ? 'none' : nf2.format(s.below), name: s.below === 0 ? 'priced below ours' : `${s.below === 1 ? 'order' : 'orders'} priced below ours${isNum(s.lowestBelow) ? `, the lowest at ${price(s.lowestBelow)}` : ''}` });
+		}
+		const cause = CAUSE_WORDS[s.cause];
+		return { title: `${nameOf(p.typeId)}: ${what}`, rows, note: cause ? `It began when ${cause}.` : 'What began it is not known: the window or the book log starts here.' };
+	};
+
+	// What the timeline shows: a mark per cluster and per pending fill; a row per item, the window's profit highest
+	// first and items with only pending fills after them (decision 17); each item's total for the last column; and
+	// the presence segments of those items (decision 18), when the module gives them.
 	const timelineModel = (res, now, windowMs) => {
 		const marks = [];
 		for (const c of res.salesClusters) marks.push({ kind: 'sale', typeId: c.typeId, atMs: Date.parse(c.at), endMs: Date.parse(c.end), profit: c.profit, cluster: c });
 		for (const p of res.pending) marks.push({ kind: 'pending', typeId: p.typeId, atMs: Date.parse(p.date), endMs: Date.parse(p.date), profit: p.estProfit, pending: p });
 		if (marks.length === 0) return null;
-		const newest = new Map();
-		for (const m of marks) newest.set(m.typeId, Math.max(newest.get(m.typeId) || 0, m.endMs));
-		const types = [...newest.keys()].sort((a, b) => newest.get(b) - newest.get(a) || a - b);
-		const typeSet = new Set(types);
+		const totals = new Map();
+		const totalOf = (typeId) => {
+			if (!totals.has(typeId)) totals.set(typeId, { typeId, count: 0, qty: 0, gross: 0, net: 0, profit: 0, pendingCount: 0, pendingQty: 0, pendingKnown: 0, pendingProfit: 0 });
+			return totals.get(typeId);
+		};
+		for (const c of res.salesClusters) {
+			const t = totalOf(c.typeId);
+			t.count += c.count;
+			t.qty += c.qty;
+			t.gross += c.gross;
+			t.net += c.net;
+			t.profit += c.profit;
+		}
+		for (const p of res.pending) {
+			const t = totalOf(p.typeId);
+			t.pendingCount++;
+			t.pendingQty += p.qty;
+			if (isNum(p.estProfit)) {
+				t.pendingKnown++;
+				t.pendingProfit += p.estProfit;
+			}
+		}
+		for (const t of totals.values()) {
+			t.pendingEst = t.pendingKnown > 0 ? t.pendingProfit : null;
+			t.value = t.count > 0 ? t.profit : t.pendingEst; // what the total column draws: hollow for an estimate
+		}
+		const est = (t) => (isNum(t.pendingEst) ? t.pendingEst : -Infinity);
+		const list = [...totals.values()];
+		const types = [
+			...list.filter(t => t.count > 0).sort((a, b) => b.profit - a.profit || a.typeId - b.typeId),
+			...list.filter(t => t.count === 0).sort((a, b) => est(b) - est(a) || a.typeId - b.typeId)
+		].map(t => t.typeId);
 		const startMs = now - windowMs;
-		const changes = [];
-		const undercuts = [];
-		for (const [cid, log] of Object.entries(data.orderLogs)) {
-			for (const [oid, rec] of Object.entries(log || {})) {
-				if (!rec || rec.isBuy || !typeSet.has(rec.typeId)) continue;
-				const path = asArray(rec.path);
-				for (let i = 1; i < path.length; i++) {
-					if (path[i].price === path[i - 1].price) continue;
-					const ms = Date.parse(path[i].issued || path[i].at);
-					if (ms >= startMs && ms <= now) changes.push({ kind: 'change', typeId: rec.typeId, atMs: ms, orderId: Number(oid), characterId: Number(cid), from: path[i - 1].price, to: path[i].price });
+		const pres = res.presence && typeof res.presence === 'object' ? res.presence : null;
+		const presence = [];
+		if (pres) {
+			for (const typeId of types) {
+				const p = pres[typeId];
+				for (const seg of asArray(p && p.segments)) {
+					if (!seg) continue;
+					const fromMs = Math.max(startMs, msOf(seg.from));
+					const toMs = Math.min(now, seg.to ? msOf(seg.to) : now);
+					if (!(toMs > fromMs)) continue;
+					presence.push({ typeId, fromMs, toMs, seg });
 				}
 			}
 		}
-		for (const typeId of types) {
-			const t = res.timeOnTop.byType[typeId];
-			if (!t) continue;
-			for (const ep of t.list) {
-				const ms = ep.undercutAt ? Date.parse(ep.undercutAt) : NaN;
-				if (ms >= startMs && ms <= now) undercuts.push({ kind: 'undercut', typeId, atMs: ms, orderId: ep.orderId, price: ep.price, undercutPrice: ep.undercutPrice, undercutBy: ep.undercutBy });
-			}
-		}
-		changes.sort((a, b) => a.atMs - b.atMs);
-		undercuts.sort((a, b) => a.atMs - b.atMs);
-		return { marks, types, changes, undercuts, startMs };
+		return { marks, types, totals, presence, hasPresence: pres !== null, startMs };
 	};
 
-	const RMAX = 14;   // px radius of the biggest dot
-	const RMIN = 3;    // below this a dot is drawn at this radius (the legend says so)
+	const RMAX = 14;          // px radius of the biggest dot
+	const RMIN = 3;           // below this a dot is drawn at this radius (the footnote says so)
 	const ROW_H = 34;
+	const LINE_INSET = 5;     // px from a row's bottom edge to its presence line
+	const COL_GAP = RMAX + 4; // the total column's divider clears a sale dot at the right edge (now)
 
 	const drawTimeline = (res, width) => {
-		const windowMs = WINDOWS.find(w => w.key === winKey).ms;
+		const win = WINDOWS.find(w => w.key === winKey);
 		const now = data.now;
-		const m = timelineModel(res, now, windowMs);
+		const m = timelineModel(res, now, win.ms);
 		if (m === null) return null;
 		const mags = m.marks.map(k => (isNum(k.profit) ? Math.abs(k.profit) : 0));
 		const M = Math.max(1, ...mags);
 		const floor = M * (RMIN / RMAX) ** 2;
 		for (const k of m.marks) k.mag = Math.max(isNum(k.profit) ? Math.abs(k.profit) : 0, floor);
 		const radiusOf = (mag) => RMAX * Math.sqrt(mag / M);
+		// the total column: one mark per item on its own sqrt scale, the figure beside it from 640 px
+		const wide = width >= 640;
+		const totals = m.types.map(id => m.totals.get(id));
+		const TM = Math.max(1, ...totals.map(t => (isNum(t.value) ? Math.abs(t.value) : 0)));
+		const tFloor = TM * (RMIN / RMAX) ** 2;
+		const totalR = (v) => RMAX * Math.sqrt(Math.max(isNum(v) ? Math.abs(v) : 0, tFloor) / TM);
+		const drawPresence = showPresence && m.hasPresence;
 		const marginLeft = width < 640 ? 120 : 176;
-		const marginRight = 24;
-		const height = m.types.length * ROW_H + 6 + 34;
-		const dt = windowMs / Math.max(1, width - marginLeft - marginRight) * 2.5; // 2.5 px either side of an undercut tick
+		const marginRight = COL_GAP + (wide ? 100 : 42);
+		const marginTop = 6;
+		const marginBottom = 34;
+		const height = m.types.length * ROW_H + marginTop + marginBottom;
 		const startDate = new Date(m.startMs);
 		const endDate = new Date(now);
 		const sale = m.marks.filter(k => k.kind === 'sale');
@@ -1231,8 +1607,6 @@
 			Plot.rect(m.types.filter((_, i) => i % 2 === 0), { x1: () => startDate, x2: () => endDate, y: (d) => d, fill: STRIPE }),
 			Plot.gridX({ stroke: GRID, strokeOpacity: 1, strokeWidth: 1 })
 		];
-		if (showEvents && m.changes.length > 0) marks.push(Plot.tickX(m.changes, { x: (d) => new Date(d.atMs), y: 'typeId', stroke: INK2, strokeWidth: 2, insetTop: 7, insetBottom: 7 }));
-		if (showEvents && m.undercuts.length > 0) marks.push(Plot.rect(m.undercuts, { x1: (d) => new Date(d.atMs - dt), x2: (d) => new Date(d.atMs + dt), y: 'typeId', fill: SURFACE, stroke: INK2, strokeWidth: 1.25, insetTop: 9, insetBottom: 9 }));
 		const dots = (list, symbol, fill, stroke) => {
 			if (list.length > 0) marks.push(Plot.dot(list, { x: (d) => new Date(d.atMs), y: 'typeId', r: 'mag', symbol, fill, fillOpacity: fill === SURFACE ? 1 : 0.9, stroke, strokeWidth: 2 }));
 		};
@@ -1242,7 +1616,7 @@
 		dots(pend.filter(k => isNum(k.profit) && k.profit < 0), 'square', SURFACE, LOSS);
 		dots(pend.filter(k => !isNum(k.profit)), 'circle', SURFACE, INK2);
 		const plot = Plot.plot({
-			width, height, marginLeft, marginRight, marginTop: 6, marginBottom: 34,
+			width, height, marginLeft, marginRight, marginTop, marginBottom,
 			style: PLOT_STYLE,
 			x: { type: 'time', domain: [startDate, endDate], label: null, tickSize: 0, ticks: Math.max(3, Math.floor((width - marginLeft - marginRight) / 120)) },
 			y: { type: 'band', domain: m.types, padding: 0, label: null, tickSize: 0, tickFormat: (id) => short(nameOf(id), width < 640 ? 16 : 26) },
@@ -1250,40 +1624,90 @@
 			marks
 		});
 		plot.setAttribute('role', 'group');
-		plot.setAttribute('aria-label', `Sales timeline of the last ${WINDOWS.find(w => w.key === winKey).label}: one row per item, one mark per sale or burst of sales, area proportional to profit. The table below has the same figures.`);
+		plot.setAttribute('aria-label', `Sales timeline of the last ${win.label}: one row per item, the highest profit over the window first; one mark per sale or burst of sales, area proportional to profit; after a dashed divider, each item's total on its own scale${drawPresence ? '; and near the bottom of each row, a line while we had a sell order listed, solid while it was the lowest at its station and dotted while someone was lower' : ''}. The table below has the same figures.`);
 		for (const g of plot.querySelectorAll(':scope > g')) g.setAttribute('aria-hidden', 'true');
 		const sx = plot.scale('x');
 		const sy = plot.scale('y');
-		const rowCentre = (typeId) => sy.apply(typeId) + sy.bandwidth / 2;
-		const markTargets = m.marks
-			.slice()
-			.sort((a, b) => m.types.indexOf(a.typeId) - m.types.indexOf(b.typeId) || a.atMs - b.atMs)
-			.map(k => ({
-				x: sx.apply(new Date(k.atMs)), y: rowCentre(k.typeId), r: Math.max(11, radiusOf(k.mag) + 3),
-				tip: k.kind === 'sale' ? clusterTip(k.cluster) : pendingTip(k.pending)
-			}));
-		attachTargets(plot, markTargets, 'Sales and pending fills, arrow keys move between them');
-		if (showEvents) {
-			const eventTargets = [...m.changes, ...m.undercuts]
-				.sort((a, b) => m.types.indexOf(a.typeId) - m.types.indexOf(b.typeId) || a.atMs - b.atMs)
-				.map(e => {
-					const x = sx.apply(new Date(e.atMs));
-					const y = rowCentre(e.typeId);
-					const under = markTargets.some(t => Math.hypot(t.x - x, t.y - y) < t.r + 2);
-					return { x: x - 5, y: y - ROW_H / 2 + 4, w: 10, h: ROW_H - 8, tip: e.kind === 'change' ? changeTip(e) : undercutTip(e), noPointer: under };
-				});
-			attachTargets(plot, eventTargets, 'Order events, arrow keys move between them');
+		const rowTop = (typeId) => sy.apply(typeId);
+		const rowCentre = (typeId) => rowTop(typeId) + sy.bandwidth / 2;
+		const plotRight = width - marginRight;
+		const divX = plotRight + COL_GAP;
+		const colX = divX + 8 + RMAX;
+		const bottom = height - marginBottom;
+		// Plot draws the marks; what it has no mark for is added here, in its coordinates, under or over its groups
+		const gridG = plot.querySelector(':scope > g[aria-label="x-grid"]');
+		const firstDot = plot.querySelector(':scope > g[aria-label="dot"]');
+		const insert = (node, ref) => { if (ref) plot.insertBefore(node, ref); else plot.append(node); };
+		// the stripes run on under the total column, below the sale dots that reach past the right edge
+		const stripes = svgNode('g', { 'aria-hidden': 'true' });
+		m.types.forEach((id, i) => {
+			if (i % 2 === 0) stripes.append(svgNode('rect', { x: plotRight, y: rowTop(id), width: width - plotRight, height: sy.bandwidth, fill: STRIPE }));
+		});
+		insert(stripes, gridG || firstDot);
+		// the presence lines, under the sale dots: solid on top, dotted when listed, faint when unknown
+		const presenceTargets = [];
+		if (drawPresence && m.presence.length > 0) {
+			const g = svgNode('g', { 'aria-hidden': 'true' });
+			for (const p of m.presence) {
+				const x1 = sx.apply(new Date(p.fromMs));
+				const x2 = sx.apply(new Date(p.toMs));
+				const y = rowTop(p.typeId) + sy.bandwidth - LINE_INSET;
+				const top = p.seg.state === 'top';
+				const attrs = { x1, x2, y1: y, y2: y, stroke: INK2, 'stroke-width': 2, 'stroke-linecap': top ? 'butt' : 'round' };
+				if (!top) attrs['stroke-dasharray'] = '0 4'; // round caps on zero-length dashes: 2 px dots every 4 px
+				if (p.seg.known === false) attrs['stroke-opacity'] = 0.45;
+				g.append(svgNode('line', attrs));
+				const w = Math.max(6, x2 - x1);
+				presenceTargets.push({ x: (x1 + x2) / 2 - w / 2, y: y - 5, w, h: 10, tip: presenceTip(p, now) });
+			}
+			insert(g, firstDot);
 		}
-		return { plot, model: m };
+		// the total column: a dashed divider, a mark per item, its figure on wide charts, "total" in the axis row
+		const col = svgNode('g', { 'aria-hidden': 'true' });
+		col.append(svgNode('line', { x1: divX, x2: divX, y1: marginTop, y2: bottom, stroke: AXIS, 'stroke-width': 1, 'stroke-dasharray': '3 3' }));
+		for (const t of totals) {
+			const cy = rowCentre(t.typeId);
+			const r = totalR(t.value);
+			const hollow = t.count === 0;
+			const tone = !isNum(t.value) ? INK2 : t.value < 0 ? LOSS : PROFIT;
+			const paint = hollow ? { fill: SURFACE, stroke: tone, 'stroke-width': 2 } : { fill: tone, 'fill-opacity': 0.9, stroke: SURFACE, 'stroke-width': 2 };
+			if (isNum(t.value) && t.value < 0) {
+				const side = r * Math.sqrt(Math.PI); // the area of a circle of radius r, as Plot sizes its squares
+				col.append(svgNode('rect', { x: colX - side / 2, y: cy - side / 2, width: side, height: side, ...paint }));
+			} else col.append(svgNode('circle', { cx: colX, cy, r, ...paint }));
+			if (wide) {
+				const figure = svgNode('text', { x: colX + RMAX + 6, y: cy, dy: '0.32em', fill: INK2, 'text-anchor': 'start', 'font-variant': 'tabular-nums' });
+				figure.textContent = isNum(t.value) ? `${hollow ? '~' : ''}${fmtIsk(t.value, true)}` : DASH;
+				col.append(figure);
+			}
+		}
+		const label = svgNode('text', { x: colX, y: bottom + 9, dy: '0.71em', fill: INK2, 'text-anchor': 'middle' });
+		label.textContent = 'total';
+		col.append(label);
+		plot.append(col);
+		// the hit layer: the presence stretches first (under), then the sales, pending fills and totals, row by row
+		attachTargets(plot, presenceTargets, 'When we were listed and on top, arrow keys move between the stretches');
+		const markTargets = m.marks.map(k => ({
+			row: m.types.indexOf(k.typeId), x: sx.apply(new Date(k.atMs)), y: rowCentre(k.typeId), r: Math.max(11, radiusOf(k.mag) + 3),
+			tip: k.kind === 'sale' ? clusterTip(k.cluster) : pendingTip(k.pending)
+		}));
+		const totalTargets = totals.map(t => ({ row: m.types.indexOf(t.typeId), x: colX, y: rowCentre(t.typeId), r: Math.max(11, totalR(t.value) + 3), tip: totalTip(t, win.label) }));
+		attachTargets(plot, [...markTargets, ...totalTargets].sort((a, b) => a.row - b.row || a.x - b.x), 'Sales, pending fills and each item’s total, arrow keys move between them');
+		return { plot, model: m, wide, presenceDrawn: presenceTargets.length };
 	};
 
-	const legendHtml = () => {
+	const legendHtml = (res) => {
 		const keys = [
 			['<span class="sw profit"></span>', 'profit (a circle)'],
 			['<span class="sw loss"></span>', 'loss (a square)'],
 			['<span class="sw pendProfit"></span><span class="sw pendLoss"></span>', 'hollow: filled per the order log, not in the wallet yet (estimated)']
 		];
-		if (showEvents) keys.push(['<span class="sw tick"></span>', 'a price change of ours'], ['<span class="sw hollowTick"></span>', 'someone priced below us']);
+		if (showPresence && res.presence !== undefined) {
+			keys.push(
+				['<span class="sw line lineTop"></span>', 'solid line: on top (our sell order the lowest at its station)'],
+				['<span class="sw line lineListed"></span>', 'dotted: listed, someone lower'],
+				['<span class="sw line lineGap"></span>', 'a gap: no sell order of ours']);
+		}
 		keys.push(['', 'dot area = profit of the sale or burst of sales it stands for']);
 		return keys.map(([sw, label]) => `<span class="key" role="listitem">${sw}${esc(label)}</span>`).join('');
 	};
@@ -1295,7 +1719,8 @@
 		if (!res) return;
 		const win = WINDOWS.find(w => w.key === winKey);
 		for (const b of winSegEl.children) b.setAttribute('aria-pressed', b.dataset.win === winKey ? 'true' : 'false');
-		eventsChk.checked = showEvents;
+		presenceChk.checked = showPresence;
+		presenceLabelEl.hidden = res.presence === undefined; // nothing to toggle until the module gives presence
 		hideTip();
 		const t = res.totals;
 		const pendingUnits = t.pendingUnits;
@@ -1323,7 +1748,7 @@
 			tot(`share of ${region} volume`, esc(fmtPct(t.share)), `our units ÷ all units traded in the region, on the UTC days we sold that the history already covers${res.share.overall.volume ? `: ${fmtQty(res.share.overall.qty)} of ${fmtQty(res.share.overall.volume)}` : ''}`),
 			pendingUnits > 0 ? tot('pending', `${esc(fmtQty(pendingUnits))} units`, `${fmtQty(pendingUnits)} units the order log saw fill that the wallet has not caught up with; est. profit ${fmtExact(pendingProfit)}. Drawn hollow below`) : ''
 		].join(''));
-		setHtml(soldLegendEl, legendHtml());
+		setHtml(soldLegendEl, legendHtml(res));
 		// the chart
 		let drawn = null;
 		if (typeof Plot === 'undefined' || typeof d3 === 'undefined') {
@@ -1339,17 +1764,37 @@
 			}
 		}
 		const foot = [
-			`Each row is an item, newest sale on top. Sales of one item within ${dur(Math.max(10 * MIN_MS, win.ms / 150))} of each other are one dot. Dots under ${RMIN} px radius are drawn at ${RMIN} px, so the smallest profits read as larger than they are. Times are local; EVE time is in parentheses.`,
+			`Each row is an item, the highest profit over the window on top; items with only pending fills follow. Sales of one item within ${dur(Math.max(10 * MIN_MS, win.ms / 150))} of each other are one dot. Dots under ${RMIN} px radius are drawn at ${RMIN} px, so the smallest profits read as larger than they are. Times are local; EVE time is in parentheses.`,
+			drawn ? `The total column after the dashed line has its own scale: its mark's area is the item's profit over the window${drawn.wide ? ' (the figure beside it)' : ''}, sized against the largest total, not against the sale dots.` : '',
 			res.pending.length > 0 ? `${plural(res.pending.length, 'hollow mark')}: units the order log saw fill that the wallet has not caught up with (ESI holds transactions back up to an hour).` : '',
-			showEvents && drawn && drawn.model.changes.length + drawn.model.undercuts.length === 0 ? 'No price changes of ours and no undercuts against us fall inside this window for these items.' : ''
+			showPresence && drawn && drawn.model.hasPresence
+				? (drawn.presenceDrawn > 0
+					? 'The line near the bottom of a row is solid while one of our sell orders of the item was the lowest at its station, dotted while someone was lower, and missing while we had no sell order; it is faint before the book log covers the item, where whether we were on top is unknown.'
+					: 'No sell order of ours was open for these items in this window, so no line is drawn.')
+				: ''
 		].filter(Boolean);
 		soldFootEl.replaceChildren(...foot.map(text => el('p', { text })));
 		soldTableEl.replaceChildren(res.salesByTypeDay.length > 0
 			? soldTable(res)
 			: el('p', { class: 'dim', text: 'No completed sale in this window yet: the hollow marks above are fills the wallet has not caught up with.' }));
+		syncSnapExpanded();
 	};
 
 	const hasHistory = (typeId) => data.history[typeId] !== undefined || data.soldHistory.has(typeId);
+	// The item cell of a sales row: the name, and the export-snapshot button when a run planned the day's sales.
+	const soldItemCell = (r) => {
+		const name = nameOf(r.typeId);
+		const cell = el('td', { title: `type ${r.typeId}` }, name);
+		if (runForDay(r.typeId, r.day)) {
+			const b = el('button', {
+				type: 'button', class: 'snapBtn', 'data-snap': 'day', 'data-type-id': r.typeId, 'data-day': r.day, 'data-fk': `snapday-${r.typeId}-${r.day}`,
+				title: 'Export snapshot', 'aria-label': `Export snapshot of ${name}, ${r.day}`, 'aria-haspopup': 'dialog', 'aria-expanded': 'false'
+			});
+			b.innerHTML = SNAP_ICON;
+			cell.append(b);
+		}
+		return cell;
+	};
 	const soldTable = (res) => {
 		const t = res.totals;
 		const rows = res.salesByTypeDay;
@@ -1357,7 +1802,7 @@
 		const th = (label, numeric) => el('th', { class: numeric ? 'numeric' : '', scope: 'col', text: label });
 		const td = (text, numeric, title, neg) => el('td', { class: `${numeric ? 'numeric' : ''}${neg ? ' neg' : ''}`, title: title || null, text });
 		const body = rows.map(r => el('tr', {},
-			td(nameOf(r.typeId), false, `type ${r.typeId}`),
+			soldItemCell(r),
 			td(r.day, false, 'UTC day (EVE time)'),
 			td(String(r.count), true), td(fmtQty(r.qty), true),
 			td(fmtIsk(r.gross), true, fmtExact(r.gross)), td(fmtIsk(r.net), true, fmtExact(r.net)),
@@ -1505,9 +1950,9 @@
 			renderBanners();
 		}
 	});
-	eventsChk.addEventListener('change', () => {
-		showEvents = eventsChk.checked;
-		store.set('showEvents', showEvents);
+	presenceChk.addEventListener('change', () => {
+		showPresence = presenceChk.checked;
+		store.set('showPresence', showPresence);
 		renderSold();
 	});
 	refreshBtn.addEventListener('click', () => { tick(); });
@@ -1598,9 +2043,9 @@
 	}, 1000);
 	// Relative times and the verdicts' clock move on without a read; not while a mark or a figure has focus.
 	setInterval(() => {
-		if (!isLive() || ticking || document.hidden) return;
+		if (!isLive() || ticking || document.hidden || !snapEl.hidden) return; // nor under an open snapshot panel
 		const a = document.activeElement;
-		if (a && (tbodyEl.contains(a) || soldBodyEl.contains(a))) return;
+		if (a && (tbodyEl.contains(a) || soldBodyEl.contains(a) || soldTableEl.contains(a))) return;
 		recompute();
 		renderChips();
 		renderOpen();

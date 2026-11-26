@@ -437,7 +437,24 @@
 		.mark {
 			color: #8a4b00;
 		}
-		button.copyName {
+		/* a figure the public book has newer than the orders feed (decision 16): the export page's dotted underline
+		   for a figure that is not what its column usually reads from; the tooltip says which source says what */
+		.fromBook {
+			text-decoration: underline dotted;
+			text-underline-offset: 2px;
+		}
+		/* an order the newest book no longer lists (filled or cancelled): dimmed, its "not in book" badge says why */
+		#orders tr.notInBook td {
+			color: #6b6b6b;
+		}
+		#orders tr.notInBook .verdict {
+			opacity: 0.55;
+		}
+		#orders tr.notInBook td.nameCell .name {
+			font-weight: normal;
+		}
+		/* the icon buttons beside an item name: copy the name, open the export snapshot */
+		button.copyName, button.snapBtn {
 			display: inline-flex;
 			align-items: center;
 			justify-content: center;
@@ -454,7 +471,7 @@
 			font: inherit;
 			line-height: 1;
 		}
-		tr:hover .copyName, .copyName:focus-visible {
+		tr:hover .copyName, .copyName:focus-visible, tr:hover .snapBtn, .snapBtn:focus-visible, .snapBtn[aria-expanded=true] {
 			color: #111;
 		}
 		button.copyName.pending, button.copyName.failed {
@@ -594,16 +611,19 @@
 			border: 2px solid #52514e;
 			background: #fcfcfb;
 		}
-		.sw.tick {
-			width: 3px;
-			height: 14px;
+		/* the presence lines' keys: solid (on top), dotted (listed), and a gap (no sell order of ours) */
+		.sw.line {
+			width: 18px;
+			height: 2px;
+		}
+		.sw.lineTop {
 			background: #52514e;
 		}
-		.sw.hollowTick {
-			width: 6px;
-			height: 14px;
-			border: 1.25px solid #52514e;
-			background: #fcfcfb;
+		.sw.lineListed {
+			background: radial-gradient(circle, #52514e 0.9px, transparent 1.1px) 0 50% / 4px 2px repeat-x;
+		}
+		.sw.lineGap {
+			background: linear-gradient(to right, #52514e 0 6px, transparent 6px 12px, #52514e 12px);
 		}
 		.chartBody {
 			position: relative;
@@ -754,6 +774,61 @@
 			color: #52514e;
 			margin-top: 3px;
 		}
+		/* the export snapshot panel (decision 22): one at a time, anchored below the button that opened it */
+		#snap {
+			position: absolute;
+			z-index: 25;
+			width: 31em;
+			max-width: calc(100vw - 16px);
+			box-sizing: border-box;
+			background: #fff;
+			color: #0b0b0b;
+			border: 1px solid rgba(11, 11, 11, 0.22);
+			border-radius: 6px;
+			box-shadow: 0 2px 12px rgba(0, 0, 0, 0.16);
+			padding: 8px 12px 10px;
+			font-variant-numeric: tabular-nums;
+		}
+		#snap:focus {
+			outline: none;
+		}
+		#snap:focus-visible {
+			outline: 2px solid #4a72c4;
+		}
+		#snap .snapHead {
+			display: flex;
+			align-items: baseline;
+			justify-content: space-between;
+			gap: 10px;
+		}
+		#snap h3 {
+			font-size: 14px;
+			margin: 0;
+		}
+		#snap .snapRun {
+			margin: 4px 0 6px;
+			color: #333;
+		}
+		#snap .snapTable {
+			width: 100%;
+		}
+		#snap .snapTable th, #snap .snapTable td {
+			padding: 2px 6px;
+			border-bottom: 1px solid #eee;
+			white-space: nowrap;
+		}
+		#snap .snapTable thead th {
+			font-weight: 600;
+			border-bottom: 1px solid #bbb;
+		}
+		#snap .snapTable tbody th {
+			font-weight: normal;
+			text-align: left;
+			white-space: normal; /* the labels wrap on a narrow screen; the figures do not */
+		}
+		#snap .snapSeen {
+			margin: 6px 0 0;
+		}
 		.sr {
 			position: absolute;
 			width: 1px;
@@ -815,7 +890,7 @@
 				<h2 id="soldHead">Sold recently</h2>
 				<div class="ctls">
 					<div class="seg" id="winSeg" role="group" aria-label="Window"></div>
-					<label title="a tick at each price change of ours, and a hollow tick at each moment someone priced below us, on each item's row"><input type="checkbox" id="showEvents"> show order events</label>
+					<label id="presenceLabel" title="a line near the bottom of each item's row: solid while one of our sell orders of the item was the lowest at its station, dotted while someone was lower, missing while we had none"><input type="checkbox" id="showPresence"> show when we were listed and on top</label>
 				</div>
 			</div>
 			<div id="soldTotals"></div>
@@ -834,5 +909,6 @@
 		<input id="countBonuses" type="checkbox">
 	</div>
 	<div id="tip" role="presentation" hidden></div>
+	<div id="snap" role="dialog" aria-modal="false" aria-labelledby="snapTitle" tabindex="-1" hidden></div>
 </body>
 </html>

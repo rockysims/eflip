@@ -723,7 +723,7 @@
 	const nameCell = (r) => {
 		const flags = FLAG_ORDER.filter(f => r.flags.includes(f))
 			.map(f => `<span class="flag" title="${esc(FLAG_HELP[f])}">${f}</span>`).join('');
-		return `<td class="text nameCell"><span class="name" title="${esc(nameOf(r.typeId))}">${esc(nameOf(r.typeId))}</span> <span class="dim">${r.typeId}</span>${flags}</td>`;
+		return `<td class="text nameCell"><span class="name" title="${esc(`${nameOf(r.typeId)}\ntype ${r.typeId}`)}">${esc(nameOf(r.typeId))}</span>${flags}</td>`;
 	};
 
 	const barLegendHtml = `<span class="key"><span><b>Cost mix</b>, share of gross sales:</span></span>${[['buy', 'buy'], ['haul', 'haul'], ['tax', 'tax'], ['listing', 'listing fee'], ['relist', 'relist fee']].map(([k, label]) => `<span class="key"><span class="sw" style="background:var(--c-${k})"></span>${label}</span>`).join('')}<span class="key"><span class="sw" style="background:var(--c-track)"></span>left as profit</span><span class="key"><span><b>Profit bar</b>:</span></span><span class="key"><span class="sw" style="background:var(--c-profit)"></span>profit</span><span class="key"><span class="sw" style="background:var(--c-loss)"></span>loss</span><span class="key">hover a bar for the exact figures</span>`;
