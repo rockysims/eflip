@@ -223,3 +223,29 @@ See the chat message of 2026-11-25 (batched, with suggested answers). Answers ge
    each type's folded log keeps its history; the 24-hour measurement sets both from real growth.
    Two amendments made when briefing P2.1: fetch all orders (not sell-only) so buy orders never look
    vanished in the shared logs; measure against a 24-hour raw window rather than 48.
+
+## Storage budget with shares (Rocky, 2026-11-25) and its rough edges
+
+Rocky: "perhaps we should assign things shares in a total amount of space allotted so for example I
+could allocate 1GB and then it would save history until 1GB then trim old data ... the 1GB can be
+shared among all the data we want to save while allowing different things to have different
+percentages of the allotted storage space." Written into M2 P2.2 and plan decision 8.
+
+Measured here (a week, two characters): raw/public 63 MB (358 per-type books, 339 histories),
+ledger/market 5.6 MB, character raw about 2 MB, esi-cache 2.9 MB. gzip: a book log 24,193 → 2,297
+bytes (10.5x), a raw page 11,251 → 1,868 (6x).
+
+Rough edges:
+1. Replaceable vs irreplaceable: regional pages, per-type raw books and the logs can be refetched or
+   regrow; character wallet/order raw cannot (ESI keeps only recent history). Only the first group
+   is budgeted.
+2. Trimming a log is a real loss: the raw behind it is gone first, so the oldest history past the
+   budget cannot be rebuilt. That is the budget's purpose; the README says so.
+3. Strict shares waste room (a quiet kind leaves its share empty); soft shares (enforce the total,
+   trim the kind furthest over its share) use it. Proposed: soft.
+4. Floors keep the system working under any budget: the newest snapshot, the newest file per slug,
+   the last 3 days of every log (M1's window floor), the newest run context.
+5. Book-log trimming must hold the market lock (the watch refresh appends every five minutes).
+6. Gzip touches every reader of raw pages and logs; both forms must read, so nothing migrates.
+7. Sizes are file bytes, not disk blocks; close enough. A lowered budget trims at the next run.
+8. Without the budget set, the region job would grow unbounded: the env notice must say so.

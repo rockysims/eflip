@@ -105,10 +105,14 @@ raw; 358 book logs on this machine), Rocky's answers and the rough edges.
    (`docs/ui-decisions/README.md`, a11y rule).
 8. **M2 storage.** Hourly, the destination region's order pages (`order_type=all`, 194 for Domain:
    all orders, so the shared logs keep seeing buy orders; amended 2026-11-25) are stored raw and
-   folded per type into the existing book logs, one sample per type per snapshot. Raw regional pages
-   are kept 24 hours (amended from 48 the same day; P2.1 measures first); the rebuild-from-raw
-   invariant holds inside that window and the folded logs are the durable record. Path entries
-   older than 90 days are pruned per type, after the measurement phase confirms the growth rate.
+   folded per type into the existing book logs, one sample per type per snapshot. Retention is a
+   **storage budget with shares** (Rocky, 2026-11-25; the fixed 24 h / 90 d windows are dropped): one
+   allotment (`EFLIP_STORAGE_BUDGET`, e.g. 1 GB) shared by the bulky kinds (regional pages, book logs,
+   per-type raw books, run contexts) in configurable percentages; when the total is over, the kind
+   furthest over its share is trimmed oldest first, under floors that keep the newest snapshot and
+   the last 3 days of every log. Book logs and raw pages are gzipped (about 10x and 6x). Character
+   data stays outside the budget. The rebuild-from-raw invariant holds for the raw the budget still
+   holds; the folded logs are the durable record beyond it. P2.1 measures first.
 9. **M2 budget and manners.** At most ~400 `market-order` tokens a snapshot; the job defers while
    an export run is going (as the market sync does) and pauses under 20 % remaining.
 10. **Coordination.** M2 changes files the order-monitor session is still changing; it starts

@@ -49,16 +49,43 @@ Domain all orders: 194 pages, ~238 KB each, 388 tokens a snapshot; sell-only pag
 - Run it on Rocky's machine for 24 h; write bytes per snapshot (raw and log growth), tokens, and
   sell-page count into `notes.md`. Review gate here.
 
-## P2.2 — retention and rebuild (sonnet, after the gate)
+## P2.2 — a storage budget with shares, and compression (sonnet, after the gate)
 
-- Raw regional pages older than 48 h are deleted by the job (`data/raw/public/markets-<region>-
-  orders-sell-page-*`), never other raw. Document in `lib/dataFiles.js`'s header and the README
-  that the rebuild-from-raw invariant holds for regional pages inside 48 h, and that book logs are
-  the durable record beyond it.
-- Per-type pruning: path entries and samples older than 90 days are dropped when a log is written,
-  keeping each order's latest entry; `derive --rebuild` applies the same cut. Tests for both.
-- If the measured growth exceeds ~50 MB a day after pruning, stop and re-plan (bigger window
-  trimming, or station-only storage).
+Rocky (2026-11-25): "assign things shares in a total amount of space allotted so for example I could
+allocate 1GB and then it would save history until 1GB then trim old data ... the 1GB can be shared
+among all the data we want to save while allowing different things to have different percentages."
+This replaces the fixed windows (24 h raw, 90 days of log) with one budget.
+
+- **Config.** `EFLIP_STORAGE_BUDGET` (e.g. `1GB`; absent: no trimming, and the pages' env notice says
+  so while the region job is on) and `EFLIP_STORAGE_SHARES` (e.g.
+  `regionPages:40,bookLogs:45,typeBooks:10,runContexts:5`, the defaults; percentages, sum ≤ 100).
+- **Kinds in the budget** (bulky, replaceable or derived): `regionPages` = the hourly regional order
+  pages (raw); `bookLogs` = `data/ledger/market/*`; `typeBooks` = the per-type raw books and
+  histories under `raw/public` (market sync and watch refresh); `runContexts` = the `context` of
+  saved runs (the rows stay). **Outside the budget**: character raw and ledgers, retained snapshots,
+  sync logs, `esi-cache` bookkeeping: small, and irreplaceable (ESI serves only recent wallet and
+  order history).
+- **Soft shares.** The total is what is enforced. After each snapshot the job measures each kind's
+  bytes on disk and, while the total exceeds the budget, trims the kind furthest over its share
+  (bytes ÷ share), oldest first, in the unit natural to it: `regionPages` by whole snapshot;
+  `typeBooks` by whole raw file, oldest stamps first; `bookLogs` by one time cutoff applied to path
+  entries and samples across all logs, keeping each order's newest entry; `runContexts` by whole
+  run. A kind under its share lends the room.
+- **Floors trimming never crosses:** the newest regional snapshot; the newest raw file per slug; the
+  last 3 days of every book log (M1's window floor); the newest run's context.
+- **Compression.** Book logs and raw pages are written gzipped (`.json.gz`) and read in either form,
+  so nothing migrates: measured 10.5x on a log (24,193 → 2,297 bytes) and 6x on a raw page, so 1 GB
+  holds months of region-wide logs rather than weeks. Every reader (`readMarket`, the book reader,
+  `rebuildBookLogs`, the raw store's `list`/`latest`) must accept both forms.
+- **Code.** A pure planner `lib/storage-budget.js`: `planTrim({budgetBytes, kinds: [{name, share,
+  bytes, items: [{at, bytes}]}], floors})` → per kind the items or the cutoff to drop, with tests
+  (shares that lend, floors, a shrunk budget, sums over 100 rejected). The job applies the plan under
+  the `market` lock (the watch refresh appends to the logs every five minutes). `scripts/sync.js
+  --storage` prints usage per kind against its share and what the last trim removed; `/api/config`
+  reports budget and usage; the pages' env notice shows "storage 62 % of 1 GB".
+- **What is lost, said plainly in the README:** once trimmed, the oldest history is gone for good
+  (the raw pages behind it went earlier); that is the budget's purpose. A lowered budget trims at
+  the next run. The rebuild-from-raw invariant holds for whatever raw the budget still holds.
 
 ## P2.3 — on by default, docs (haiku: mechanical)
 
