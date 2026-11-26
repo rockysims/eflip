@@ -1481,3 +1481,153 @@ test('row.lots: the type\'s lots with units left, newest first, as facts.lots gi
 	assert.equal(r.landedUnits, 6); // the same remainder the landed cost is taken over
 	assert.deepEqual(rowOf(out, 2).lots, []);
 });
+
+//--- Phase 6: other sellers' fills (decision 26)
+
+const fill = (from, to, units, price, orderId, kind, locationId = D) => ({ from, to, units, price, orderId, locationId, kind });
+const hoursAgo = (h) => ago(h * HOUR);
+
+// Type T at D over a 2-day window (hours ago). Checks: stored at 20, 10, 8, 6, 4 and 2 h, 304s at 12 and 7 h.
+// Our 11 at 100 since 30 h (its own drop at 4 h is never another seller's). 901 at 90 has 2 fewer by the
+// 10 h check, where it is also re-priced to 88, and 2 fewer again by 4 h; 902 (4 left at 95) is last seen at
+// 8 h and gone at 6 h; 903 likewise, but issued 90 days and 7 h ago, so it had expired; 904 was issued as
+// long ago but re-issued at 96 by the 10 h check, so it had not; 905 (7 left at 99) vanished at 6 h while
+// 906, a new order at the station with 7 units, came in at that check (a cancel-and-relist); 909 at another
+// station has 2 fewer by 8 h; 910 is a buy order with fewer units.
+const fillsFixture = () => {
+	const at = hoursAgo;
+	const seen = (rec, h) => ({ ...rec, lastSeen: at(h) });
+	const checks = [[20, true], [12, false], [10, true], [8, true], [7, false], [6, true], [4, true], [2, true]]
+		.map(([h, stored]) => ({ at: at(h), stored }));
+	return {
+		openOrders: { [GRANT]: { fetchedAt: ago(5 * MIN), orders: [mine({ id: 11, price: 100, remain: 5, issued: at(30) })] } },
+		orderLogs: { [GRANT]: { 11: logEntry({ path: [[at(29), 100, 5, at(30)]] }) } },
+		bookLogs: { [T]: { [REGION]: { samples: checks, orders: {
+			11: seen(bookLogOrder({ path: [[at(20), 100, 5, at(30)], [at(4), 100, 4, at(30)]] }), 2), // ours
+			901: seen(bookLogOrder({ path: [[at(20), 90, 5, at(21)], [at(10), 88, 3, at(11)], [at(4), 88, 1, at(11)]] }), 2),
+			902: seen(bookLogOrder({ path: [[at(20), 95, 4, at(21)]] }), 8),
+			903: seen(bookLogOrder({ path: [[at(20), 97, 2, ago(90 * DAY + 7 * HOUR)]] }), 8),
+			904: seen(bookLogOrder({ path: [[at(20), 97, 2, ago(90 * DAY + 7 * HOUR)], [at(10), 96, 2, at(11)]] }), 8),
+			905: seen(bookLogOrder({ path: [[at(20), 99, 7, at(21)]] }), 8),
+			906: seen(bookLogOrder({ path: [[at(6), 99.5, 7, at(6.1)]] }), 2),
+			909: seen(bookLogOrder({ loc: ELSEWHERE, path: [[at(20), 80, 3, at(21)], [at(8), 80, 1, at(21)]] }), 2),
+			910: seen(bookLogOrder({ isBuy: true, path: [[at(20), 70, 9, at(21)], [at(8), 70, 2, at(21)]] }), 2)
+		} } } },
+		thresholds: { windowMs: 2 * DAY }
+	};
+};
+
+test("other sellers' fills: drops bounded by the check before (a 304 too), gones, no expiry or relist; oldest first", () => {
+	const at = hoursAgo;
+	const out = run(fillsFixture());
+	assert.deepEqual(Object.keys(out.otherFills).map(Number), [T]);
+	assert.deepEqual(out.otherFills[T], [
+		fill(at(12), at(10), 2, 90, 901, 'drop'), // the 304 at 12 h bounds it; the price before the re-price
+		fill(at(7), at(6), 4, 95, 902, 'gone'),   // last seen at 8 h; the 304 at 7 h still listed it
+		fill(at(7), at(6), 2, 96, 904, 'gone'),   // re-issued at 11 h: not expired
+		fill(at(6), at(4), 2, 88, 901, 'drop')
+	]);
+
+	// region scope: the other station's order too
+	const region = run({ ...fillsFixture(), thresholds: { windowMs: 2 * DAY, scope: 'region' } });
+	assert.deepEqual(region.otherFills[T].map(e => [e.orderId, e.kind, e.to, e.locationId]), [
+		[901, 'drop', at(10), D], [909, 'drop', at(8), ELSEWHERE], [902, 'gone', at(6), D], [904, 'gone', at(6), D], [901, 'drop', at(4), D]
+	]);
+
+	// station scope, with an order of ours at the other station inside the window: its station counts too
+	const two = fillsFixture();
+	two.orderLogs[GRANT][12] = logEntry({ loc: ELSEWHERE, path: [[at(30), 85, 1, at(31)]], end: { state: 'cancelled', volumeRemain: 1, at: at(1) } });
+	assert.deepEqual(run(two).otherFills[T].map(e => e.orderId), [901, 909, 902, 904, 901]);
+});
+
+test("other sellers' fills: only `to` inside (now - window, now]; a check after now is ignored", () => {
+	// a 1-day window: 921 loses a unit at the check exactly a day ago (outside), 922 two a minute later
+	// (inside); 923 is gone at the check a day ago (outside), 924 at the one a minute later (inside); 925
+	// loses a unit and 926 is gone at a check an hour after now (impossible, ignored)
+	const checks = [ago(25 * HOUR), ago(DAY), ago(DAY - MIN), ago(HOUR), ago(-HOUR)].map(at => ({ at, stored: true }));
+	const order = (path, lastSeen) => ({ ...bookLogOrder({ path }), lastSeen });
+	const out = run({
+		openOrders: { [GRANT]: [mine({ id: 11, price: 100, remain: 1, issued: ago(30 * HOUR) })] },
+		bookLogs: { [T]: { [REGION]: { samples: checks, orders: {
+			921: order([[ago(25 * HOUR), 50, 5, ago(26 * HOUR)], [ago(DAY), 50, 4, ago(26 * HOUR)]], ago(-HOUR)),
+			922: order([[ago(25 * HOUR), 51, 5, ago(26 * HOUR)], [ago(DAY - MIN), 51, 3, ago(26 * HOUR)]], ago(-HOUR)),
+			923: order([[ago(25 * HOUR), 52, 2, ago(26 * HOUR)]], ago(25 * HOUR)),
+			924: order([[ago(25 * HOUR), 53, 2, ago(26 * HOUR)]], ago(DAY)),
+			925: order([[ago(25 * HOUR), 54, 2, ago(26 * HOUR)], [ago(-HOUR), 54, 1, ago(26 * HOUR)]], ago(-HOUR)),
+			926: order([[ago(25 * HOUR), 55, 2, ago(26 * HOUR)]], ago(HOUR))
+		} } } },
+		thresholds: { windowMs: DAY }
+	});
+	assert.deepEqual(out.otherFills[T], [
+		fill(ago(DAY), ago(DAY - MIN), 2, 51, 922, 'drop'),
+		fill(ago(DAY), ago(DAY - MIN), 2, 53, 924, 'gone')
+	]);
+});
+
+test("other sellers' fills: a relist is a new competing order at the same station, first seen at the vanishing check, with the vanished units", () => {
+	const { parseBookLog, competitorsIn, otherFillsOf } = ordersCalc._internal;
+	const checks = [ago(3 * HOUR), ago(2 * HOUR), ago(HOUR)].map(at => ({ at, stored: true }));
+	const vanished = { ...bookLogOrder({ path: [[ago(3 * HOUR), 100, 6, ago(4 * HOUR)]] }), lastSeen: ago(3 * HOUR) }; // gone at 2 h
+	const fresh = ({ loc = D, total = 6, remain = total, at = ago(2 * HOUR) } = {}) => ({
+		...bookLogOrder({ loc, path: [[at, 101, remain, at]] }), volumeTotal: total, lastSeen: ago(HOUR)
+	});
+	const kindsWith = (other, ownIds = new Set()) => {
+		const log = parseBookLog({ samples: checks, orders: { 1: vanished, 2: other } });
+		return otherFillsOf(log, competitorsIn(log, D, ownIds, 'station'), ownIds, NOW_MS - DAY, NOW_MS).filter(e => e.orderId === 1).map(e => e.kind);
+	};
+	assert.deepEqual(kindsWith(fresh()), []);                         // relisted
+	assert.deepEqual(kindsWith(fresh({ remain: 4 })), []);            // relisted, and 2 sold before the check: volumeTotal decides
+	assert.deepEqual(kindsWith(fresh({ total: 5 })), ['gone']);       // another quantity
+	assert.deepEqual(kindsWith(fresh({ loc: ELSEWHERE })), ['gone']); // another station
+	assert.deepEqual(kindsWith(fresh({ at: ago(HOUR) })), ['gone']);  // a check later
+	assert.deepEqual(kindsWith(fresh(), new Set([2])), ['gone']);     // the new order is ours
+
+	// the expiry test needs both the issued and the duration
+	const old = ago(91 * DAY);
+	const gone = (rec) => {
+		const log = parseBookLog({ samples: checks, orders: { 1: rec } });
+		return otherFillsOf(log, log.orders).map(e => [e.kind, e.from, e.to, e.units, e.price]);
+	};
+	const oldOrder = { ...bookLogOrder({ path: [[ago(3 * HOUR), 100, 6, old]] }), lastSeen: ago(3 * HOUR) };
+	assert.deepEqual(gone(oldOrder), []);
+	assert.deepEqual(gone({ ...oldOrder, duration: null }), [['gone', ago(3 * HOUR), ago(2 * HOUR), 6, 100]]);
+	assert.deepEqual(gone({ ...oldOrder, path: pathOf([[ago(3 * HOUR), 100, 6, null]]) }), [['gone', ago(3 * HOUR), ago(2 * HOUR), 6, 100]]);
+
+	// a log without checks: a drop with no check before it has a null from, and nothing is ever gone
+	const bare = parseBookLog({ orders: { 7: bookLogOrder({ path: [[ago(3 * HOUR), 10, 4, ago(4 * HOUR)], [ago(HOUR), 10, 1, ago(4 * HOUR)]] }) } });
+	assert.deepEqual(otherFillsOf(bare, bare.orders), [{ from: null, to: ago(HOUR), units: 3, price: 10, orderId: 7, locationId: D, kind: 'drop' }]);
+});
+
+test("other sellers' fills: a type we only sold in the window takes the sale's station, else its whole book log", () => {
+	const at = hoursAgo;
+	const log = { samples: [at(6), at(4), at(2)].map(a => ({ at: a, stored: true })), orders: {
+		931: { ...bookLogOrder({ path: [[at(6), 40, 5, at(7)], [at(4), 40, 4, at(7)]] }), lastSeen: at(2) },
+		932: { ...bookLogOrder({ loc: ELSEWHERE, path: [[at(6), 41, 5, at(7)], [at(4), 41, 3, at(7)]] }), lastSeen: at(2) }
+	} };
+	const sale = (over = {}) => ({ ...sellFact({ date: at(3), type: T2, price: 40 }), ...over });
+	const input = (sells, over = {}) => ({
+		bookLogs: { [T2]: { [REGION]: log } }, facts: { sells, lots: [], relists: [] },
+		stations: { [D]: { name: 'Amarr VIII (Oris) - Emperor Family Academy', regionId: REGION } }, ...over
+	});
+	const ids = (out) => out.otherFills[T2].map(e => e.orderId);
+	const atD = run(input([sale({ locationId: D })]));
+	assert.deepEqual(atD.otherFills, { [T2]: [fill(at(6), at(4), 1, 40, 931, 'drop')] });
+	assert.deepEqual(ids(run(input([sale({ locationId: D })], { thresholds: { scope: 'region' } }))), [931, 932]);
+	assert.deepEqual(ids(run(input([sale({ locationId: D })], { stations: {} }))), [931]); // the type's only book-log region
+	assert.deepEqual(ids(run(input([sale()]))), [931, 932]);                               // a sale row without a station
+	assert.deepEqual(run(input([sale({ date: ago(8 * DAY) })])).otherFills, {});           // sold before the window
+});
+
+test("other sellers' fills: [] for a type with no competitor change or no book log; nothing for a type we neither list nor sold", () => {
+	const at = hoursAgo;
+	const checks = [at(4), at(2)].map(a => ({ at: a, stored: true }));
+	const out = run({
+		openOrders: { [GRANT]: [mine({ id: 1, type: T3, price: 100, remain: 1, issued: at(5) }), mine({ id: 2, type: T2, price: 100, remain: 1, issued: at(5) })] },
+		bookLogs: {
+			[T3]: { [REGION]: { samples: checks, orders: { 941: { ...bookLogOrder({ path: [[at(4), 90, 3, at(6)]] }), lastSeen: at(2) } } } },
+			[T]: { [REGION]: { samples: checks, orders: { 942: { ...bookLogOrder({ path: [[at(4), 90, 3, at(6)], [at(2), 90, 1, at(6)]] }), lastSeen: at(2) } } } }
+		}
+	});
+	assert.deepEqual(out.otherFills, { [T2]: [], [T3]: [] });
+	assert.deepEqual(compute({ now: NOW }).otherFills, {});
+});

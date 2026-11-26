@@ -1128,6 +1128,7 @@
 				const row = {
 					date: iso(s.ms), eveHour: new Date(s.ms).getUTCHours(), weekday: new Date(s.ms).getUTCDay(),
 					typeId, characterId: s.characterId, sellTxId: s.transaction_id, journalId: mt ? mt.id : null,
+					locationId: s.location_id !== undefined ? s.location_id : null, // the station of the sale (the orders page's station fallback)
 					qty: a.qty, unitPrice: s.unit_price, gross,
 					tax: taxShare, taxEst: tax.est,
 					brokerShare: soldQty > 0 ? listingTotal * a.qty / soldQty : 0,

@@ -1000,11 +1000,14 @@ test('fact table: every sells row ties back to a lot and a sell, and the sells s
 	const x = factFixture();
 	const r = x.f.compute({ now: at('11-10T00:00:00') });
 	const lotIds = new Set(r.facts.lots.map(l => l.lotId));
-	const sellIds = new Set(Object.values(x.f.ledgers).flatMap(l => l.transactions).filter(t => !t.is_buy).map(t => t.transaction_id));
+	const sellTxs = Object.values(x.f.ledgers).flatMap(l => l.transactions).filter(t => !t.is_buy);
+	const sellIds = new Set(sellTxs.map(t => t.transaction_id));
+	const stationOfTx = new Map(sellTxs.map(t => [t.transaction_id, t.location_id]));
 	assert.equal(r.facts.sells.length, 3);
 	for (const s of r.facts.sells) {
 		assert.ok(lotIds.has(s.lotId), `lot ${s.lotId}`);
 		assert.ok(sellIds.has(s.sellTxId), `sell ${s.sellTxId}`);
+		assert.equal(s.locationId, stationOfTx.get(s.sellTxId), `station of sale ${s.sellTxId}`); // the orders page's station fallback reads it
 	}
 	for (const t of r.types) {
 		const rows = r.facts.sells.filter(s => s.typeId === t.typeId);

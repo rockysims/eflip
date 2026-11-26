@@ -611,19 +611,45 @@
 			border: 2px solid #52514e;
 			background: #fcfcfb;
 		}
-		/* the presence lines' keys: solid (on top), dotted (listed), and a gap (no sell order of ours) */
+		/* the presence lines' keys (decision 25): a thick dark line (on top), a thin grey one (listed) and a gap
+		   (no sell order of ours), each in a 4 px box with the line at its bottom, so the bottoms align as on the chart */
 		.sw.line {
 			width: 18px;
-			height: 2px;
+			height: 4px;
 		}
 		.sw.lineTop {
 			background: #52514e;
 		}
 		.sw.lineListed {
-			background: radial-gradient(circle, #52514e 0.9px, transparent 1.1px) 0 50% / 4px 2px repeat-x;
+			background: linear-gradient(#9c9b94, #9c9b94) left bottom / 100% 2px no-repeat;
 		}
 		.sw.lineGap {
-			background: linear-gradient(to right, #52514e 0 6px, transparent 6px 12px, #52514e 12px);
+			background: linear-gradient(to right, #9c9b94 0 6px, transparent 6px 12px, #9c9b94 12px) left bottom / 100% 2px no-repeat;
+		}
+		/* other sellers' fills (decision 26): an upward triangle, solid; hollow is a surface-coloured triangle
+		   layered inside it, leaving an outline */
+		.sw.tri,
+		#tip .tk.tri {
+			position: relative;
+			width: 12px;
+			height: 11px;
+			background: #52514e;
+			clip-path: polygon(50% 0, 100% 100%, 0 100%);
+		}
+		#tip .tk.tri {
+			width: 10px;
+			height: 9px;
+		}
+		.sw.triHollow::after,
+		#tip .tk.triHollow::after {
+			content: '';
+			position: absolute;
+			left: 24%;
+			top: 30%;
+			width: 52%;
+			height: 52%;
+			background: #fcfcfb;
+			clip-path: polygon(50% 0, 100% 100%, 0 100%);
 		}
 		.chartBody {
 			position: relative;
@@ -877,7 +903,7 @@
 		</div>
 		<div id="feeRates" class="block dim" hidden></div>
 		<section id="openSection" aria-labelledby="openHead">
-			<h2 class="sectionHead" id="openHead">Open sell orders <span id="openCount" class="dim"></span> <button type="button" class="linkish" id="defaultOrder" hidden>back to the default order</button></h2>
+			<h2 class="sectionHead" id="openHead">Open sell orders <span id="openCount" class="dim"></span> <button type="button" class="linkish" id="defaultOrder" title="sort by character, then by verdict" hidden>back to the default order</button></h2>
 			<div id="openNote" class="block muted"></div>
 			<table id="orders" aria-label="Open sell orders" hidden>
 				<thead><tr id="sortRow"></tr></thead>
@@ -890,7 +916,7 @@
 				<h2 id="soldHead">Sold recently</h2>
 				<div class="ctls">
 					<div class="seg" id="winSeg" role="group" aria-label="Window"></div>
-					<label id="presenceLabel" title="a line near the bottom of each item's row: solid while one of our sell orders of the item was the lowest at its station, dotted while someone was lower, missing while we had none"><input type="checkbox" id="showPresence"> show when we were listed and on top</label>
+					<label id="presenceLabel" title="a line near the bottom of each item's row: thick and dark while one of our sell orders of the item was the lowest at its station, thin and grey while someone was lower, missing while we had none"><input type="checkbox" id="showPresence"> show when we were listed and on top</label>
 				</div>
 			</div>
 			<div id="soldTotals"></div>

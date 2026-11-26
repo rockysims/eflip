@@ -44,9 +44,9 @@
 //   now             ms since the epoch (or an ISO string). Required: compute throws without it.
 //
 // OUTPUT (rule 10): {rows, sales, salesClusters, pending, salesByTypeDay, share, timeOnTop: {overall,
-//   byType}, presence, totals, feeRates, asOf: {orders, books, transactions}, warnings, taxRate,
-//   thresholds}. Dates are ISO strings, durations ms, prices and amounts ISK, nothing rounded (the page
-//   formats; the reason tokens and sentences of rule 7 are the only text).
+//   byType}, presence, otherFills, totals, feeRates, asOf: {orders, books, transactions}, warnings,
+//   taxRate, thresholds}. Dates are ISO strings, durations ms, prices and amounts ISK, nothing rounded
+//   (the page formats; the reason tokens and sentences of rule 7 are the only text).
 //   The module also exports fmtCompactDuration(ms), the duration notation of the reason tokens:
 //   '<1min', '35min', '1.1h', '12h', '2.6d', '14d' (one decimal under 10, no space).
 //   rows, one per open sell order of characterIds, sorted per rule 7 (undercut, maybe, reconsider,
@@ -172,6 +172,23 @@
 //     ours ended, others remain), 'undercut' (more competitors below), 'cleared' (fewer), 'unknown'
 //     (the window's start, or the book log's first sample). bookLogSince: the first sample of the
 //     type's book logs (null without one).
+//   otherFills (decision 26): {[typeId]: [events]} for every type with a presence entry, a sale in
+//     salesClusters or a pending fill ([] when no competitor lost units), oldest first by `to` (then
+//     orderId), each {from, to, units, price, orderId, locationId, kind: 'drop' | 'gone'}: a competing
+//     sell order of the type's book log lost units between two checks. Competitors as in presence (not
+//     ours; at the station of an order of ours of the type open in the window, anywhere in its region
+//     under scope 'region'); a type with no such order takes the stations of its sales in the window
+//     and of its pending fills (the region through `stations`, else the type's only book-log region),
+//     else every competing sell order of its book logs. to: the check that first showed the loss;
+//     from: the last check of any kind before it (a 304 confirms the book unchanged, so it bounds the
+//     fill too; null when the log has none). drop (decision 13: a drop is always a fill): a path entry
+//     with fewer volumeRemain than the entry before; units the difference, price the earlier entry's.
+//     gone: an order whose goneMs (the first stored sample after its lastSeen) is `to` while its last
+//     entry still had units; units and price that entry's (sold out, or pulled). Not a gone: an order
+//     expired at `to` (its latest logged issued plus duration days at or before it; kept when either is
+//     unknown), and a cancel-and-relist (another competing sell order at the same station first seen
+//     at `to` with volumeTotal equal to the vanished units). Only events with `to` in (now - windowMs,
+//     now]. A first sighting below volumeTotal is no event: the units may have gone before the log.
 //   totals: {count, units, gross, net, profit, relistFees, pendingUnits, share} for the window.
 //   feeRates (decision 15): {[characterId]: {[locationId]: {rate, rows, since, est, observations:
 //     [{date, rate, orderId, typeId}]}}} per pooled character with an observation: observations are
@@ -335,7 +352,8 @@
 	// no longer listed it (goneMs; null while no stored sample has come since: present to now). A
 	// `stored: false` sample (a 304) saw the book unchanged, so it still listed every order of the last
 	// stored one, and lastSeen moves only on a stored sample: a 304 never ends an order. It is still a
-	// check, so `samples` (and sinceMs) keep it.
+	// check, so `samples` (and sinceMs) keep it. volumeTotal and duration (days) are the first sighting's
+	// (decision 26: a cancel-and-relist and an expiry are not other sellers' fills).
 	const parseBookLog = (log) => {
 		if (!isObj(log)) return null;
 		const sampleList = Array.isArray(log.samples) ? log.samples : [];
@@ -352,6 +370,7 @@
 			for (const e of path) if (e.issuedMs !== null && (appearMs === null || e.issuedMs < appearMs)) appearMs = e.issuedMs;
 			orders.push({
 				orderId: idNum(id), isBuy: rec.isBuy === true, locationId: idNum(rec.locationId), path,
+				volumeTotal: num(rec.volumeTotal), duration: num(rec.duration),
 				firstSeenMs, lastSeenMs, appearMs, goneMs: lastSeenMs === null ? null : firstAfter(storedSamples, lastSeenMs)
 			});
 		}
@@ -371,6 +390,17 @@
 			else lo = mid + 1;
 		}
 		return lo < sorted.length ? sorted[lo] : null;
+	};
+	// The last value of an ascending list less than x, or null.
+	const lastBefore = (sorted, x) => {
+		let lo = 0;
+		let hi = sorted.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >> 1;
+			if (sorted[mid] < x) lo = mid + 1;
+			else hi = mid;
+		}
+		return lo > 0 ? sorted[lo - 1] : null;
 	};
 	const presentAt = (c, ms) => c.appearMs !== null && c.appearMs <= ms && (c.goneMs === null || ms < c.goneMs);
 
@@ -560,6 +590,48 @@
 			from: iso(g.fromMs), to: iso(g.toMs), state: g.state, known: g.known, orderIds: g.orderIds,
 			below: g.below, lowestBelow: g.lowestBelow, cause: g.cause
 		}));
+	};
+
+	//--- other sellers' fills (decision 26)
+
+	// The units competing sell orders of one parsed book log lost between two of its checks, with `to`
+	// inside (fromMs, toMs]. competitors: the orders to look at (competitorsIn's choice); ownIds: our
+	// order ids, never a relist of theirs. A drop is a path entry with fewer volumeRemain than the
+	// entry before (decision 13: always a fill; market-stats.js fillsPerDay differences the same
+	// pairs); a gone is the order's first stored sample after its lastSeen while its last entry still
+	// had units, unless it had expired by then or a new competing order at the same station, first
+	// seen at that sample, lists exactly those units (a cancel-and-relist). `from` is the last check
+	// of any kind before `to`: a 304 saw the book unchanged, so the order still had its units then.
+	const otherFillsOf = (log, competitors, ownIds = new Set(), fromMs = -Infinity, toMs = Infinity) => {
+		const events = [];
+		if (!log) return events;
+		const inWindow = (ms) => ms !== null && ms > fromMs && ms <= toMs;
+		// every competing sell order's first sighting, by station and quantity (the vanished order's own
+		// first sighting is before its goneMs, so it never matches itself)
+		const fresh = new Set();
+		for (const o of log.orders) {
+			if (!o.isBuy && !ownIds.has(o.orderId) && o.firstSeenMs !== null && o.volumeTotal !== null) fresh.add(`${o.locationId}:${o.firstSeenMs}:${o.volumeTotal}`);
+		}
+		const eventOf = (kind, c, atMs, units, price) => ({
+			from: iso(lastBefore(log.samples, atMs)), to: iso(atMs), units, price, orderId: c.orderId, locationId: c.locationId, kind, atMs
+		});
+		for (const c of competitors) {
+			const entries = c.path.filter(e => e.atMs !== null && e.volumeRemain !== null);
+			for (let i = 1; i < entries.length; i++) {
+				const units = entries[i - 1].volumeRemain - entries[i].volumeRemain;
+				if (units > 0 && inWindow(entries[i].atMs)) events.push(eventOf('drop', c, entries[i].atMs, units, entries[i - 1].price));
+			}
+			const last = entries.length > 0 ? entries[entries.length - 1] : null;
+			if (last === null || !(last.volumeRemain > 0) || !inWindow(c.goneMs)) continue;
+			let issuedMs = null;
+			for (const e of c.path) issuedMs = maxOf(issuedMs, e.issuedMs);
+			if (issuedMs !== null && c.duration !== null && issuedMs + c.duration * DAY_MS <= c.goneMs) continue; // expired
+			if (fresh.has(`${c.locationId}:${c.goneMs}:${last.volumeRemain}`)) continue; // cancelled and relisted
+			events.push(eventOf('gone', c, c.goneMs, last.volumeRemain, last.price));
+		}
+		return events
+			.sort((a, b) => a.atMs - b.atMs || a.orderId - b.orderId)
+			.map(({ atMs, ...e }) => e);
 	};
 
 	//--- position (rule 2) and undercut (rule 3)
@@ -1466,6 +1538,46 @@
 		pending.sort((a, b) => b.ms - a.ms || a.orderId - b.orderId);
 		for (const p of pending) delete p.ms;
 
+		// decision 26: other sellers' fills, per type with presence, a sale or a pending fill in the window,
+		// from the competitors presence would count (by our orders' stations); a type with no order of
+		// ours in the window by the stations of its sales and pending fills, else its whole book logs
+		const otherFills = {};
+		const fillTypes = [...new Set([...ownsByType.keys(), ...salesClusters.map(c => c.typeId), ...pending.map(p => p.typeId)])]
+			.filter(typeId => typeId !== null).sort((a, b) => a - b);
+		for (const typeId of fillTypes) {
+			const groups = new Map(); // groupKey -> {regionId, locationId, scope}
+			const addGroup = (regionId, locationId) => {
+				if (regionId === null) return;
+				const key = t.scope === 'region' ? `${regionId}` : `${regionId}:${locationId}`;
+				if (!groups.has(key)) groups.set(key, { regionId, locationId, scope: t.scope });
+			};
+			const owns = ownsByType.get(typeId) || [];
+			if (owns.length > 0) {
+				for (const own of owns) addGroup(own.regionId, own.rec.locationId);
+			} else {
+				const logRegions = entriesOf(bookLogs[typeId]).map(([rid]) => idNum(rid)).filter(rid => rid !== null);
+				const regionOfStation = (locationId) => {
+					const st = isObj(stations[locationId]) ? stations[locationId] : null;
+					if (st && idNum(st.regionId) !== null) return idNum(st.regionId);
+					return logRegions.length === 1 ? logRegions[0] : null;
+				};
+				for (const s of windowSales) if (s.typeId === typeId && s.locationId !== null) addGroup(regionOfStation(s.locationId), s.locationId);
+				for (const p of pending) {
+					if (p.typeId !== typeId || p.locationId === null) continue;
+					const x = openById.get(p.orderId);
+					addGroup(x && x.regionId !== null ? x.regionId : regionOfStation(p.locationId), p.locationId);
+				}
+				if (groups.size === 0) for (const rid of logRegions) groups.set(`${rid}`, { regionId: rid, locationId: null, scope: 'region' });
+			}
+			const events = [];
+			for (const g of groups.values()) {
+				const log = bookLogOf(typeId, g.regionId);
+				if (log === null) continue;
+				events.push(...otherFillsOf(log, competitorsIn(log, g.locationId, ownIds, g.scope), ownIds, presenceFrom, nowMs));
+			}
+			otherFills[typeId] = events.sort((a, b) => toMs(a.to) - toMs(b.to) || a.orderId - b.orderId);
+		}
+
 		// rule 9: share of the regional volume, by type and UTC day, whole days on both sides (a day not
 		// yet in the history has no volume)
 		const days = windowDays(nowMs, t.windowMs);
@@ -1550,7 +1662,7 @@
 		const txAsOf = allSales.reduce((acc, s) => maxOf(acc, s.ms), null);
 
 		return {
-			rows, sales, salesClusters, pending, salesByTypeDay, share, timeOnTop, presence, totals, feeRates,
+			rows, sales, salesClusters, pending, salesByTypeDay, share, timeOnTop, presence, otherFills, totals, feeRates,
 			asOf: { orders: iso(ordersAsOf), books: iso(booksAsOf), transactions: iso(txAsOf) },
 			warnings, taxRate, thresholds: t
 		};
@@ -1564,7 +1676,7 @@
 		_internal: {
 			toMs, iso, median, recencyWeight, dayAge, priceAt, priceChanges, openSpanOf, dropsOf, episodesOf, firstUndercut,
 			reUndercutsOf, positionOf, dailyVolumeOf, typicalTradeOf, landedCostOf, feeObservationsOf, feeRateOf, feeEstimateOf, verdictOf,
-			compareRows, mergeSales, clusterSales, windowDays, presenceSegments, parseBookLog
+			compareRows, mergeSales, clusterSales, windowDays, presenceSegments, parseBookLog, competitorsIn, otherFillsOf
 		}
 	};
 });

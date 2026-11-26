@@ -3,12 +3,12 @@
 //
 // What it shows: the linked characters' open sell orders, each with where it stands in the queue, whether
 // and since when it was undercut, how fast others undercut it, what updating it would earn, and a verdict;
-// and what sold recently, as a timeline of sale clusters with a total per item and, per item row, lines for
-// when we were listed and on top; and per order or sales row, the export run that planned it (a snapshot
-// panel). Every figure is the user's own ESI data or ESI
-// market data, read through the server's /api routes (no token ever reaches this page); the analysis is
-// orders-calc.js (pure, tested), the FIFO costs behind it are results-calc.js, and this file only loads,
-// asks, and draws.
+// and what sold recently, as a timeline of sale clusters with a total per item (one profit scale) and, per
+// item row, lines for when we were listed and on top and triangles where other sellers' orders filled; and
+// per order or sales row, the export run that planned it (a snapshot panel). Every figure is the user's own
+// ESI data or ESI market data, read through the server's /api routes (no token ever reaches this page); the
+// analysis is orders-calc.js (pure, tested), the FIFO costs behind it are results-calc.js, and this file only
+// loads, asks, and draws.
 //
 // Flow: config -> results-shared's loader (characters, sync status, ledgers, retained snapshots, item
 // names and volumes, as the results page reads them) -> this page's own reads (the order logs, the books,
@@ -19,7 +19,8 @@
 //
 // Colour follows the dataviz skill: the documented blue and red pair for profit and loss, the status-like
 // verdict badges always with their word, and no mark or colour carries meaning alone (a loss is a square,
-// a profit a circle; pending is hollow; every mark has a tooltip, a legend entry and a row in the table).
+// a profit a circle; pending is hollow; another seller's fill a triangle; the presence lines differ in weight as
+// well as colour; every mark has a tooltip, a legend entry and a row in the table).
 // Light theme only, like the other pages.
 (() => {
 	if (typeof document === 'undefined') return;
@@ -50,6 +51,8 @@
 		{ key: '30d', label: '30d', ms: 30 * DAY_MS }
 	];
 	const REGION_NAMES = { Jita: 'The Forge', Amarr: 'Domain', Dodixie: 'Sinq Laison', Rens: 'Heimatar', Stacmon: 'Placid' };
+	// one dot per burst of sales (rule 8), and one triangle per burst of other sellers' fills: the window over 150, at least 10 minutes
+	const clusterGap = (windowMs) => Math.max(10 * MIN_MS, windowMs / 150);
 
 	//--- palette (dataviz skill, references/palette.md): the blue and red pair, ink and grid tokens
 
@@ -134,8 +137,10 @@
 	// the presence lines (decision 18), on by default; the Phase 3 `showEvents` key is ignored
 	let showPresence = store.get('showPresence', true) !== false;
 	let refreshOpen = store.get('refreshOpen', true) !== false;
-	let sort = store.get('sort', { key: null, dir: 'desc' });
-	if (!sort || typeof sort !== 'object') sort = { key: null, dir: 'desc' };
+	// the open-orders table's order (decision 27): by character, then verdict, by default; checked against the
+	// columns once they are defined (a stored `{key: null}`, the old verdict default, means the default)
+	const DEFAULT_SORT = Object.freeze({ key: 'character', dir: 'asc' });
+	let sort = store.get('sort', null);
 
 	//--- elements
 
@@ -400,7 +405,7 @@
 					scope: thresholds.scope,
 					halfLifeDays: estimate.defaultConfig.RECENCY_HALF_LIFE_DAYS,
 					daysConsidered: estimate.defaultConfig.DAYS_CONSIDERED,
-					clusterGapMs: Math.max(10 * MIN_MS, windowMs / 150),
+					clusterGapMs: clusterGap(windowMs),
 					windowMs
 				},
 				now
@@ -808,12 +813,13 @@
 	};
 	const COLUMNS = [
 		{ key: 'verdict', label: 'verdict', text: true, val: (r) => VERDICT_RANK[r.verdict], cell: verdictCell,
-			help: 'what to do with this order and why; the default order is undercut, maybe, reconsider, leave, top, then the longest queue first' },
+			help: 'what to do with this order and why; sorted, the order is undercut, maybe, reconsider, leave, top, the longest queue first within each; the default sort is by character, then by verdict' },
 		{ key: 'item', label: 'item', text: true, val: (r) => nameOf(r.typeId).toLowerCase(), cell: itemCell,
 			help: 'item name (type id in the tooltip)' },
-		// decision 19: shown only while more than one character has open orders (ctx.manyChars)
+		// decision 19: shown only while more than one character has open orders (ctx.manyChars); decision 27: the
+		// default sort, and the tie-break under every other column
 		{ key: 'character', label: 'character', text: true, manyOnly: true, val: (r) => charName(r.characterId).toLowerCase(),
-			help: 'whose order this is: the first name, the full name in the tooltip',
+			help: 'whose order this is: the first name, the full name in the tooltip; the default sort (then by verdict), and the tie-break under any other column',
 			cell: (r) => ({ t: esc(firstName(r.characterId)), title: charName(r.characterId) }) },
 		{ key: 'remaining', label: 'remaining / total', val: (r) => r.volumeRemain,
 			help: 'units still for sale of the units listed; underlined dotted when the public book is newer than the orders feed',
@@ -938,22 +944,39 @@
 				: r.badges.includes('nolog') ? blank('no order log for this order yet') : { t: '<span class="dim">none seen</span>', title: 'no fill since this order was first seen' }) }
 	];
 
-	if (sort.key !== null && !COLUMNS.some(c => c.key === sort.key)) sort = { key: null, dir: 'desc' }; // a saved column that no longer exists
+	// nothing stored, the old `{key: null}` verdict default, or a saved column that no longer exists: the default
+	if (!sort || typeof sort !== 'object' || !COLUMNS.some(c => c.key === sort.key)) sort = { ...DEFAULT_SORT };
+	else sort = { key: sort.key, dir: sort.dir === 'asc' ? 'asc' : 'desc' };
 
+	// The columns on show: the character column only while more than one character has rows (decision 19).
+	const manyCharsIn = (rows) => new Set(rows.map(r => r.characterId)).size > 1;
+	const shownColumns = (manyChars) => COLUMNS.filter(col => !col.manyOnly || manyChars);
+	// The order as seen: under a character sort with one character, every row ties on the character and the
+	// verdict tie-break (always ascending) is the order seen, so the verdict header carries the arrow (decision 27).
+	const shownSort = (manyChars) => (sort.key === 'character' && !manyChars ? { key: 'verdict', dir: 'asc' } : sort);
+	const isDefaultSort = (manyChars) => {
+		const s = shownSort(manyChars);
+		const d = manyChars ? DEFAULT_SORT : { key: 'verdict', dir: 'asc' };
+		return s.key === d.key && s.dir === d.dir;
+	};
+
+	// Sort by the chosen column (blanks last whatever the direction); ties break by the character, or by the
+	// verdict when the character is the chosen column (decision 27), ascending; then the module's order.
 	const sortedRows = (rows) => {
 		const col = COLUMNS.find(c => c.key === sort.key);
 		if (!col) return rows;
 		const dir = sort.dir === 'asc' ? 1 : -1;
-		return rows.slice().sort((a, b) => {
-			const x = col.val(a);
-			const y = col.val(b);
-			const xn = x === null || x === undefined || (typeof x === 'number' && Number.isNaN(x));
-			const yn = y === null || y === undefined || (typeof y === 'number' && Number.isNaN(y));
+		const blank = (v) => v === null || v === undefined || (typeof v === 'number' && Number.isNaN(v));
+		const cmp = (x, y, d) => {
+			const xn = blank(x);
+			const yn = blank(y);
 			if (xn || yn) return xn === yn ? 0 : xn ? 1 : -1;
-			if (x < y) return -dir;
-			if (x > y) return dir;
-			return 0; // equal: the module's order
-		});
+			return x < y ? -d : x > y ? d : 0;
+		};
+		const tie = COLUMNS.find(c => c.key === (col.key === 'character' ? 'verdict' : 'character'));
+		return rows.map((r, i) => ({ r, i }))
+			.sort((a, b) => cmp(col.val(a.r), col.val(b.r), dir) || cmp(tie.val(a.r), tie.val(b.r), 1) || a.i - b.i)
+			.map(x => x.r);
 	};
 
 	const verdictSummary = (rows) => {
@@ -969,7 +992,8 @@
 		const now = data.now;
 		const units = rows.reduce((a, r) => a + (r.volumeRemain || 0), 0);
 		setText(openCountEl, rows.length > 0 ? `${plural(rows.length, 'order')} · ${fmtQty(units)} units left` : '');
-		defaultOrderBtn.hidden = !sort.key || rows.length === 0;
+		const manyChars = manyCharsIn(rows);
+		defaultOrderBtn.hidden = isDefaultSort(manyChars) || rows.length === 0;
 		ordersEl.hidden = rows.length === 0;
 		if (rows.length === 0) {
 			setHtml(openNoteEl, `No open sell orders right now: ${(state.characters || []).map(c => esc(c.name || c.characterId)).join(' and ')} ${(state.characters || []).length === 1 ? 'has' : 'have'} none listed. Sales below still show what sold.`);
@@ -978,13 +1002,14 @@
 			return;
 		}
 		setHtml(openNoteEl, `${esc(verdictSummary(rows))} <span class="dim">· competition ${esc(scopeWord())} · click a column title to sort · hover a column title, a verdict or a figure for what it means</span>`);
-		const ctx = { now, manyChars: new Set(rows.map(r => r.characterId)).size > 1 };
-		const shown = COLUMNS.filter(col => !col.manyOnly || ctx.manyChars);
+		const ctx = { now, manyChars };
+		const shown = shownColumns(manyChars);
+		const seen = shownSort(manyChars);
 		const head = shown.map(col => {
-			const active = sort.key === col.key;
-			const arrow = active ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+			const active = seen.key === col.key;
+			const arrow = active ? (seen.dir === 'asc' ? ' ▲' : ' ▼') : '';
 			const stick = col.key === 'verdict' ? ' stickV' : col.key === 'item' ? ' stickI' : '';
-			return `<th class="${col.text ? 'text' : 'numeric'}${active ? ' sorted' : ''}${stick}" data-key="${col.key}" data-fk="th-${col.key}" tabindex="0" aria-sort="${active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}" title="${esc(typeof col.help === 'function' ? col.help() : col.help)}">${esc(col.label)}${arrow}</th>`;
+			return `<th class="${col.text ? 'text' : 'numeric'}${active ? ' sorted' : ''}${stick}" data-key="${col.key}" data-fk="th-${col.key}" tabindex="0" aria-sort="${active ? (seen.dir === 'asc' ? 'ascending' : 'descending') : 'none'}" title="${esc(typeof col.help === 'function' ? col.help() : col.help)}">${esc(col.label)}${arrow}</th>`;
 		}).join('');
 		setHtml(sortRowEl, head);
 		const body = sortedRows(rows).map(r => {
@@ -1292,7 +1317,7 @@
 		tipEl.hidden = true;
 		tipOwner = null;
 	};
-	// spec: {title?, rows: [{shape?: 'profit' | 'loss' | 'hollow', value, name}], note?}
+	// spec: {title?, rows: [{shape?: 'profit' | 'loss' | 'hollow' | 'tri' | 'triHollow', value, name}], note?}
 	const showTip = (spec, cx, cy, owner) => {
 		tipEl.replaceChildren();
 		if (spec.title) tipEl.append(el('div', { class: 'tt', text: spec.title }));
@@ -1415,8 +1440,27 @@
 		rows: [{ shape: 'hollow', value: isNum(p.estProfit) ? fmtIsk(p.estProfit, true) : DASH, name: `${whenText(Date.parse(p.date))}${p.observed === true ? ' (seen at the next check, so the fill is older)' : ''} · ${fmtQty(p.qty)} × ${price(p.unitPrice)} · est. net ${fmtIsk(p.estNet)}${isNum(p.estProfit) ? '' : ' · profit unknown: no landed cost'} · order ${p.orderId}` }],
 		note: 'the order log saw these units go; ESI holds wallet transactions back for up to an hour. An estimate, drawn hollow, until the sale arrives.'
 	});
+	// Other sellers' fills (decision 26): the stretch between the two book checks that bound a fill, both ends.
+	const stretchText = (fromMs, toMs) => (Number.isFinite(fromMs) && fromMs < toMs
+		? `between ${clockOrDate(fromMs)} and ${clockOrDate(toMs)} (EVE ${eveTime(fromMs)} and ${eveTime(toMs)})`
+		: `by ${whenText(toMs)}`);
+	const otherTip = (c) => {
+		const shown = c.events.slice().sort((a, b) => msOf(a.to) - msOf(b.to));
+		const rows = shown.slice(0, 8).map(e => ({
+			shape: e.kind === 'gone' ? 'triHollow' : 'tri',
+			value: `${plural(isNum(e.units) ? e.units : 0, 'unit')} at ${price(e.price)}`,
+			name: `${stretchText(e.from ? msOf(e.from) : NaN, msOf(e.to))} · their order ${e.orderId}; ${e.kind === 'gone' ? 'vanished: sold out, or pulled' : 'fewer left'}`
+		}));
+		if (shown.length > 8) rows.push({ value: `+${shown.length - 8}`, name: 'more fills in this triangle' });
+		return {
+			title: `${nameOf(c.typeId)}: ${plural(c.units, 'unit')} sold by other sellers`,
+			rows,
+			note: `The book log sees a fill only between two checks, so the triangle stands at the middle of that stretch.${c.hollow ? ' A vanished order may have been pulled rather than sold out.' : ''}`
+		};
+	};
+
 	// The total column's tooltip (decision 17): the item's sales, units, gross, net and profit over the window,
-	// and the estimate of its pending fills.
+	// and the estimate of its pending fills, on the sale dots' scale (decision 24).
 	const totalTip = (t, winLabel) => {
 		const rows = [];
 		if (t.count > 0) {
@@ -1432,8 +1476,8 @@
 			title: `${nameOf(t.typeId)}: total over the last ${winLabel}`,
 			rows,
 			note: t.count > 0
-				? 'The total column has its own scale: the mark’s area is the item’s profit over the window.'
-				: 'No completed sale in the window: the hollow mark is the estimate for the pending fills, on the total column’s own scale.'
+				? 'The mark’s area is the item’s profit over the window, on the same scale as the sale dots.'
+				: 'No completed sale in the window: the hollow mark is the estimate for the pending fills, on the same scale as the sale dots.'
 		};
 	};
 
@@ -1487,9 +1531,48 @@
 		return { title: `${nameOf(p.typeId)}: ${what}`, rows, note: cause ? `It began when ${cause}.` : 'What began it is not known: the window or the book log starts here.' };
 	};
 
+	// Other sellers' fills (decision 26): the module's `otherFills` events of the chart's rows, clustered per item
+	// like the sale dots. An event's stretch runs from the last book check before the fill (`from`; `to` when
+	// there is none) to the check that saw it (`to`), cut to the window for drawing; an event joins the open
+	// cluster when its stretch's midpoint is within `gapMs` of the previous event's. Read defensively: the field
+	// may be absent, and anything malformed is skipped.
+	const otherFillMarks = (res, types, startMs, now, gapMs) => {
+		const all = res.otherFills && typeof res.otherFills === 'object' ? res.otherFills : null;
+		const out = [];
+		if (!all) return out;
+		for (const typeId of types) {
+			const events = [];
+			for (const e of asArray(all[typeId])) {
+				if (!e || typeof e !== 'object') continue;
+				const toMs = msOf(e.to);
+				if (!Number.isFinite(toMs) || toMs <= startMs || toMs > now) continue;
+				const rawFrom = e.from ? msOf(e.from) : NaN;
+				const fromMs = Math.min(toMs, Math.max(startMs, Number.isFinite(rawFrom) ? rawFrom : toMs));
+				events.push({ e, fromMs, toMs, midMs: (fromMs + toMs) / 2 });
+			}
+			events.sort((a, b) => a.midMs - b.midMs);
+			let cur = null;
+			let lastMid = -Infinity;
+			for (const x of events) {
+				if (cur === null || x.midMs - lastMid > gapMs) {
+					cur = { kind: 'other', typeId, fromMs: x.fromMs, toMs: x.toMs, units: 0, events: [], hollow: false };
+					out.push(cur);
+				}
+				lastMid = x.midMs;
+				cur.fromMs = Math.min(cur.fromMs, x.fromMs);
+				cur.toMs = Math.max(cur.toMs, x.toMs);
+				cur.units += isNum(x.e.units) ? x.e.units : 0;
+				cur.events.push(x.e);
+				if (x.e.kind === 'gone') cur.hollow = true;
+			}
+		}
+		for (const c of out) c.atMs = (c.fromMs + c.toMs) / 2;
+		return out;
+	};
+
 	// What the timeline shows: a mark per cluster and per pending fill; a row per item, the window's profit highest
-	// first and items with only pending fills after them (decision 17); each item's total for the last column; and
-	// the presence segments of those items (decision 18).
+	// first and items with only pending fills after them (decision 17); each item's total for the last column; the
+	// presence segments of those items (decision 18); and the clusters of other sellers' fills on them (decision 26).
 	const timelineModel = (res, now, windowMs) => {
 		const marks = [];
 		for (const c of res.salesClusters) marks.push({ kind: 'sale', typeId: c.typeId, atMs: Date.parse(c.at), endMs: Date.parse(c.end), profit: c.profit, cluster: c });
@@ -1540,7 +1623,8 @@
 				presence.push({ typeId, fromMs, toMs, seg });
 			}
 		}
-		return { marks, types, totals, presence, startMs };
+		const others = otherFillMarks(res, types, startMs, now, clusterGap(windowMs));
+		return { marks, types, totals, presence, others, startMs };
 	};
 
 	const RMAX = 14;          // px radius of the biggest dot
@@ -1548,23 +1632,23 @@
 	const ROW_H = 34;
 	const LINE_INSET = 5;     // px from a row's bottom edge to its presence line
 	const COL_GAP = RMAX + 4; // the total column's divider clears a sale dot at the right edge (now)
+	const TRI_R = 5;          // px: the fixed size of an other sellers' fill triangle (Plot's symbol radius)
+	const LISTED_GREY = '#9c9b94'; // the presence line while listed but undercut (decision 25)
 
 	const drawTimeline = (res, width) => {
 		const win = WINDOWS.find(w => w.key === winKey);
 		const now = data.now;
 		const m = timelineModel(res, now, win.ms);
 		if (m === null) return null;
-		const mags = m.marks.map(k => (isNum(k.profit) ? Math.abs(k.profit) : 0));
-		const M = Math.max(1, ...mags);
-		const floor = M * (RMIN / RMAX) ** 2;
-		for (const k of m.marks) k.mag = Math.max(isNum(k.profit) ? Math.abs(k.profit) : 0, floor);
-		const radiusOf = (mag) => RMAX * Math.sqrt(mag / M);
-		// the total column: one mark per item on its own sqrt scale, the figure beside it from 640 px
-		const wide = width >= 640;
+		// one sqrt scale for the sale dots, the pending marks and the total column (decision 24): the largest
+		// absolute profit among all of them at RMAX, anything under RMIN drawn at RMIN
+		const wide = width >= 640; // the total's figure beside its mark
 		const totals = m.types.map(id => m.totals.get(id));
-		const TM = Math.max(1, ...totals.map(t => (isNum(t.value) ? Math.abs(t.value) : 0)));
-		const tFloor = TM * (RMIN / RMAX) ** 2;
-		const totalR = (v) => RMAX * Math.sqrt(Math.max(isNum(v) ? Math.abs(v) : 0, tFloor) / TM);
+		const magOf = (v) => (isNum(v) ? Math.abs(v) : 0);
+		const M = Math.max(1, ...m.marks.map(k => magOf(k.profit)), ...totals.map(t => magOf(t.value)));
+		const floor = M * (RMIN / RMAX) ** 2;
+		for (const k of m.marks) k.mag = Math.max(magOf(k.profit), floor);
+		const radiusOf = (mag) => RMAX * Math.sqrt(Math.max(mag, floor) / M);
 		const drawPresence = showPresence;
 		const marginLeft = width < 640 ? 120 : 176;
 		const marginRight = COL_GAP + (wide ? 100 : 42);
@@ -1579,6 +1663,13 @@
 			Plot.rect(m.types.filter((_, i) => i % 2 === 0), { x1: () => startDate, x2: () => endDate, y: (d) => d, fill: STRIPE }),
 			Plot.gridX({ stroke: GRID, strokeOpacity: 1, strokeWidth: 1 })
 		];
+		// other sellers' fills (decision 26): upward triangles of a fixed size (a constant r, outside the profit
+		// scale), before the sale dots so that they sit under them; hollow when an order vanished
+		const triangles = (list, paint) => {
+			if (list.length > 0) marks.push(Plot.dot(list, { x: (d) => new Date(d.atMs), y: 'typeId', r: TRI_R, symbol: 'triangle', ...paint }));
+		};
+		triangles(m.others.filter(k => !k.hollow), { fill: INK2, fillOpacity: 0.9, stroke: SURFACE, strokeWidth: 1 });
+		triangles(m.others.filter(k => k.hollow), { fill: SURFACE, fillOpacity: 1, stroke: INK2, strokeWidth: 2 });
 		const dots = (list, symbol, fill, stroke) => {
 			if (list.length > 0) marks.push(Plot.dot(list, { x: (d) => new Date(d.atMs), y: 'typeId', r: 'mag', symbol, fill, fillOpacity: fill === SURFACE ? 1 : 0.9, stroke, strokeWidth: 2 }));
 		};
@@ -1596,7 +1687,7 @@
 			marks
 		});
 		plot.setAttribute('role', 'group');
-		plot.setAttribute('aria-label', `Sales timeline of the last ${win.label}: one row per item, the highest profit over the window first; one mark per sale or burst of sales, area proportional to profit; after a dashed divider, each item's total on its own scale${drawPresence ? '; and near the bottom of each row, a line while we had a sell order listed, solid while it was the lowest at its station and dotted while someone was lower' : ''}. The table below has the same figures.`);
+		plot.setAttribute('aria-label', `Sales timeline of the last ${win.label}: one row per item, the highest profit over the window first; one mark per sale or burst of sales, area proportional to profit; after a dashed divider, each item's total on the same scale${m.others.length > 0 ? '; small triangles where the item sold through another seller\'s order, each at the middle of the stretch between the two book checks that bound the fill, hollow where their order vanished (sold out, or pulled)' : ''}${drawPresence ? '; and near the bottom of each row, a line while we had a sell order listed, thick and dark while it was the lowest at its station and thin and grey while someone was lower' : ''}. The table below has the same figures.`);
 		for (const g of plot.querySelectorAll(':scope > g')) g.setAttribute('aria-hidden', 'true');
 		const sx = plot.scale('x');
 		const sy = plot.scale('y');
@@ -1616,7 +1707,8 @@
 			if (i % 2 === 0) stripes.append(svgNode('rect', { x: plotRight, y: rowTop(id), width: width - plotRight, height: sy.bandwidth, fill: STRIPE }));
 		});
 		insert(stripes, gridG || firstDot);
-		// the presence lines, under the sale dots: solid on top, dotted when listed, faint when unknown
+		// the presence lines, under the triangles and the sale dots (decision 25): both solid; on top a 4 px ink line
+		// whose bottom edge is the 2 px grey line's (its centre 1 px higher), so it reads taller; faint when unknown
 		const presenceTargets = [];
 		if (drawPresence && m.presence.length > 0) {
 			const g = svgNode('g', { 'aria-hidden': 'true' });
@@ -1625,12 +1717,23 @@
 				const x2 = sx.apply(new Date(p.toMs));
 				const y = rowTop(p.typeId) + sy.bandwidth - LINE_INSET;
 				const top = p.seg.state === 'top';
-				const attrs = { x1, x2, y1: y, y2: y, stroke: INK2, 'stroke-width': 2, 'stroke-linecap': top ? 'butt' : 'round' };
-				if (!top) attrs['stroke-dasharray'] = '0 4'; // round caps on zero-length dashes: 2 px dots every 4 px
+				const ly = top ? y - 1 : y;
+				const attrs = { x1, x2, y1: ly, y2: ly, stroke: top ? INK2 : LISTED_GREY, 'stroke-width': top ? 4 : 2, 'stroke-linecap': 'butt' };
 				if (p.seg.known === false) attrs['stroke-opacity'] = 0.45;
 				g.append(svgNode('line', attrs));
 				const w = Math.max(6, x2 - x1);
 				presenceTargets.push({ x: (x1 + x2) / 2 - w / 2, y: y - 5, w, h: 10, tip: presenceTip(p, now) });
+			}
+			insert(g, firstDot);
+		}
+		// a faint whisker over the stretch of a triangle when it is wider than 2 % of the window (decision 26),
+		// above the presence line and under the triangles
+		const whiskers = m.others.filter(k => k.toMs - k.fromMs > 0.02 * win.ms);
+		if (whiskers.length > 0) {
+			const g = svgNode('g', { 'aria-hidden': 'true' });
+			for (const k of whiskers) {
+				const y = rowCentre(k.typeId);
+				g.append(svgNode('line', { x1: sx.apply(new Date(k.fromMs)), x2: sx.apply(new Date(k.toMs)), y1: y, y2: y, stroke: INK2, 'stroke-opacity': 0.35, 'stroke-width': 1 }));
 			}
 			insert(g, firstDot);
 		}
@@ -1639,7 +1742,7 @@
 		col.append(svgNode('line', { x1: divX, x2: divX, y1: marginTop, y2: bottom, stroke: AXIS, 'stroke-width': 1, 'stroke-dasharray': '3 3' }));
 		for (const t of totals) {
 			const cy = rowCentre(t.typeId);
-			const r = totalR(t.value);
+			const r = radiusOf(magOf(t.value));
 			const hollow = t.count === 0;
 			const tone = !isNum(t.value) ? INK2 : t.value < 0 ? LOSS : PROFIT;
 			const paint = hollow ? { fill: SURFACE, stroke: tone, 'stroke-width': 2 } : { fill: tone, 'fill-opacity': 0.9, stroke: SURFACE, 'stroke-width': 2 };
@@ -1657,30 +1760,42 @@
 		label.textContent = 'total';
 		col.append(label);
 		plot.append(col);
-		// the hit layer: the presence stretches first (under), then the sales, pending fills and totals, row by row
+		// the hit layer, in the marks' z-order: the presence stretches first (under), then the other sellers' fills,
+		// then the sales, pending fills and totals, row by row; each group is one tab stop
 		attachTargets(plot, presenceTargets, 'When we were listed and on top, arrow keys move between the stretches');
+		const otherTargets = m.others.map(k => ({
+			row: m.types.indexOf(k.typeId), x: sx.apply(new Date(k.atMs)), y: rowCentre(k.typeId), r: Math.max(11, TRI_R + 3), tip: otherTip(k)
+		}));
+		attachTargets(plot, otherTargets.sort((a, b) => a.row - b.row || a.x - b.x), 'Units sold through other sellers\' orders, arrow keys move between them');
 		const markTargets = m.marks.map(k => ({
 			row: m.types.indexOf(k.typeId), x: sx.apply(new Date(k.atMs)), y: rowCentre(k.typeId), r: Math.max(11, radiusOf(k.mag) + 3),
 			tip: k.kind === 'sale' ? clusterTip(k.cluster) : pendingTip(k.pending)
 		}));
-		const totalTargets = totals.map(t => ({ row: m.types.indexOf(t.typeId), x: colX, y: rowCentre(t.typeId), r: Math.max(11, totalR(t.value) + 3), tip: totalTip(t, win.label) }));
+		const totalTargets = totals.map(t => ({ row: m.types.indexOf(t.typeId), x: colX, y: rowCentre(t.typeId), r: Math.max(11, radiusOf(magOf(t.value)) + 3), tip: totalTip(t, win.label) }));
 		attachTargets(plot, [...markTargets, ...totalTargets].sort((a, b) => a.row - b.row || a.x - b.x), 'Sales, pending fills and each item’s total, arrow keys move between them');
-		return { plot, model: m, wide, presenceDrawn: presenceTargets.length };
+		return { plot, model: m, wide, presenceDrawn: presenceTargets.length, othersDrawn: m.others.length };
 	};
 
-	const legendHtml = () => {
+	// drawn: what drawTimeline returned (null when the chart is not drawn): the triangles' keys only when the
+	// window has some
+	const legendHtml = (drawn) => {
 		const keys = [
 			['<span class="sw profit"></span>', 'profit (a circle)'],
 			['<span class="sw loss"></span>', 'loss (a square)'],
 			['<span class="sw pendProfit"></span><span class="sw pendLoss"></span>', 'hollow: filled per the order log, not in the wallet yet (estimated)']
 		];
+		if (drawn && drawn.othersDrawn > 0) {
+			keys.push(
+				['<span class="sw tri"></span>', 'sold by another seller (fewer units left in their order)'],
+				['<span class="sw tri triHollow"></span>', 'their order vanished (sold out, or pulled)']);
+		}
 		if (showPresence) {
 			keys.push(
-				['<span class="sw line lineTop"></span>', 'solid line: on top (our sell order the lowest at its station)'],
-				['<span class="sw line lineListed"></span>', 'dotted: listed, someone lower'],
+				['<span class="sw line lineTop"></span>', 'thick dark line: on top (our sell order the lowest at its station)'],
+				['<span class="sw line lineListed"></span>', 'thin grey line: listed, someone lower'],
 				['<span class="sw line lineGap"></span>', 'a gap: no sell order of ours']);
 		}
-		keys.push(['', 'dot area = profit of the sale or burst of sales it stands for']);
+		keys.push(['', 'dot area = profit, one scale for the sales and the totals']);
 		return keys.map(([sw, label]) => `<span class="key" role="listitem">${sw}${esc(label)}</span>`).join('');
 	};
 
@@ -1719,8 +1834,7 @@
 			tot(`share of ${region} volume`, esc(fmtPct(t.share)), `our units ÷ all units traded in the region, on the UTC days we sold that the history already covers${res.share.overall.volume ? `: ${fmtQty(res.share.overall.qty)} of ${fmtQty(res.share.overall.volume)}` : ''}`),
 			pendingUnits > 0 ? tot('pending', `${esc(fmtQty(pendingUnits))} units`, `${fmtQty(pendingUnits)} units the order log saw fill that the wallet has not caught up with; est. profit ${fmtExact(pendingProfit)}. Drawn hollow below`) : ''
 		].join(''));
-		setHtml(soldLegendEl, legendHtml());
-		// the chart
+		// the chart, then its legend (the triangles' keys depend on what was drawn)
 		let drawn = null;
 		if (typeof Plot === 'undefined' || typeof d3 === 'undefined') {
 			soldBodyEl.replaceChildren(stateCard('The chart library did not load', 'The timeline needs Observable Plot from jsdelivr. The table below has the same figures.'));
@@ -1734,13 +1848,15 @@
 				soldBodyEl.replaceChildren(stateCard('The timeline could not be drawn', `${e && e.message ? e.message : e}. The table below has the same figures.`));
 			}
 		}
+		setHtml(soldLegendEl, legendHtml(drawn));
 		const foot = [
-			`Each row is an item, the highest profit over the window on top; items with only pending fills follow. Sales of one item within ${dur(Math.max(10 * MIN_MS, win.ms / 150))} of each other are one dot. Dots under ${RMIN} px radius are drawn at ${RMIN} px, so the smallest profits read as larger than they are. Times are local; EVE time is in parentheses.`,
-			drawn ? `The total column after the dashed line has its own scale: its mark's area is the item's profit over the window${drawn.wide ? ' (the figure beside it)' : ''}, sized against the largest total, not against the sale dots.` : '',
+			`Each row is an item, the highest profit over the window on top; items with only pending fills follow. Sales of one item within ${dur(clusterGap(win.ms))} of each other are one dot. Dots under ${RMIN} px radius are drawn at ${RMIN} px, so the smallest profits read as larger than they are. Times are local; EVE time is in parentheses.`,
+			drawn ? `The total column after the dashed line is on the same scale as the sale dots: its mark's area is the item's profit over the window${drawn.wide ? ' (the figure beside it)' : ''}, so a total compares by eye with the sales that make it up.` : '',
+			drawn && drawn.othersDrawn > 0 ? 'A triangle marks units sold through another seller\'s order. The book log sees such a fill only between two checks, so the triangle stands at the middle of the stretch between the two checks that bound it, with a faint whisker across that stretch when it is long; one triangle stands for the fills of an item close together. It is hollow when their order vanished, which may be a pull rather than a sale; orders that expired or were cancelled and relisted are left out.' : '',
 			res.pending.length > 0 ? `${plural(res.pending.length, 'hollow mark')}: units the order log saw fill that the wallet has not caught up with (ESI holds transactions back up to an hour).` : '',
 			showPresence && drawn
 				? (drawn.presenceDrawn > 0
-					? 'The line near the bottom of a row is solid while one of our sell orders of the item was the lowest at its station, dotted while someone was lower, and missing while we had no sell order; it is faint before the book log covers the item, where whether we were on top is unknown.'
+					? 'The line near the bottom of a row is thick and dark while one of our sell orders of the item was the lowest at its station, thin and grey while someone was lower, and missing while we had no sell order; it is faint before the book log covers the item, where whether we were on top is unknown.'
 					: 'No sell order of ours was open for these items in this window, so no line is drawn.')
 				: ''
 		].filter(Boolean);
@@ -1875,8 +1991,14 @@
 		applyThresholds();
 	});
 
+	// A header click: the column that carries the arrow flips its direction, another starts in its natural one
+	// (text ascending, figures descending). Only a column on show can be chosen.
 	const sortBy = (key) => {
-		sort = sort.key === key ? { key, dir: sort.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: COLUMNS.find(c => c.key === key).text ? 'asc' : 'desc' };
+		const manyChars = manyCharsIn(data.result ? data.result.rows : []);
+		const col = shownColumns(manyChars).find(c => c.key === key);
+		if (!col) return;
+		const seen = shownSort(manyChars);
+		sort = seen.key === key ? { key, dir: seen.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: col.text ? 'asc' : 'desc' };
 		store.set('sort', sort);
 		renderOpen();
 	};
@@ -1892,7 +2014,7 @@
 		sortBy(th.dataset.key);
 	});
 	defaultOrderBtn.addEventListener('click', () => {
-		sort = { key: null, dir: 'desc' };
+		sort = { ...DEFAULT_SORT };
 		store.set('sort', sort);
 		renderOpen();
 		const th = sortRowEl.querySelector('th'); // the button that was pressed is gone

@@ -536,12 +536,85 @@ tooltips with a patched book), the presence lines against known undercut episode
 column against the table, the character column and sort, the reasons, the snapshot panel for an
 order with a run, the "Refresh now" wording, 800/1280 px.
 
+### Phase 6 — round 3 after the review fast-forward (2026-11-26)
+
+Rocky's second set of notes on the live page (decisions 24-27 below). Two agents in parallel again:
+the module (`public/orders-calc.js`, `test/orders-calc.test.js`; opus) and the page
+(`public/orders.js`, `public/orders.html`; opus); the page reads the new module field as optional,
+as before, so either can land first. Fable logs the rulings, reviews, runs the gate, smoke-tests the
+page on the local data, commits and fast-forwards `feature/export-rework`.
+
+**Module contract (new output; everything existing stays as it is).**
+
+1. *Other sellers' fills* (decision 26): `otherFills: {[typeId]: [events]}` for every type that has
+   a `presence` entry or a sale or pending fill in the window; events oldest first by `to`, each
+   `{from, to (ISO), units, price, orderId, locationId, kind: 'drop' | 'gone'}`: a competing sell
+   order (as `competitorsIn`: not ours, at the station of one of our orders of the type, or
+   anywhere in the region under scope 'region'; for a type with no order of ours in the window, the
+   stations of our sales of it in the window, found through `stations`, else anywhere in the
+   region of its book logs) lost units between two book-log checks. `to` is the check that first
+   showed it; `from` the last check of any kind before `to` (a 304 answer is a check that confirms
+   the book unchanged, so it bounds the fill too; null when the log has no check before, and the
+   page then uses `to`). A `drop` is a path entry with fewer `volumeRemain` than the entry before
+   (decision 13: never anything but a fill); `units` the difference, `price` the earlier entry's. A
+   `gone` is an order whose `goneMs` (the first stored check after its `lastSeen`) falls in the
+   window while its last entry still had units: `units` those units, `price` that price; sold out,
+   or pulled, so the page draws it hollow. Not a `gone`: an order past its expiry at `to` (its
+   latest `issued` plus `duration` days), and an order whose place is taken at `to` by a new
+   competing order at the same station with `volumeTotal` equal to the units that vanished (a
+   cancel-and-relist). On the development data 328 of 2,190 vanishings are expiries and 222 more
+   relist-like, leaving 1,640. `parseBookLog`
+   keeps `volumeTotal` and `duration` for this. Only events with `to` inside `(now - windowMs, now]`
+   are listed. The export page's `fillsPerDay` (`public/market-stats.js`) differences the same logs
+   for its demand figure; read it first and keep the drop rule consistent with it (do not change it).
+
+**Page contract.**
+
+1. *One profit scale* (decision 24): the sale dots, the pending marks and the total column share one
+   sqrt scale, the largest absolute profit among all of them at `RMAX`; `totalR` and `TM` go. The
+   footnote and the total tooltip stop saying the column has a scale of its own; the rows keep
+   their height (the largest mark already fits).
+2. *Presence lines by colour and weight* (decision 25): both states are solid. `top`: 4 px in the
+   ink colour, its bottom edge where the 2 px line's is (its centre 1 px higher), so it reads
+   taller; `listed`: 2 px in a mid grey (`#9c9b94`); `known: false` keeps the reduced opacity. The
+   legend swatches and their words ("thick dark line: on top (our sell order the lowest at its
+   station)", "thin grey line: listed, someone lower"), the footnote, the chart's aria-label and
+   the toggle's title say so; the dotted swatch CSS goes.
+3. *Other sellers' fills as triangles* (decision 26): the events of `otherFills` for the chart's
+   rows, clustered per item like the sale dots (an event joins the cluster when its midpoint is
+   within the window's cluster gap of the previous one's), one upward triangle per cluster at the
+   midpoint of the cluster's span, fixed size (Plot's `triangle` symbol, r 5), ink-coloured; solid
+   when every event is a `drop`, hollow (surface fill, ink stroke) when any is a `gone`. When the
+   cluster's `from`-`to` span is wider than 2 % of the window, a 1 px whisker in the ink colour at
+   reduced opacity runs from `from` to `to` behind the triangle, so a fill bounded only by a long
+   gap between checks does not pretend to a time. Triangles sit on the row's centre line, under the
+   sale dots in z-order and above the presence line. Hit targets like the dots; the tooltip:
+   "<item>: N units sold by other sellers", then per event "between hh:mm and hh:mm (EVE ...): N
+   units at <price> (their order <id>; fewer left | vanished: sold out, or pulled)". Legend keys: a
+   solid and a hollow triangle swatch (CSS `clip-path` triangles), "sold by another seller (fewer
+   units left in their order)" and "their order vanished (sold out, or pulled)"; the footnote says
+   the triangle stands at the middle of the stretch between the two book checks that bound the
+   fill. Types with no events draw nothing; events of types without a row are ignored.
+4. *Character first, then verdict* (decision 27): the default sort is the character column
+   ascending; whatever the primary column, ties break by character, and by verdict rank when the
+   primary is the character; after that the module's order. The stored `sort` default becomes
+   `{key: 'character', dir: 'asc'}` (a stored `null` key means the default); the "default order"
+   button restores it and hides while the sort is the default. While the character column is hidden
+   (one character), the arrow shows on the verdict header, since that is the order seen; clicking
+   verdict there toggles its direction as usual.
+
+Gate: `node --test test/*.test.js` green (new tests for the events: a drop, a gone, an expiry, a
+relist, the 304 lower bound, the window edge, a type with sales but no order); Fable's browser check
+on the local data: the shared scale against the table's figures, the two line weights, triangles
+where the logs show competitor fills, the default sort with the stored key cleared, 800/1280 px.
+
 ## Agent roster
 
 - Phase 1 and 3: sonnet (clear briefs against existing patterns). Phase 2: opus (the verdict and
   time-on-top semantics are the crux). Phase 4: haiku. Phase 5: opus for both agents (the
   book-state merge and the presence segments are semantics; the page round is wide and touches
-  the hit layer and keyboard behaviour).
+  the hit layer and keyboard behaviour). Phase 6: opus for both again (the fill events rest on
+  the book log's sampling semantics; the page round reworks the chart's scale, layers and legend).
 - Sequencing: 1 and 2 in parallel (2 only adds files); 3 after both; 4 last. `lib/api.js` and
   `lib/sync.js` are touched by Phase 1 only.
 - Fable: reviews `orders-calc.js` and the derive invariant, reruns the gates, smoke-tests the page in
@@ -562,7 +635,9 @@ order with a run, the "Refresh now" wording, 800/1280 px.
   destination book, M2 of `planning/2026-11-25-export-history-columns`, gives every type at the
   destination station a book log, so the data for this figure now exists for any type, not only
   the ones listed; the samples are hourly, so the range is wider than the watch's. The export
-  page's `fillsPerDay` already differences the same logs for its own purpose. Still not built here.)
+  page's `fillsPerDay` already differences the same logs for its own purpose. Still not built here.
+  Phase 6 draws the events themselves, drops and vanishings, as triangles on the sales timeline
+  (decision 26); the share figure is still not computed.)
 - Competitor profiles (the same `order_id` undercutting repeatedly across items), a price sparkline
   per order, structure markets, corporation orders.
 
@@ -648,6 +723,35 @@ order with a run, the "Refresh now" wording, 800/1280 px.
     before our `issued` is never the undercutter, whatever its current `issued` (rule 3); an
     episode that began with a competitor already below us never counts as time on top (rule 5,
     `startedBehind`), and a same-price re-issue is not a new undercut.
+
+24. The sale dots and the total column share one profit scale (2026-11-26, Rocky: "profit circle
+    size should be on the same scale for both totals and individual/groups of sale(s) so I can
+    compare them visually"). The separate scale of decision 17 was the agent's choice; the rows keep
+    their height since the largest mark already fits, and small sales fall to the 3 px floor more
+    often, which the footnote already says.
+25. Presence lines tell their state by colour and weight, not by dashes (2026-11-26, Rocky: "solid
+    lines can look like dots when short. lets make it solid instead of dotted and let the color
+    change be the indicator. maybe also make dark solid line indicating we're in top position a
+    pixel or 2 taller"): on top is a thick dark line, listed-but-undercut a thin grey one; the gap
+    and the faded unknown stretch stay.
+26. Other sellers' fills are triangles on the item rows (2026-11-26, Rocky: "triangles or something
+    ... to indicate when an item is sold to someone else's sell order ... maybe just center of the
+    period"). The book log gives them: a competing order with fewer units at a later check, or gone
+    at a check while it still had units. The fill happened between two checks, so the triangle
+    sits at the middle of that stretch and the tooltip gives both ends; a stretch wider than 2 % of
+    the window gets a whisker. A vanished order may have been pulled rather than sold, so it is
+    hollow; expiries and cancel-and-relists (a new order with the same quantity at the same station
+    at the same check) are left out. On the development data: 1,278 drops and 2,190 vanishings in
+    the 358 Domain logs, 328 of them expiries and 222 more relist-like, 1,640 left; 1,252 of 9,875
+    competing orders were single units, where a sale can only ever show as a vanishing. Expiry
+    counts from the order's latest `issued`: a modified order's clock restarts (one order was still
+    listed 107 h after its first `issued` plus its duration). A 304 answer counts as a check that
+    confirms the book, so it bounds a fill from below.
+27. The open-orders table sorts by character first and verdict second by default, and the character
+    is always the tie-break, except under a character sort, where the verdict is (2026-11-26,
+    Rocky: "default sort should be character as primary sort and verdict as sub sort (in fact lets
+    make character always be the sub sort unless primary sort is character in which case it should
+    be verdict that is used as the sub sort)"). Decision 19's default by verdict is reversed.
 
 ### Still open
 
