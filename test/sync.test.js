@@ -351,6 +351,45 @@ test('a structure the character cannot dock at is asked once, not on every sync'
 	assert.equal(fake.callsTo(/structures/).length, 1, 'asked again after a month');
 });
 
+test('two characters synced at once both keep their new structure, and a name missing from structures.json is restored from raw', async (t) => {
+	const { dataDir, fake, service, clock } = setup(t, { characters: [IVAN, GRANT] });
+	const OTHER = STRUCTURE + 7;
+	fake.structures.set(STRUCTURE, { name: 'Test Trading Tower', owner_id: 98000001, solar_system_id: 30000144, type_id: 35834 });
+	fake.structures.set(OTHER, { name: 'Other Tower', owner_id: 98000001, solar_system_id: 30000144, type_id: 35834 });
+	fake.character(IVAN, { transactions: [tx(6001, { location_id: STRUCTURE })] });
+	fake.character(GRANT, { transactions: [tx(6501, { location_id: OTHER })] });
+	const structuresFile = path.join(dataDir, 'ledger', 'structures.json');
+
+	const [ivan, grant] = await Promise.all([service.syncCharacter(IVAN, { force: true }), service.syncCharacter(GRANT, { force: true })]);
+	assert.deepEqual([ivan.status, grant.status], ['ok', 'ok']);
+	assert.deepEqual([ivan.rowsAdded.structures, grant.rowsAdded.structures], [1, 1]);
+	const both = readJson(structuresFile);
+	assert.deepEqual(Object.keys(both).sort(), [String(STRUCTURE), String(OTHER)], 'neither write lost the other\'s name');
+	assert.equal(both[STRUCTURE].characterId, IVAN);
+	assert.equal(both[OTHER].characterId, GRANT);
+
+	// the names are lost (the file rewritten); the next syncs get 304s, and put them back from raw
+	fs.writeFileSync(structuresFile, '{}\n');
+	clock.advance(2 * HOUR);
+	fake.reset();
+	const again = await service.syncAll({ force: true, market: false, regionBook: false });
+	assert.deepEqual(again.characters.map(c => c.status), ['ok', 'ok']);
+	assert.equal(fake.callsTo(/structures/).length, 2);
+	assert.deepEqual(again.characters.map(c => c.routes.structures.notModified), [1, 1]);
+	assert.deepEqual(again.characters.map(c => c.rowsAdded.structures), [1, 1], 'a restored name counts as a row added');
+	assert.deepEqual(readJson(structuresFile), both, 'the entries the first answers wrote');
+
+	// the same inside the route's Expires: ten minutes on, structures.json loses one name again
+	fs.writeFileSync(structuresFile, JSON.stringify({ [OTHER]: both[OTHER] }));
+	clock.advance(10 * MINUTE);
+	fake.reset();
+	const notDue = await service.syncCharacter(IVAN, { force: true });
+	assert.equal(fake.callsTo(/structures/).length, 0);
+	assert.equal(notDue.routes.structures.notDue, 1);
+	assert.equal(notDue.rowsAdded.structures, 1);
+	assert.deepEqual(readJson(structuresFile), both);
+});
+
 test('skills and standings are refreshed once a day', async (t) => {
 	const { dataDir, fake, service, clock } = setup(t);
 	fillIvan(fake);
