@@ -6,9 +6,10 @@ const zlib = require('node:zlib');
 const { createSyncService } = require('../lib/sync');
 const { createTokenStore } = require('../lib/tokenStore');
 const { acquireLock } = require('../lib/dataFiles');
+const derive = require('../lib/derive');
 const {
 	ALL_SCOPES, makeClock, tmpDataDir, makeLog, makeTokens, createFakeEsi,
-	order, asset,
+	order, asset, tx, journalRow,
 } = require('../test-support/esi-fake');
 
 // The watch refresh (syncWatch): our open orders, then the book and history of the types listed.
@@ -74,6 +75,20 @@ const logFile = (dataDir, typeId, region = REGION) => path.join(dataDir, 'ledger
 const bookLog = (dataDir, typeId, region = REGION) => readJson(logFile(dataDir, typeId, region));
 const publicLogs = (service) => service.raw.syncLogStamps('public').map(stamp => service.raw.readSyncLog('public', stamp));
 const marketCalls = (fake) => fake.callsTo(/^\/markets\//);
+// every file of a character's ledger, path -> bytes
+const ledgerTree = (dataDir, id = IVAN) => {
+	const root = path.join(dataDir, 'ledger', String(id));
+	const out = {};
+	const visit = (dir) => {
+		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+			const full = path.join(dir, entry.name);
+			if (entry.isDirectory()) visit(full);
+			else if (!entry.name.startsWith('.')) out[path.relative(root, full).split(path.sep).join('/')] = fs.readFileSync(full);
+		}
+	};
+	if (fs.existsSync(root)) visit(root);
+	return out;
+};
 
 test('a tick stores our orders and a book per listed type, and nothing for unlisted ones', async (t) => {
 	const { dataDir, fake, service, clock } = setup(t);
@@ -221,6 +236,35 @@ test('a watch tick followed by the hourly sync still writes a snapshot, and it n
 	assert.deepEqual(readJson(path.join(dataDir, 'ledger', String(IVAN), 'snapshots', snapshots[0])).orders.map(row => row.order_id), [8001, 8002, 8003, 8004]);
 	assert.equal(service.characterStatus(IVAN).syncedAt, hourly.syncedAt, 'the hourly sync ran although a tick came first');
 	assert.deepEqual(Object.keys(orderLog(dataDir)), ['8001', '8002', '8003', '8004']);
+});
+
+test('a ledger deleted while its raw is not is rebuilt by the watch tick that finds it gone, so the hourly sync after it does not stay empty', async (t) => {
+	const { fake, service, clock, dataDir } = setup(t);
+	listIvan(fake);
+	fake.character(IVAN, { transactions: [tx(6001), tx(6002, { is_buy: false })], journal: [journalRow(7001)] });
+	const first = await service.syncCharacter(IVAN, { force: true });
+	assert.equal(first.status, 'ok', JSON.stringify(first.errors));
+	const before = service.ledger.readRows(IVAN, 'transactions');
+	assert.equal(before.length, 2);
+
+	fs.rmSync(path.join(dataDir, 'ledger', String(IVAN)), { recursive: true });
+	clock.advance(30 * MINUTE);
+	const tick = await service.syncWatch({ regionIds: [REGION] });
+	assert.equal(tick.characters[IVAN].status, 'ok', JSON.stringify(tick.characters[IVAN]));
+	assert.deepEqual(service.ledger.readRows(IVAN, 'transactions'), before, 'rebuilt by the tick');
+
+	clock.advance(2 * HOUR);
+	const hourly = await service.syncCharacter(IVAN, { force: true });
+	assert.equal(hourly.status, 'ok', JSON.stringify(hourly.errors));
+	assert.equal(hourly.routes.transactions.notModified, 1, 'the walk saw a 304 and refilled nothing itself');
+	assert.deepEqual(service.ledger.readRows(IVAN, 'transactions'), before);
+	assert.equal(service.ledger.readRows(IVAN, 'journal').length, 1);
+
+	// the ledger is what a rebuild from raw alone gives
+	const fresh = tmpDataDir(t);
+	fs.cpSync(path.join(dataDir, 'raw'), path.join(fresh, 'raw'), { recursive: true });
+	derive.rebuildAll({ dataDir: fresh, log: makeLog() });
+	assert.deepEqual(ledgerTree(dataDir), ledgerTree(fresh));
 });
 
 test('without a region the watch uses the sell region the characters list in, once an hourly sync has shown it', async (t) => {
