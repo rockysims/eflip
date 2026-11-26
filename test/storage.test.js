@@ -10,6 +10,7 @@ const { createLedger } = require('../lib/ledger');
 const { createRunStore } = require('../lib/runs');
 const { planTrim, DEFAULT_SHARES } = require('../lib/storage-budget');
 const storage = require('../lib/storage');
+const { foldBook } = require('../lib/derive');
 const { tmpDataDir, makeLog, makeTokens } = require('../test-support/esi-fake');
 
 // The storage budget applied to a data directory (lib/storage.js, sync.js runStorage), on a
@@ -50,6 +51,36 @@ const sixDayLog = (base) => {
 			[base + 3]: order(day(23), day(25), [entry(23, 300), entry(25, 299, 4)]),
 		},
 	};
+};
+
+// a quiet book (folded as lib/derive.js foldBook does): one stored check on 2026-11-01 at 10:00 that
+// listed orders 1 and 2, then a check every hour for five days that found the book unchanged (a 304:
+// a sample `stored: false`, and no order's lastSeen moves)
+const HOUR = 60 * 60 * 1000;
+const QUIET_FROM = Date.UTC(2026, 10, 1, 10, 0, 0);
+const isoAt = (ms) => new Date(ms).toISOString();
+const bookRow = (id, price) => ({ order_id: id, price, volume_remain: 10, issued: '2026-10-30T00:00:00Z', is_buy_order: false, location_id: 60008494, system_id: 30002187, volume_total: 10, duration: 90, min_volume: 1, range: 'region' });
+const quietLog = () => {
+	const log = { samples: [], orders: {} };
+	foldBook(log, { at: isoAt(QUIET_FROM), stored: true, rows: [bookRow(1, 100), bookRow(2, 110)] });
+	for (let h = 1; h <= 5 * 24; h++) foldBook(log, { at: isoAt(QUIET_FROM + h * HOUR), stored: false, rows: null });
+	return log;
+};
+// stored checks and 304s mixed: a 304 before any stored check, then stored on the 1st (1 and 2), 304s,
+// stored on the 2nd at 05:00 (2 gone, 1 re-priced), 304s, stored on the 3rd at 13:00 and 14:00 (3 new),
+// 304s to the 6th
+const mixedLog = () => {
+	const log = { samples: [], orders: {} };
+	const at = (h) => isoAt(QUIET_FROM + h * HOUR);
+	foldBook(log, { at: at(-1), stored: false, rows: null });
+	foldBook(log, { at: at(0), stored: true, rows: [bookRow(1, 100), bookRow(2, 110)] });
+	for (let h = 1; h < 19; h++) foldBook(log, { at: at(h), stored: false, rows: null });
+	foldBook(log, { at: at(19), stored: true, rows: [bookRow(1, 95)] });
+	for (let h = 20; h < 51; h++) foldBook(log, { at: at(h), stored: false, rows: null });
+	foldBook(log, { at: at(51), stored: true, rows: [bookRow(1, 95), bookRow(3, 120)] });
+	foldBook(log, { at: at(52), stored: true, rows: [bookRow(1, 94), bookRow(3, 120)] });
+	for (let h = 53; h <= 120; h++) foldBook(log, { at: at(h), stored: false, rows: null });
+	return log;
 };
 
 const runFile = (dataDir, id, copiedAt, contextSize) => {
@@ -164,7 +195,34 @@ test('trimBookLog drops samples and orders older than the cutoff, and keeps the 
 	assert.equal(storage.trimBookLog(log, '2026-11-01T00:00:00.000Z').entriesDropped, 0);
 });
 
-test('the day buckets free what trimBookLog drops: a piece is dated by when a cutoff frees it', () => {
+test('trimBookLog keeps an order that a 304 after the cutoff still lists', () => {
+	const log = quietLog();
+	const { log: trimmed, samplesDropped, entriesDropped, ordersDropped } = storage.trimBookLog(log, '2026-11-03T00:00:00.000Z');
+	// the first sample kept is a 304, which stands for the stored check of the 1st: the cut moves back to it
+	assert.deepEqual(trimmed.samples[0], { at: '2026-11-01T10:00:00.000Z', stored: true }, 'the stored check the 304s stand for stays');
+	assert.equal(trimmed.samples.length, log.samples.length);
+	assert.deepEqual(Object.keys(trimmed.orders), ['1', '2'], 'both orders are still listed after the cutoff');
+	for (const id of ['1', '2']) assert.deepEqual(trimmed.orders[id].path.map(entry => entry.at), ['2026-11-01T10:00:00.000Z'], `order ${id}`);
+	assert.deepEqual([samplesDropped, entriesDropped, ordersDropped], [0, 0, 0]);
+	// the next stored check re-prices order 2: a re-price of the order known since the 1st, not a new order
+	foldBook(trimmed, { at: '2026-11-06T11:30:00.000Z', stored: true, rows: [bookRow(1, 100), bookRow(2, 99)] });
+	assert.deepEqual(trimmed.orders[2].path.map(entry => entry.price), [110, 99]);
+	assert.equal(trimmed.orders[2].firstSeen, '2026-11-01T10:00:00.000Z');
+
+	// the cut goes back to the newest stored check before the cutoff, not further: order 2, gone at
+	// the 2nd's 05:00 check, goes; order 1 keeps its price before that check, which re-priced it
+	const mixed = storage.trimBookLog(mixedLog(), '2026-11-03T00:00:00.000Z').log;
+	assert.equal(mixed.samples[0].at, '2026-11-02T05:00:00.000Z');
+	assert.deepEqual(Object.keys(mixed.orders), ['1', '3']);
+	assert.deepEqual(mixed.orders[1].path.map(entry => entry.price), [100, 95, 94]);
+	// a stored check is the first kept: the cut stays at the cutoff
+	const atStored = storage.trimBookLog(mixedLog(), '2026-11-03T12:30:00.000Z').log;
+	assert.equal(atStored.samples[0].at, '2026-11-03T13:00:00.000Z');
+	// a log whose every sample is older than the cutoff (a type no longer checked): nothing is left
+	assert.deepEqual(storage.trimBookLog(quietLog(), '2026-11-07T00:00:00.000Z').log, { samples: [], orders: {} });
+});
+
+test('the day buckets free what trimBookLog drops: a piece is dated by when a cutoff frees it', async (t) => {
 	const pieces = [];
 	storage.bookLogPieces(sixDayLog(0), (at, bytes) => pieces.push([at.slice(8, 10), bytes]));
 	const plainFreed = (cutoffDay) => pieces.filter(([d]) => d < cutoffDay).reduce((sum, [, bytes]) => sum + bytes, 0);
@@ -174,6 +232,37 @@ test('the day buckets free what trimBookLog drops: a piece is dated by when a cu
 		+ '2'.length + JSON.stringify({ ...log.orders[2], path: undefined }).length + JSON.stringify(log.orders[2].path[0]).length
 		+ JSON.stringify(log.orders[1].path[0]).length;
 	assert.equal(plainFreed('22'), expected);
+
+	// at any cutoff, what the pieces dated before it add up to is what trimBookLog drops, 304s or not
+	const plainOf = (book) => {
+		let sum = 0;
+		storage.bookLogPieces(book, (at, bytes) => { sum += bytes; });
+		return sum;
+	};
+	const datedBefore = (book, cutoffAt) => {
+		let sum = 0;
+		storage.bookLogPieces(book, (at, bytes) => { if (typeof at === 'string' && at < cutoffAt) sum += bytes; });
+		return sum;
+	};
+	for (const [name, make] of [['six days', () => sixDayLog(0)], ['quiet', quietLog], ['mixed', mixedLog]]) {
+		const book = make();
+		for (let ms = Date.UTC(2026, 9, 31); ms <= Date.UTC(2026, 10, 27); ms += HOUR / 2) {
+			const cutoffAt = isoAt(ms);
+			assert.equal(datedBefore(book, cutoffAt), plainOf(book) - plainOf(storage.trimBookLog(book, cutoffAt).log), `${name} at ${cutoffAt}`);
+		}
+	}
+	// the quiet book: until the cutoff passes its last 304, a cutoff frees nothing of it
+	assert.equal(datedBefore(quietLog(), '2026-11-06T10:00:00.000Z'), 0);
+
+	// as the planner gets it: one bucket, which the 3-day floor keeps, so a budget trims nothing of it
+	const dataDir = tmpDataDir(t, 'eflip-storage-test-');
+	const ledger = createLedger({ dataDir });
+	ledger.writeBookLog(REGION, 34, quietLog());
+	const kinds = await storage.measureKinds({ raw: createRawStore({ dataDir }), ledger, now: QUIET_FROM + 120 * HOUR + HOUR / 2 });
+	const logs = kinds.find(kind => kind.name === 'bookLogs');
+	assert.deepEqual(logs.buckets.map(bucket => bucket.from), ['2026-11-06T00:00:00.000Z']);
+	assert.equal(logs.buckets.reduce((sum, bucket) => sum + bucket.bytes, 0), logs.bytes, 'the buckets add up to the bytes on disk');
+	assert.equal(planTrim({ budgetBytes: 1, kinds }).trims.bookLogs.cutoffAt, null);
 });
 
 test('per-type raw is cut at one time: each route keeps its newest file before the cutoff, so a later check that read an unchanged page still finds it', async (t) => {
