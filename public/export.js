@@ -599,7 +599,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	// floor to: an empty source book, no sell price) stays 0 at any factor, so it keeps the recommendation (and its
 	// real stop reason); a floored recommendation of 1 unit scales from that 1.
 	const reportForFactor = (row) => {
-		if (row.factor === 1 || !row.inputs || row.base.volume === 0) return row.base;
+		if (row.factor === 1 || row.base.volume === 0) return row.base;
 		const target = Math.ceil(row.base.volume * row.factor);
 		const report = estimate.computeItemReport({
 			...row.inputs,
@@ -660,8 +660,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	const coverageWords = (r) => {
 		const cov = r.report.observedCoverage;
 		if (!cov) return 'no observation';
-		const f = cov.events && Number.isFinite(cov.events.fraction) ? cov.events.fraction : 0;
-		return `${pct(f)} observed (${nf.format(cov.samples)} sample${cov.samples === 1 ? '' : 's'})`;
+		return `${pct(cov.events.fraction)} observed (${nf.format(cov.samples)} sample${cov.samples === 1 ? '' : 's'})`;
 	};
 	const nf1 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
 	// "+12", "-3.4": signed, one decimal at most, no minus zero
@@ -707,7 +706,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		{ key: 'qty', label: 'quantity', val: orderQty, fmt: fmtNum,
 			help: () => `recommended × factor, bought for real up the source book, so cost/item, ROI, the order totals, days to clear and daily profit are for this quantity. Recommended = ${runDaysToComplete} days of demand minus competing stock (within ${pct(cfg.COMPETE_BAND)} above the sell price in full, dearer stock by its seller's rival weight), bought while each order still clears ${runMinRoi}x ROI; a factor above 1 buys past that floor. The cell tooltip names the limit that bound. When nothing is worth buying the row shows 1 unit so its figures are real, filtered as 'nothing to buy'`,
 			tip: (r) => {
-				const base = r.base || r.report;
+				const base = r.base;
 				const baseWord = base.floored ? 'shown' : 'recommended'; // a floored base recommends nothing
 				if (r.report === base) return `${nf.format(base.volume)} ${baseWord} × factor ${r.factor}. ${recommendedClause(base, r.minRoi)}`;
 				const target = Math.ceil(base.volume * r.factor);
@@ -722,19 +721,19 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		{ key: 'daysOfSupply', label: 'days of supply left', val: (r) => num(r.report.daysOfSupply), fmt: fmtRoi,
 			help: `units listed at the destination ${SUPPLY_BAND_TXT} ÷ demand per day: how long until the cheap stock is gone and the price steps up`,
 			tip: (r) => `${nf.format(r.report.supplyVolume)} units listed ${SUPPLY_BAND_TXT} (${mil(r.report.sellPriceMil)}) ÷ ${r.report.dailyDemand}/day`
-				+ (r.report.stockTrendPerDay === null || r.report.stockTrendPerDay === undefined ? '' : `; stock trend ${signed1(r.report.stockTrendPerDay)}/day`) },
+				+ (r.report.stockTrendPerDay === null ? '' : `; stock trend ${signed1(r.report.stockTrendPerDay)}/day`) },
 		{ key: 'activeSellers', label: 'active sellers', val: (r) => num(r.report.activeSellers), fmt: fmtNum,
 			help: 'destination sell orders at any price that were placed or changed within 24h of the newest one; empty when the station has no sell orders. Rivals weights these by price and recency',
 			tip: (r) => `${nf.format(r.report.destSellOrderCount)} sell orders at the station, cheapest ${mil(r.report.destBestSellPriceMil)}; ${r.report.activeSellers ?? 0} active; best buy order ${mil(r.report.destBestBuyPriceMil)}` },
 		{ key: 'rivals', label: 'rivals', val: (r) => num(r.report.rivals), fmt: fmtRoi,
 			help: `expected number of sellers who will undercut you: every sell order at the station counts its chance = ${cfg.RIVAL_RECENCY_DECAY} per idle day since it was touched × 1 within ${pct(cfg.SUPPLY_BAND)} above the sell price, falling as 1/multiple² beyond that. Drives the "too much competition" filter and weights out-of-band stock in competing volume. Red when there is too much competition. ${BLENDED_HELP}`,
-			tip: (r) => `${r.report.rivals ?? '?'} expected rivals among ${nf.format(r.report.destSellOrderCount)} sell orders (sell price ${mil(r.report.sellPriceMil)})`,
+			tip: (r) => `${r.report.rivals} expected rivals among ${nf.format(r.report.destSellOrderCount)} sell orders (sell price ${mil(r.report.sellPriceMil)})`,
 			mark: rivalsMark },
 		{ key: 'daysSinceSellerUpdate', label: 'days idle', val: (r) => num(r.report.daysSinceSellerUpdate), fmt: fmtRoi,
 			help: `days since the newest destination sell order at any price was placed or changed. The cell tooltip gives the same figure for the orders ${SUPPLY_BAND_TXT}`,
 			tip: (r) => {
 				const idle = r.report.daysSinceInBandSellerUpdate;
-				return `${SUPPLY_BAND_TXT}: ${idle === null || idle === undefined ? 'no orders' : `${idle} days idle`}`;
+				return `${SUPPLY_BAND_TXT}: ${idle === null ? 'no orders' : `${idle} days idle`}`;
 			} },
 		{ key: 'avgDaysIdle', label: 'avg days idle', val: (r) => num(r.report.avgDaysIdle), fmt: fmtRoi,
 			display: (r) => {
@@ -1673,7 +1672,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			lines.push({ kind: 'note', text: `Synced data is in ${env.dataDir} because EFLIP_DATA_DIR is not set. Add EFLIP_DATA_DIR=/path to .env so every checkout shares one store.` });
 		}
 		if (env.userAgentFromEnv === false) lines.push({ kind: 'note', text: 'ESI_USER_AGENT is not set; CCP asks for a contact in it.' });
-		if (typeof storageNotice !== 'undefined') for (const { kind, text } of storageNotice.storageNoticeLines(config)) lines.push({ kind: kind === 'warn' ? 'note' : kind, text });
+		for (const { kind, text } of storageNotice.storageNoticeLines(config)) lines.push({ kind: kind === 'warn' ? 'note' : kind, text });
 		for (const { kind, text } of lines) {
 			const line = document.createElement('div');
 			if (kind === 'err' || kind === 'info') line.className = kind;

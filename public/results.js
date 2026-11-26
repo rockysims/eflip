@@ -402,7 +402,7 @@
 		const names = (id) => esc(charName(id));
 		const open = state.batchesOpen === null ? v.isRun || v.isUnplanned : state.batchesOpen;
 		const batchIds = new Set(batches.map(b => b.batchId));
-		const warns = (result.warnings || []).filter(w => (w.kind === 'unsourced' && batchIds.has(w.batchId)) || w.kind === 'failedCourier');
+		const warns = result.warnings.filter(w => (w.kind === 'unsourced' && batchIds.has(w.batchId)) || w.kind === 'failedCourier');
 		const warnText = (w) => (w.kind === 'failedCourier'
 			? `Courier contract ${w.courierId} failed; what it carried is a loss the page does not count.`
 			: `${fmtQty(w.qty)} \u00d7 ${nameOf(w.typeId)} in contract ${w.batchId} has no matching purchase (synced history starts ${w.historyFrom ? stamp(w.historyFrom) : DASH}).`);
@@ -484,7 +484,7 @@
 	const physicalTip = (r) => {
 		const p = r.remaining.physical;
 		const books = `By the books: ${fmtQty(r.remaining.qty)} left (cost ${fmtExact(r.unrealizedAtCost)}).`;
-		if (!p || !p.known) return `${books}\nNo stock snapshot yet to compare with.`;
+		if (!p.known) return `${books}\nNo stock snapshot yet to compare with.`;
 		const lines = [books, `Physically (last snapshot): at the source ${fmtQty(p.atSource)}, in transit ${fmtQty(p.inTransit)}, in the destination hangar ${fmtQty(p.atDest)}, listed ${fmtQty(p.listed)} = ${fmtQty(p.total)}.`];
 		if (r.remaining.mismatch) lines.push(`The two disagree (the books count every lot, exported or not: ${fmtQty(r.remaining.accountingTotal)}).`);
 		if (r.remaining.unbatchedQty > 0) lines.push(`${fmtQty(r.remaining.unbatchedQty)} of the books' units are in lots no hand-off took.`);
@@ -666,7 +666,7 @@
 			help: 'realized profit plus the unsold units at market value',
 			cell: (r) => {
 				const a = r.predicted ? r.predicted.actualProfit : null;
-				return a === null || a === undefined ? { t: `<span class="dim">${DASH}</span>`, title: 'needs a market price for the unsold units' } : iskCell(a, `${fmtExact(a)} = realized ${fmtExact(r.realizedProfit)} + unsold at market ${fmtExact(r.unrealizedAtMarket)}`, { signed: true, cls: a < 0 ? 'neg' : '' });
+				return a === null ? { t: `<span class="dim">${DASH}</span>`, title: 'needs a market price for the unsold units' } : iskCell(a, `${fmtExact(a)} = realized ${fmtExact(r.realizedProfit)} + unsold at market ${fmtExact(r.unrealizedAtMarket)}`, { signed: true, cls: a < 0 ? 'neg' : '' });
 			} },
 		{ key: 'profitDelta', label: 'profit Δ', run: true,
 			val: (r) => (planKnown(r) && isNum(r.predicted.actualProfit) && isNum(r.predicted.profit) ? r.predicted.actualProfit - r.predicted.profit : null),

@@ -4,8 +4,8 @@
 // linked characters' ledgers, runs, snapshots, destination prices and item names, then works the results
 // out with results-calc.js. It also fills a page's `#envNotice` container, when it has one, with the
 // notice for an unset EFLIP_DATA_DIR or ESI_USER_AGENT, the error for a data directory that cannot
-// be written (GET /api/config's `env`) and the storage line (storage-notice.js, when the page loads
-// it: the budget used, or the hourly book running with no budget), and reads where an EVE sign-in
+// be written (GET /api/config's `env`) and the storage line (storage-notice.js, which the pages load
+// first: the budget used, or the hourly book running with no budget), and reads where an EVE sign-in
 // came back from (?linked= and ?ssoError=&ssoReason=, readSsoResult) so the results and orders pages
 // word it alike. Plain script, one global (`resultsShared`), no build step.
 //
@@ -790,7 +790,7 @@ const resultsShared = (() => {
 	// an amber note while the hourly book runs with no budget or the budget is overrun, a plain line
 	// with the share of the budget used otherwise). The lines are [{kind: 'err' | 'warn' | 'info', html}],
 	// html already escaped.
-	const storageLines = (config) => (typeof storageNotice === 'undefined' ? [] : storageNotice.storageNoticeLines(config))
+	const storageLines = (config) => storageNotice.storageNoticeLines(config)
 		.map(line => ({ kind: line.kind, html: esc(line.text) }));
 	const envNoticeLines = (env, config) => {
 		const lines = [];

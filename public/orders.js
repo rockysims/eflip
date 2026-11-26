@@ -66,27 +66,10 @@
 
 	const price = (v) => (isNum(v) ? nf2.format(v) : DASH); // an exact price: a tick of 0.01 or 10 ISK must stay visible
 	// A duration the way the verdict reasons write it (decision 21): '<1min', '35min', '1.1h', '2.6d'; one decimal
-	// under 10, no space. The module's fmtCompactDuration when it has one, so both read alike; else the same here.
-	const compactDuration = (a) => {
-		if (a < MIN_MS) return '<1min';
-		const min = Math.round(a / MIN_MS);
-		if (min < 60) return `${min}min`;
-		const h = a / HOUR_MS;
-		const hr = h < 10 ? Math.round(h * 10) / 10 : Math.round(h);
-		if (hr < 24) return `${hr}h`;
-		const d = a / DAY_MS;
-		return `${d < 10 ? Math.round(d * 10) / 10 : Math.round(d)}d`;
-	};
+	// under 10, no space. The module's fmtCompactDuration, so both read alike.
 	const dur = (ms) => {
 		if (!isNum(ms)) return DASH;
-		const a = Math.abs(ms);
-		if (typeof oc.fmtCompactDuration === 'function') {
-			try {
-				const s = oc.fmtCompactDuration(a);
-				if (typeof s === 'string' && s !== '') return s;
-			} catch (e) { /* the page's own form below */ }
-		}
-		return compactDuration(a);
+		return oc.fmtCompactDuration(Math.abs(ms));
 	};
 	const ageText = (ms, now) => (isNum(ms) ? `${dur(now - ms)} ago` : DASH);
 	const hasMoment = () => typeof moment === 'function';
@@ -180,7 +163,6 @@
 	const notesEl = $('#notes');
 	const winSegEl = $('#winSeg');
 	const presenceChk = $('#showPresence');
-	const presenceLabelEl = $('#presenceLabel');
 	const soldTotalsEl = $('#soldTotals');
 	const soldLegendEl = $('#soldLegend');
 	const soldBodyEl = $('#soldBody');
@@ -774,7 +756,7 @@
 	// over the price when its `issued` is later than the feed's; at the same `issued` only the units left.
 	const timeOf = (isoText) => (isoText && Number.isFinite(Date.parse(isoText)) ? clockOrDate(Date.parse(isoText)) : DASH);
 	const fromBook = (r) => r.stateFrom === 'book';
-	const priceFromBook = (r) => fromBook(r) && (!r.feed || Date.parse(r.feed.issued) !== Date.parse(r.issued));
+	const priceFromBook = (r) => fromBook(r) && Date.parse(r.feed.issued) !== Date.parse(r.issued);
 	const feedCacheText = (r) => {
 		const w = data.watch && data.watch.characters && data.watch.characters[r.characterId];
 		const ms = w && w.expires ? Date.parse(w.expires) : NaN;
@@ -797,8 +779,8 @@
 		return `${fmtExact(r.feeEstimate)}: ${pct3(r.feeRate)} of the remaining value (${price(unit)} × ${fmtQty(r.volumeRemain)}), the rate from ${rows} ${who}${since}${isNum(n) && n < FEW_RELISTS ? ' (few observations)' : ''}`;
 	};
 	const verdictTip = (r) => {
-		// the module's sentence first (decision 21); the token alone before it has one
-		const why = r.reasonText || r.reason || '';
+		// the module's sentence first (decision 21)
+		const why = r.reasonText;
 		const lines = [why ? `${r.verdict}: ${why}${/[.!?]$/.test(why) ? '' : '.'}` : `${r.verdict}.`, VERDICT_HELP[r.verdict]];
 		if (r.ordersAhead !== null) {
 			lines.push(`${fmtQty(r.unitsAhead)} ${r.unitsAhead === 1 ? 'unit' : 'units'} ahead in ${plural(r.ordersAhead, 'order')}${isNum(r.dailyVolume) ? ` at ${fmtRate(r.dailyVolume)} units a day in the region` : ''}${isNum(r.daysBehind) && r.daysBehind > 0 ? ` = ${behindText(r.daysBehind)} behind` : ''}.`);
@@ -814,7 +796,7 @@
 	const flagHtml = (b) => `<span class="flag ${BADGES[b].cls || ''}" title="${esc(BADGES[b].help)}">${esc(BADGES[b].label)}</span>`;
 	// The verdict, its reason token as is (decision 21: '2.6d', '50%', '1.21x', 'no book'; nothing when empty) and the badges.
 	const verdictCell = (r) => ({
-		t: `<span class="verdict v-${r.verdict}" title="${esc(verdictTip(r))}">${esc(r.verdict)}</span>${r.reason ? ` <span class="reason dim" title="${esc(r.reasonText || r.reason)}">${esc(r.reason)}</span>` : ''}${BADGE_ORDER.filter(b => r.badges.includes(b)).map(flagHtml).join('')}`,
+		t: `<span class="verdict v-${r.verdict}" title="${esc(verdictTip(r))}">${esc(r.verdict)}</span>${r.reason ? ` <span class="reason dim" title="${esc(r.reasonText)}">${esc(r.reason)}</span>` : ''}${BADGE_ORDER.filter(b => r.badges.includes(b)).map(flagHtml).join('')}`,
 		cls: 'text verdictCell stickV'
 	});
 
@@ -842,7 +824,7 @@
 			cell: (r) => (fromBook(r)
 				? {
 					t: `<span class="fromBook">${fmtQty(r.volumeRemain)}</span> <span class="dim">/ ${fmtQty(r.volumeTotal)}</span>`,
-					title: `${fmtQty(r.volumeRemain)} of ${fmtQty(r.volumeTotal)} left per the book of ${timeOf(r.stateAt)}; the orders feed, ${feedCacheText(r)}, still says ${r.feed ? `${fmtQty(r.feed.volumeRemain)} left (read ${timeOf(r.feed.fetchedAt)})` : 'an older figure'}`
+					title: `${fmtQty(r.volumeRemain)} of ${fmtQty(r.volumeTotal)} left per the book of ${timeOf(r.stateAt)}; the orders feed, ${feedCacheText(r)}, still says ${fmtQty(r.feed.volumeRemain)} left (read ${timeOf(r.feed.fetchedAt)})`
 				}
 				: { t: `${fmtQty(r.volumeRemain)} <span class="dim">/ ${fmtQty(r.volumeTotal)}</span>`, title: `${fmtQty(r.volumeRemain)} of ${fmtQty(r.volumeTotal)} left` }) },
 		{ key: 'price', label: 'my price', val: (r) => r.price,
@@ -850,7 +832,7 @@
 			cell: (r) => (priceFromBook(r)
 				? {
 					t: `<span class="fromBook">${price(r.price)}</span>`,
-					title: `${price(r.price)} per the book of ${timeOf(r.stateAt)} (set ${timeOf(r.issued)}); the orders feed, ${feedCacheText(r)}, still says ${r.feed ? `${price(r.feed.price)} from ${timeOf(r.feed.issued)}` : 'an older price'}`
+					title: `${price(r.price)} per the book of ${timeOf(r.stateAt)} (set ${timeOf(r.issued)}); the orders feed, ${feedCacheText(r)}, still says ${price(r.feed.price)} from ${timeOf(r.feed.issued)}`
 				}
 				: { t: price(r.price), title: `${fmtExact(r.price)}, set ${r.issued ? whenText(Date.parse(r.issued)) : DASH}` }) },
 		{ key: 'best', label: 'best price (gap)', val: (r) => r.bestPrice, pos: true,
@@ -865,7 +847,7 @@
 			help: 'units listed at a lower price (or the same price, earlier) ahead of this order in the scope; hover for the orders, our own orders and cheaper stock elsewhere',
 			cell: (r) => {
 				const lines = [`${fmtQty(r.unitsAhead)} ${r.unitsAhead === 1 ? 'unit' : 'units'} in ${plural(r.ordersAhead, 'order')} ahead ${scopeWord()}; this order is number ${r.rank} in the queue`];
-				if (r.ownAhead && r.ownAhead.orders > 0) lines.push(`${plural(r.ownAhead.orders, 'order')} of ours (${fmtQty(r.ownAhead.units)} units) are also ahead and not counted`);
+				if (r.ownAhead.orders > 0) lines.push(`${plural(r.ownAhead.orders, 'order')} of ours (${fmtQty(r.ownAhead.units)} units) are also ahead and not counted`);
 				if (r.cheaperElsewhere && r.cheaperElsewhere.orders > 0) lines.push(`${plural(r.cheaperElsewhere.orders, 'order')} (${fmtQty(r.cheaperElsewhere.units)} units) cheaper at other stations of the region, not counted`);
 				return { t: fmtQty(r.unitsAhead), title: lines.join('\n'), cls: r.unitsAhead === 0 ? 'dim' : '' };
 			} },
@@ -1039,23 +1021,21 @@
 		const rates = data.result && data.result.feeRates;
 		const stations = stationsInput();
 		const lines = [];
-		if (rates && typeof rates === 'object') {
-			for (const c of state.characters || []) {
-				const byStation = rates[c.characterId];
-				if (!byStation || typeof byStation !== 'object') continue;
-				const parts = [];
-				const tips = [];
-				for (const [locationId, f] of Object.entries(byStation)) {
-					if (!f || !isNum(f.rate)) continue;
-					const where = stations[locationId] ? stations[locationId].name : `station ${locationId}`;
-					const since = f.since ? ` since ${dayText(Date.parse(f.since))}` : '';
-					parts.push(`relist fee ${pct3(f.rate)} of the remaining value at ${esc(where)} (${isNum(f.rows) ? plural(f.rows, 'relist') : 'relists'}${since})`);
-					if (isNum(f.rows) && f.rows < FEW_RELISTS) tips.push(`${where}: few observations`);
-					const obs = asArray(f.observations).filter(o => o && isNum(o.rate)).slice().sort((x, y) => Date.parse(y.date) - Date.parse(x.date)).slice(0, 8);
-					if (obs.length > 0) tips.push(`${where}, newest relists: ${obs.map(o => `${isNum(Date.parse(o.date)) ? localTime(Date.parse(o.date)) : DASH} ${pct3(o.rate)} (${nameOf(o.typeId)})`).join('; ')}`);
-				}
-				if (parts.length > 0) lines.push(`<div title="${esc(tips.join('\n'))}">${esc(c.name || `character ${c.characterId}`)}: ${parts.join('; ')}</div>`);
+		for (const c of state.characters || []) {
+			const byStation = rates[c.characterId];
+			if (!byStation || typeof byStation !== 'object') continue;
+			const parts = [];
+			const tips = [];
+			for (const [locationId, f] of Object.entries(byStation)) {
+				if (!isNum(f.rate)) continue;
+				const where = stations[locationId] ? stations[locationId].name : `station ${locationId}`;
+				const since = f.since ? ` since ${dayText(Date.parse(f.since))}` : '';
+				parts.push(`relist fee ${pct3(f.rate)} of the remaining value at ${esc(where)} (${isNum(f.rows) ? plural(f.rows, 'relist') : 'relists'}${since})`);
+				if (isNum(f.rows) && f.rows < FEW_RELISTS) tips.push(`${where}: few observations`);
+				const obs = f.observations.filter(o => isNum(o.rate)).slice().sort((x, y) => Date.parse(y.date) - Date.parse(x.date)).slice(0, 8);
+				if (obs.length > 0) tips.push(`${where}, newest relists: ${obs.map(o => `${isNum(Date.parse(o.date)) ? localTime(Date.parse(o.date)) : DASH} ${pct3(o.rate)} (${nameOf(o.typeId)})`).join('; ')}`);
 			}
+			if (parts.length > 0) lines.push(`<div title="${esc(tips.join('\n'))}">${esc(c.name || `character ${c.characterId}`)}: ${parts.join('; ')}</div>`);
 		}
 		setHtml(feeRatesEl, lines.join(''));
 		feeRatesEl.hidden = lines.length === 0;
@@ -1107,14 +1087,11 @@
 
 	//--- the export snapshot (decision 22): the export run's prediction for the item against what the page has now
 
-	// The lots of a row's type with units left, newest first (the module's row.lots); before the module has them,
-	// the same from the facts: the type's lots with units left.
 	let lotIndex = { key: null, byId: new Map() };
 	const lotsById = () => {
 		if (lotIndex.key !== data.factsKey) lotIndex = { key: data.factsKey, byId: new Map(asArray(data.facts && data.facts.lots).map(l => [l.lotId, l])) };
 		return lotIndex.byId;
 	};
-	const rowLots = (r) => (Array.isArray(r.lots) ? r.lots : asArray(data.facts && data.facts.lots).filter(l => l.typeId === r.typeId && l.remainingQty > 0));
 	// The newest run (by when it was copied) among these run ids that lists the type: {run, row}, or null.
 	const newestRunOf = (runIds, typeId) => {
 		const ids = new Set(runIds.filter(id => id !== null && id !== undefined).map(String));
@@ -1129,14 +1106,14 @@
 		}
 		return best;
 	};
-	const runForRow = (r) => newestRunOf(rowLots(r).map(l => l.runId), r.typeId);
+	const runForRow = (r) => newestRunOf(r.lots.map(l => l.runId), r.typeId); // r.lots: the type's lots with units left, newest first
 	const utcDay = (isoText) => new Date(Date.parse(isoText)).toISOString().slice(0, 10);
 	// A sales-table row: the day's sales of the type -> their lots -> the lots' runs.
 	const salesOfDay = (typeId, day) => (data.result ? data.result.sales.filter(s => s.typeId === typeId && utcDay(s.date) === day) : []);
 	const runForDay = (typeId, day) => {
 		const byId = lotsById();
 		const runIds = [];
-		for (const s of salesOfDay(typeId, day)) for (const id of asArray(s.lotIds)) if (byId.has(id)) runIds.push(byId.get(id).runId);
+		for (const s of salesOfDay(typeId, day)) for (const id of s.lotIds) if (byId.has(id)) runIds.push(byId.get(id).runId);
 		return newestRunOf(runIds, typeId);
 	};
 
@@ -1170,7 +1147,7 @@
 		const listedQty = listed.reduce((a, s) => a + s.qty, 0);
 		const daysListed = listedQty > 0 ? listed.reduce((a, s) => a + s.daysSinceListed * s.qty, 0) / listedQty : null;
 		const open = data.result.rows.find(r => r.typeId === d.typeId) || null;
-		const share = data.result.share && data.result.share.byType ? data.result.share.byType[d.typeId] : null;
+		const share = data.result.share.byType[d.typeId] || null;
 		const winVolume = share && isNum(share.volume) && share.days > 0 ? share.volume / share.days : null;
 		const per = (v) => (d.qty > 0 && isNum(v) ? v / d.qty : null);
 		return {
@@ -1187,9 +1164,9 @@
 
 	const snapPanelHtml = ({ typeId, run, row, now }) => {
 		const name = nameOf(typeId);
-		const route = run.route ? `${run.route.start} → ${run.route.end}` : 'route not recorded';
+		const route = `${run.route.start} → ${run.route.end}`;
 		const rec = row.recommendation || {};
-		const recommended = isNum(row.recommended) ? row.recommended : rec.volume;
+		const recommended = row.recommended;
 		const stop = rec.floored ? 'nothing was worth buying' : STOP_WORDS[rec.stopReason] || 'limit not recorded';
 		const lines = snapLines(row, now).map(([a, av, b, bv, title]) => `<tr><th scope="row">${esc(a)} <span class="dim">vs ${esc(b)}</span></th><td class="numeric">${esc(av)}</td><td class="numeric"${title ? ` title="${esc(title)}"` : ''}>${esc(bv)}</td></tr>`).join('');
 		const seen = [];
@@ -1497,7 +1474,7 @@
 			: 'listed; whether on top is unknown (before the book log of this item)';
 		// the orders counted at the stretch's start; a price change of ours that kept the state merges into the
 		// stretch, so a price is shown as start → end when it moved
-		const ids = asArray(s.orderIds);
+		const ids = s.orderIds;
 		const many = (state.characters || []).length > 1;
 		const rows = [{ value: dur(p.toMs - p.fromMs), name: `${whenText(p.fromMs)} to ${now - p.toMs < MIN_MS ? 'now' : whenText(p.toMs)}` }];
 		for (const id of ids.slice(0, 4)) {
@@ -1516,7 +1493,7 @@
 
 	// What the timeline shows: a mark per cluster and per pending fill; a row per item, the window's profit highest
 	// first and items with only pending fills after them (decision 17); each item's total for the last column; and
-	// the presence segments of those items (decision 18), when the module gives them.
+	// the presence segments of those items (decision 18).
 	const timelineModel = (res, now, windowMs) => {
 		const marks = [];
 		for (const c of res.salesClusters) marks.push({ kind: 'sale', typeId: c.typeId, atMs: Date.parse(c.at), endMs: Date.parse(c.end), profit: c.profit, cluster: c });
@@ -1555,21 +1532,19 @@
 			...list.filter(t => t.count === 0).sort((a, b) => est(b) - est(a) || a.typeId - b.typeId)
 		].map(t => t.typeId);
 		const startMs = now - windowMs;
-		const pres = res.presence && typeof res.presence === 'object' ? res.presence : null;
+		const pres = res.presence;
 		const presence = [];
-		if (pres) {
-			for (const typeId of types) {
-				const p = pres[typeId];
-				for (const seg of asArray(p && p.segments)) {
-					if (!seg) continue;
-					const fromMs = Math.max(startMs, msOf(seg.from));
-					const toMs = Math.min(now, seg.to ? msOf(seg.to) : now);
-					if (!(toMs > fromMs)) continue;
-					presence.push({ typeId, fromMs, toMs, seg });
-				}
+		for (const typeId of types) {
+			const p = pres[typeId];
+			for (const seg of asArray(p && p.segments)) {
+				if (!seg) continue;
+				const fromMs = Math.max(startMs, msOf(seg.from));
+				const toMs = Math.min(now, seg.to ? msOf(seg.to) : now);
+				if (!(toMs > fromMs)) continue;
+				presence.push({ typeId, fromMs, toMs, seg });
 			}
 		}
-		return { marks, types, totals, presence, hasPresence: pres !== null, startMs };
+		return { marks, types, totals, presence, startMs };
 	};
 
 	const RMAX = 14;          // px radius of the biggest dot
@@ -1594,7 +1569,7 @@
 		const TM = Math.max(1, ...totals.map(t => (isNum(t.value) ? Math.abs(t.value) : 0)));
 		const tFloor = TM * (RMIN / RMAX) ** 2;
 		const totalR = (v) => RMAX * Math.sqrt(Math.max(isNum(v) ? Math.abs(v) : 0, tFloor) / TM);
-		const drawPresence = showPresence && m.hasPresence;
+		const drawPresence = showPresence;
 		const marginLeft = width < 640 ? 120 : 176;
 		const marginRight = COL_GAP + (wide ? 100 : 42);
 		const marginTop = 6;
@@ -1697,13 +1672,13 @@
 		return { plot, model: m, wide, presenceDrawn: presenceTargets.length };
 	};
 
-	const legendHtml = (res) => {
+	const legendHtml = () => {
 		const keys = [
 			['<span class="sw profit"></span>', 'profit (a circle)'],
 			['<span class="sw loss"></span>', 'loss (a square)'],
 			['<span class="sw pendProfit"></span><span class="sw pendLoss"></span>', 'hollow: filled per the order log, not in the wallet yet (estimated)']
 		];
-		if (showPresence && res.presence !== undefined) {
+		if (showPresence) {
 			keys.push(
 				['<span class="sw line lineTop"></span>', 'solid line: on top (our sell order the lowest at its station)'],
 				['<span class="sw line lineListed"></span>', 'dotted: listed, someone lower'],
@@ -1721,7 +1696,6 @@
 		const win = WINDOWS.find(w => w.key === winKey);
 		for (const b of winSegEl.children) b.setAttribute('aria-pressed', b.dataset.win === winKey ? 'true' : 'false');
 		presenceChk.checked = showPresence;
-		presenceLabelEl.hidden = res.presence === undefined; // nothing to toggle until the module gives presence
 		hideTip();
 		const t = res.totals;
 		const pendingUnits = t.pendingUnits;
@@ -1749,7 +1723,7 @@
 			tot(`share of ${region} volume`, esc(fmtPct(t.share)), `our units ÷ all units traded in the region, on the UTC days we sold that the history already covers${res.share.overall.volume ? `: ${fmtQty(res.share.overall.qty)} of ${fmtQty(res.share.overall.volume)}` : ''}`),
 			pendingUnits > 0 ? tot('pending', `${esc(fmtQty(pendingUnits))} units`, `${fmtQty(pendingUnits)} units the order log saw fill that the wallet has not caught up with; est. profit ${fmtExact(pendingProfit)}. Drawn hollow below`) : ''
 		].join(''));
-		setHtml(soldLegendEl, legendHtml(res));
+		setHtml(soldLegendEl, legendHtml());
 		// the chart
 		let drawn = null;
 		if (typeof Plot === 'undefined' || typeof d3 === 'undefined') {
@@ -1768,7 +1742,7 @@
 			`Each row is an item, the highest profit over the window on top; items with only pending fills follow. Sales of one item within ${dur(Math.max(10 * MIN_MS, win.ms / 150))} of each other are one dot. Dots under ${RMIN} px radius are drawn at ${RMIN} px, so the smallest profits read as larger than they are. Times are local; EVE time is in parentheses.`,
 			drawn ? `The total column after the dashed line has its own scale: its mark's area is the item's profit over the window${drawn.wide ? ' (the figure beside it)' : ''}, sized against the largest total, not against the sale dots.` : '',
 			res.pending.length > 0 ? `${plural(res.pending.length, 'hollow mark')}: units the order log saw fill that the wallet has not caught up with (ESI holds transactions back up to an hour).` : '',
-			showPresence && drawn && drawn.model.hasPresence
+			showPresence && drawn
 				? (drawn.presenceDrawn > 0
 					? 'The line near the bottom of a row is solid while one of our sell orders of the item was the lowest at its station, dotted while someone was lower, and missing while we had no sell order; it is faint before the book log covers the item, where whether we were on top is unknown.'
 					: 'No sell order of ours was open for these items in this window, so no line is drawn.')
