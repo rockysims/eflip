@@ -249,3 +249,28 @@ Rough edges:
 6. Gzip touches every reader of raw pages and logs; both forms must read, so nothing migrates.
 7. Sizes are file bytes, not disk blocks; close enough. A lowered budget trims at the next run.
 8. Without the budget set, the region job would grow unbounded: the env notice must say so.
+
+## P2.1 as built (agent, 2026-11-25; accepted at review)
+
+- `doSyncRegionBook` under the market lock; `order_type=all`, page 1's X-Pages (cap 400), raw slugs
+  `markets-<region>-orders-order-type-all[-page-n]`; folds only a complete snapshot, one stored
+  sample per type present (all stations, buy and sell), an empty stored sample for a type with a
+  log but no orders; a type with per-type raw but no log is built first (`ensureBookLog`); yields to
+  the event loop every 100 types. Statuses ok | partial | busy | deferred | paused | skipped |
+  failed. An unforced run skips within 55 minutes of the last fold. State in
+  `esi-cache/public/_region-book.json`; measurement as a `kind: 'regionBook'` public sync-log
+  entry with `pageStamps` (the raw page files of the snapshot) for P2.2's replay and trimming.
+- `updateBookLog` reads per-type raw, so `updateBookLogWithRows` folds given rows (byte-equal to
+  foldBook + writeBookLog, tested). `readMarket` skips regionBook entries when choosing regions.
+- Scale check: 194 pages, 193,500 orders, 12,000 types fold in about 3 s, ~450 MB RSS; the first
+  fold made 63 MB of plain-JSON logs; a later hour grew them ~1 MB at 2.5 % of orders re-priced
+  (so ~25 MB a day plain, ~2.5 MB gzipped: the budget defaults can be generous to the logs).
+- Rebuild hazard until P2.2: `scripts/sync.js --rebuild` rebuilds a type's log from per-type raw
+  only, so regional samples are lost for types that also have per-type raw (raw is kept, so
+  recoverable once the replay exists). README warns not to run `--rebuild` while the job is on.
+  P2.2 TODO: "`rebuildBookLogs` must learn to replay regional snapshots (the regionBook entries'
+  `pageStamps` group the raw pages per snapshot) in time order with the per-type checks."
+- Gzip in P2.2 must update `rawFileBytes`, `ledger.bookLogBytes`, `ledger.listBookLogs` (they
+  assume `.json`).
+- `EFLIP_REGION_BOOK=1` makes a full sync take the region book too, but nothing schedules hourly
+  runs; the 24-hour measurement runs as a shell loop of `node scripts/sync.js --region-book`.

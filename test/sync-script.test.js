@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { main, parseArgs, formatSummary, formatWatch, watchFailed, UsageError } = require('../scripts/sync');
+const { main, parseArgs, formatSummary, formatWatch, formatRegionBook, formatRegionBookReport, hasFailure, watchFailed, UsageError } = require('../scripts/sync');
 const { acquireLock, createRawStore } = require('../lib/dataFiles');
 const { createTokenStore } = require('../lib/tokenStore');
 const {
@@ -41,7 +41,7 @@ const setup = (t, { link = true } = {}) => {
 };
 
 test('arguments: characters and regions repeat, flags combine, mistakes are usage errors', () => {
-	assert.deepEqual(parseArgs([]), { characterIds: null, regionIds: null, market: true, marketOnly: false, rebuild: false, watch: false, help: false, maxTypes: undefined });
+	assert.deepEqual(parseArgs([]), { characterIds: null, regionIds: null, market: true, marketOnly: false, rebuild: false, watch: false, regionBook: false, regionBookReport: false, help: false, maxTypes: undefined });
 	const full = parseArgs(['--character', '1', '--character', '2', '--region', '10000043', '--no-market', '--max-types', '50']);
 	assert.deepEqual([full.characterIds, full.regionIds, full.market, full.maxTypes], [[1, 2], [10000043], false, 50]);
 	assert.equal(parseArgs(['--market-only']).marketOnly, true);
@@ -301,4 +301,161 @@ test('run as a script it needs neither the server nor the network to say what is
 	assert.equal(bare.status, 2);
 	assert.match(bare.stderr, /not configured/);
 	assert.ok(!fs.existsSync(path.join(dataDir, 'raw')), 'nothing was written');
+});
+
+// ---- --region-book and --region-book-report
+
+const MINUTE = 60 * 1000;
+
+test('arguments: --region-book takes one --region and nothing else, --region-book-report nothing', () => {
+	const run = parseArgs(['--region-book', '--region', '10000043']);
+	assert.deepEqual([run.regionBook, run.regionBookReport, run.regionIds], [true, false, [10000043]]);
+	assert.equal(parseArgs(['--region-book']).regionIds, null);
+	assert.equal(parseArgs(['--region-book-report']).regionBookReport, true);
+	for (const bad of [
+		['--region-book', '--region-book-report'], ['--region-book', '--rebuild'], ['--region-book', '--watch'], ['--region-book', '--market-only'], ['--region-book', '--no-market'],
+		['--region-book', '--max-types', '5'], ['--region-book', '--character', '1'], ['--region-book', '--region', '1', '--region', '2'],
+		['--region-book-report', '--region', '1'], ['--region-book-report', '--character', '1'], ['--region-book-report', '--rebuild'], ['--region-book-report', '--no-market'],
+	]) {
+		assert.throws(() => parseArgs(bad), UsageError, bad.join(' '));
+	}
+});
+
+const regionBookRows = (typeIds, price = 100) => typeIds.map((typeId, i) => ({ order_id: typeId * 10 + i, type_id: typeId, price, is_buy_order: i % 2 === 1, volume_remain: 5, volume_total: 10, issued: '2026-11-18T10:00:00Z', duration: 90, range: 'region', location_id: 60008494, system_id: 30002187, min_volume: 1 }));
+
+test('--region-book takes one snapshot of the whole region without the flag, prints what it cost, and a second run inside the cache folds nothing more', async (t) => {
+	const ctx = setup(t);
+	ctx.fake.pageSize = 2;
+	ctx.fake.market.regionOrders.set(String(REGION), regionBookRows([34, 35, 36, 37, 38]));
+	const code = await ctx.run(['--region-book', '--region', String(REGION)]);
+	assert.equal(code, 0, ctx.errors.join('\n'));
+	const text = ctx.lines.join('\n');
+	assert.match(text, /^region book \(region 10000043\): ok, 3 of 3 pages, 3 calls \(0 not modified, 0 not due\), 6 tokens, 0\.0 MB of orders \(0\.0 MB written to raw\)$/m);
+	assert.match(text, /^  snapshot 2026-11-20T12:00:00\.000Z: 5 orders, 5 types, 5 logs folded \(5 new, 0 with no orders left\), logs 0\.0 MB -> 0\.0 MB \(\+0\.0 MB\), 0\.0 s$/m);
+	assert.match(text, /^  tokens left: market-order 11994\/12000$/m);
+	assert.deepEqual(ctx.fake.calls.map(call => call.path), Array(3).fill(`/markets/${REGION}/orders`), 'nothing but the region pages: no character, no market');
+	assert.ok(ctx.fake.calls.every(call => call.query.order_type === 'all'));
+	assert.ok(fs.existsSync(path.join(ctx.dataDir, 'ledger', 'market', String(REGION), '38.json')));
+	assert.ok(!text.includes('secret-refresh') && !text.includes('token-'));
+	assert.deepEqual(ctx.errors, []);
+
+	ctx.fake.reset();
+	ctx.lines.length = 0;
+	ctx.clock.advance(MINUTE);
+	assert.equal(await ctx.run(['--region-book', '--region', String(REGION)]), 0, 'a skip is not a failure');
+	assert.equal(ctx.fake.calls.length, 0);
+	assert.equal(ctx.lines.join('\n'), 'region book: skipped - this snapshot was folded already');
+});
+
+test('--region-book runs with no linked character when --region is given, exits 1 on a partial snapshot, and skips when there is nothing to snapshot', async (t) => {
+	const ctx = setup(t, { link: false });
+	ctx.fake.market.regionOrders.set(String(REGION), regionBookRows([34, 35]));
+	assert.equal(await ctx.run(['--region-book']), 2, 'no linked characters and no region named');
+	assert.match(ctx.errors.join('\n'), /no linked characters/);
+	assert.equal(await ctx.run(['--region-book', '--region', String(REGION)]), 0, ctx.errors.join('\n'));
+	assert.match(ctx.lines.join('\n'), /region book \(region 10000043\): ok/);
+
+	const partial = setup(t);
+	partial.fake.pageSize = 1;
+	partial.fake.market.regionOrders.set(String(REGION), regionBookRows([34, 35]));
+	partial.fake.respondWith = (call) => (call.query.page === '2' ? new Response('{}', { status: 500 }) : null);
+	assert.equal(await partial.run(['--region-book', '--region', String(REGION)]), 1);
+	assert.match(partial.lines.join('\n'), /region book \(region 10000043\): partial, 1 of 2 pages/);
+	assert.match(partial.lines.join('\n'), /nothing folded/);
+	assert.match(partial.lines.join('\n'), /stopped: page 2/);
+	assert.match(partial.lines.join('\n'), /error: marketOrders 500 page 2/);
+
+	const noRegion = setup(t);
+	assert.equal(await noRegion.run(['--region-book']), 0, 'nothing known to snapshot is a skip');
+	assert.match(noRegion.lines.join('\n'), /region book: skipped - no destination region known yet/);
+});
+
+test('the hourly sync of the script takes the region book after the market only with EFLIP_REGION_BOOK=1', async (t) => {
+	const off = setup(t);
+	off.fake.market.regionOrders.set(String(REGION), regionBookRows([35]));
+	assert.equal(await off.run([]), 0, off.errors.join('\n'));
+	assert.ok(!off.lines.join('\n').includes('region book'));
+	assert.ok(off.fake.callsTo(/orders/).every(call => call.query.order_type === undefined));
+
+	const on = setup(t);
+	on.fake.market.regionOrders.set(String(REGION), regionBookRows([35]));
+	assert.equal(await on.run([], { env: { ...ENV, EFLIP_REGION_BOOK: '1' } }), 0, on.errors.join('\n'));
+	const text = on.lines.join('\n');
+	assert.match(text, /market \(region 10000043\): ok/);
+	assert.match(text, /region book \(region 10000043\): ok, 1 of 1 pages/);
+	assert.ok(text.indexOf('market (region') < text.indexOf('region book ('), 'after the market');
+});
+
+test('formatRegionBook and hasFailure read the answers of a run', () => {
+	assert.equal(formatRegionBook({ status: 'busy', reason: 'another market sync is running' }), 'region book: busy - another market sync is running');
+	assert.equal(formatRegionBook({ status: 'deferred', reason: 'an export run is in progress' }), 'region book: deferred - an export run is in progress');
+	const paused = formatRegionBook({ status: 'paused', reason: 'the market-order bucket is under 20 % left until X', regionId: 1, pagesRead: 1, pages: 194, calls: 1, notModified: 0, notDue: 0, tokensUsed: 2, rawBytes: 238000, rawBytesStored: 239000, typesFolded: 0, foldErrors: 0, elapsedMs: 1500, errors: [], limits: { groups: { 'public|market-order': { group: 'market-order', limit: 12000, remaining: 2000 } } } });
+	assert.match(paused, /region book \(region 1\): paused, 1 of 194 pages, 1 calls \(0 not modified, 0 not due\), 2 tokens, 0\.2 MB of orders \(0\.2 MB written to raw\)/);
+	assert.match(paused, /nothing folded, 1\.5 s/);
+	assert.match(paused, /tokens left: market-order 2000\/12000/);
+	assert.match(paused, /stopped: the market-order bucket is under 20 %/);
+	const failed = (status) => hasFailure({ characters: [], market: null, regionBook: { status } });
+	assert.deepEqual(['ok', 'skipped', 'deferred'].map(failed), [false, false, false]);
+	assert.deepEqual(['partial', 'paused', 'busy', 'failed'].map(failed), [true, true, true, true]);
+	assert.equal(hasFailure({ characters: [], market: null, regionBook: null }), false);
+	assert.match(formatSummary({ characters: [], market: null, regionBook: { status: 'deferred', reason: 'an export run is in progress' } }), /region book: deferred/);
+});
+
+// A fixture public sync log: three snapshots inside the window, a partial one, one older than 24 hours and entries
+// that are not the region book's.
+const writeRegionBookFixture = (dataDir) => {
+	const raw = createRawStore({ dataDir });
+	const entry = (syncedAt, o) => ({ syncedAt, finishedAt: syncedAt, kind: 'regionBook', regionId: REGION, status: 'ok', partial: false, pages: 194, tokensUsed: 388, rawBytes: 46200000, rawBytesStored: 46500000, typesInSnapshot: 15012, typesFolded: 15012, logBytesBefore: 20000000, logBytesAfter: 21800000, elapsedMs: 71000, ...o });
+	raw.writeSyncLog('public', entry('2026-11-19T11:00:00.000Z', { rawBytes: 99000000 })); // 25 hours before the report: outside the window
+	raw.writeSyncLog('public', entry('2026-11-19T13:00:03.000Z', { logBytesBefore: 0, logBytesAfter: 21800000, elapsedMs: 94000 }));
+	raw.writeSyncLog('public', { syncedAt: '2026-11-19T13:30:00.000Z', finishedAt: '2026-11-19T13:30:10.000Z', source: 'market', regionIds: [REGION], typeIds: [34], books: [] });
+	raw.writeSyncLog('public', entry('2026-11-19T14:00:02.000Z', { logBytesBefore: 21800000, logBytesAfter: 23700000, elapsedMs: 71000 }));
+	raw.writeSyncLog('public', entry('2026-11-19T15:00:01.000Z', { status: 'partial', partial: true, pagesRead: 100, tokensUsed: 200, rawBytes: 23800000, rawBytesStored: 24000000, typesInSnapshot: 0, typesFolded: 0, logBytesBefore: 23700000, logBytesAfter: 23700000, elapsedMs: 40000 }));
+	raw.writeSyncLog('public', { syncedAt: '2026-11-19T16:00:00.000Z', finishedAt: '2026-11-19T16:00:10.000Z', source: 'watch', regionIds: [REGION], typeIds: [34], books: [] });
+};
+
+test('--region-book-report prints the last 24 hours of snapshots as a table with totals and hourly averages, with no credentials and no ESI call', async (t) => {
+	const ctx = setup(t, { link: false });
+	ctx.clock.set(Date.UTC(2026, 10, 20, 12, 0, 0));
+	writeRegionBookFixture(ctx.dataDir);
+	const code = await ctx.run(['--region-book-report'], { env: {} });
+	assert.equal(code, 0, ctx.errors.join('\n'));
+	assert.equal(ctx.fake.calls.length, 0);
+	assert.equal(ctx.lines.join('\n'), [
+		'region book, the last 24 hours up to 2026-11-20 12:00:00 UTC: 3 snapshots, 1 partial (region 10000043)',
+		'  time (UTC)           status   pages  tokens  raw MB  types  log growth MB  elapsed',
+		'  2026-11-19 13:00:03  ok         194     388    46.2  15012          +21.8     94 s',
+		'  2026-11-19 14:00:02  ok         194     388    46.2  15012           +1.9     71 s',
+		'  2026-11-19 15:00:01  partial    100     200    23.8      0           +0.0     40 s',
+		'  total                           488     976   116.2                 +23.7    205 s',
+		'  per hour (3.0 h)                163     325    38.7                  +7.9     68 s',
+		'  written to raw (files, headers included): 117.0 MB, 39.0 MB per hour',
+	].join('\n'));
+	assert.deepEqual(ctx.errors, []);
+	assert.ok(!fs.existsSync(path.join(ctx.dataDir, 'locks')), 'a read only: no lock taken');
+
+	// a window with nothing in it says how to start
+	ctx.lines.length = 0;
+	ctx.clock.set(Date.UTC(2026, 10, 25, 12, 0, 0));
+	assert.equal(await ctx.run(['--region-book-report'], { env: {} }), 0);
+	assert.match(ctx.lines.join('\n'), /^region book, the last 24 hours up to 2026-11-25 12:00:00 UTC: no snapshots \(EFLIP_REGION_BOOK=1 takes one with each hourly sync; node scripts\/sync\.js --region-book takes one now\)$/);
+
+	// no data directory at all
+	const bare = setup(t, { link: false });
+	assert.equal(await bare.run(['--region-book-report'], { env: {} }), 0);
+	assert.match(bare.lines.join('\n'), /no snapshots/);
+});
+
+test('formatRegionBookReport averages over the hours the snapshots span, and copes with one snapshot', () => {
+	const entry = (syncedAt, o = {}) => ({ syncedAt, kind: 'regionBook', regionId: 1, status: 'ok', partial: false, pages: 10, tokensUsed: 20, rawBytes: 2000000, typesInSnapshot: 100, logBytesBefore: 0, logBytesAfter: 1000000, elapsedMs: 5000, ...o });
+	const one = formatRegionBookReport([entry('2026-11-20T10:00:00.000Z')], { now: Date.UTC(2026, 10, 20, 11, 0, 0) });
+	assert.match(one, /: 1 snapshot \(region 1\)/);
+	assert.match(one, /per hour \(1\.0 h\)\s+10\s+20\s+2\.0\s+\+1\.0\s+5 s/);
+	assert.ok(!/written to raw/.test(one), 'only when the entries say it');
+	// two snapshots ten hours apart: eleven hours of the window, a rate of a tenth less than one an hour
+	const two = formatRegionBookReport([entry('2026-11-20T00:00:00.000Z'), entry('2026-11-20T10:00:00.000Z')], { now: Date.UTC(2026, 10, 20, 11, 0, 0) });
+	assert.match(two, /total\s+20\s+40\s+4\.0\s+\+2\.0\s+10 s/);
+	assert.match(two, /per hour \(11\.0 h\)\s+2\s+4\s+0\.4\s+\+0\.2\s+1 s/);
+	// a log that shrank shows its sign
+	assert.match(formatRegionBookReport([entry('2026-11-20T10:00:00.000Z', { logBytesBefore: 3000000, logBytesAfter: 1000000 })], { now: Date.UTC(2026, 10, 20, 11, 0, 0) }), /-2\.0/);
 });

@@ -160,3 +160,18 @@ test('structure names are kept in one file, sorted by id', (t) => {
 	assert.deepEqual(Object.keys(ledger.readStructures()), ['1000000000001', '1028858195912']);
 	assert.equal(mode(path.join(dataDir, 'ledger', 'structures.json')), 0o600);
 });
+
+test('book logs: written bytes, file size and the ids a region has', (t) => {
+	const ledger = createLedger({ dataDir: tmpDataDir(t) });
+	assert.deepEqual(ledger.listBookLogs(10000043), []);
+	assert.equal(ledger.bookLogBytes(10000043, 35), 0);
+	const written = ledger.writeBookLog(10000043, 35, { samples: [{ at: '2026-11-20T12:00:00.000Z', stored: true }], orders: {} });
+	assert.equal(written, fs.statSync(path.join(ledger.root, 'market', '10000043', '35.json')).size);
+	assert.equal(ledger.bookLogBytes(10000043, 35), written);
+	ledger.writeBookLog(10000043, 9, { samples: [], orders: {} });
+	ledger.writeBookLog(10000043, 1000, { samples: [], orders: {} });
+	ledger.writeBookLog(10000002, 34, { samples: [], orders: {} });
+	fs.writeFileSync(path.join(ledger.root, 'market', '10000043', 'notes.txt'), 'stray');
+	assert.deepEqual(ledger.listBookLogs(10000043), [9, 35, 1000], 'numeric order, stray files ignored');
+	assert.deepEqual(ledger.listBookLogs(10000002), [34]);
+});

@@ -16,6 +16,16 @@
 //                                           is open on a machine where the page is not). Takes --character
 //                                           and --region; contradicts --rebuild, --market-only,
 //                                           --no-market and --max-types.
+//   node scripts/sync.js --region-book      one snapshot of the destination region's whole order book
+//                                           (every type, buy and sell), folded into the per-type book
+//                                           logs, and what it cost: pages, market-order tokens, raw
+//                                           bytes, log growth, time. Takes --region (one); no other
+//                                           flag. The server runs the same job with each hourly sync
+//                                           when EFLIP_REGION_BOOK=1.
+//   node scripts/sync.js --region-book-report   the regionBook entries of the last 24 hours from the
+//                                           public sync log as a table, with totals and per-hour
+//                                           averages (the measurement behind the retention rule). No
+//                                           ESI, no credentials, no other flag.
 //
 // Always syncs (the page's "more than an hour ago" test is the server's business), but every route
 // still honours its Expires, so a run inside the cache windows makes no call.
@@ -27,17 +37,21 @@
 // Exit code: 0 everything synced (or nothing was due), 1 a sync failed or stopped early, 2 usage or
 // configuration error. A watch tick exits 1 when a character failed, needs re-linking or was busy, a
 // stop ended it or the market step came back partial; a busy or skipped market step is not a failure.
+// A --region-book run exits 1 when it came back partial, paused, busy or failed (a skip is not).
 const path = require('path');
 const { createSso } = require('../lib/sso');
 const { createTokenStore, DEFAULT_DATA_DIR } = require('../lib/tokenStore');
 const { createTokenManager } = require('../lib/tokens');
 const { createSyncService } = require('../lib/sync');
+const { createRawStore } = require('../lib/dataFiles');
 const derive = require('../lib/derive');
 
 const DEFAULT_CALLBACK_URL = 'http://localhost:5001/sso/callback';
 const DEFAULT_USER_AGENT = 'eflip (local)';
 
-const USAGE = `usage: node scripts/sync.js [--character <id>]... [--region <id>]... [--no-market | --market-only] [--max-types <n>] [--rebuild | --watch]`;
+const USAGE = `usage: node scripts/sync.js [--character <id>]... [--region <id>]... [--no-market | --market-only] [--max-types <n>] [--rebuild | --watch]
+       node scripts/sync.js --region-book [--region <id>]
+       node scripts/sync.js --region-book-report`;
 
 class UsageError extends Error {}
 
@@ -47,12 +61,14 @@ const positiveId = (text, flag) => {
 };
 
 const parseArgs = (argv) => {
-	const options = { characterIds: null, regionIds: null, market: true, marketOnly: false, rebuild: false, watch: false, help: false, maxTypes: undefined };
+	const options = { characterIds: null, regionIds: null, market: true, marketOnly: false, rebuild: false, watch: false, regionBook: false, regionBookReport: false, help: false, maxTypes: undefined };
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === '--help' || arg === '-h') options.help = true;
 		else if (arg === '--rebuild') options.rebuild = true;
 		else if (arg === '--watch') options.watch = true;
+		else if (arg === '--region-book') options.regionBook = true;
+		else if (arg === '--region-book-report') options.regionBookReport = true;
 		else if (arg === '--no-market') options.market = false;
 		else if (arg === '--market-only') options.marketOnly = true;
 		else if (arg === '--character') (options.characterIds = options.characterIds || []).push(positiveId(argv[++i], arg));
@@ -63,6 +79,12 @@ const parseArgs = (argv) => {
 	if (options.marketOnly && !options.market) throw new UsageError('--market-only and --no-market contradict each other');
 	if (options.watch && options.rebuild) throw new UsageError('--watch and --rebuild contradict each other');
 	if (options.watch && (options.marketOnly || !options.market || options.maxTypes !== undefined)) throw new UsageError('--watch takes only --character and --region');
+	if (options.regionBook && options.regionBookReport) throw new UsageError('--region-book and --region-book-report contradict each other');
+	if ((options.regionBook || options.regionBookReport) && (options.rebuild || options.watch || options.marketOnly || !options.market || options.maxTypes !== undefined || options.characterIds !== null)) {
+		throw new UsageError(`${options.regionBook ? '--region-book' : '--region-book-report'} takes ${options.regionBook ? 'only --region' : 'no other flag'}`);
+	}
+	if (options.regionBookReport && options.regionIds !== null) throw new UsageError('--region-book-report takes no other flag');
+	if (options.regionBook && options.regionIds !== null && options.regionIds.length > 1) throw new UsageError('--region-book takes one --region');
 	return options;
 };
 
@@ -125,7 +147,82 @@ const formatSummary = (result) => {
 			for (const e of m.errors || []) lines.push(`  error: ${e.route}${e.status ? ` ${e.status}` : ''} ${e.message}`.trimEnd());
 		}
 	}
+	if (result.regionBook) lines.push(formatRegionBook(result.regionBook));
 	return lines.join('\n');
+};
+
+const mb = (bytes) => (bytes / 1e6).toFixed(1);
+
+// The text one regional book run prints; also what the tests read. `result` is what
+// service.syncRegionBook answers.
+const formatRegionBook = (r) => {
+	if (r.status === 'skipped' || r.status === 'busy' || r.status === 'deferred' || r.status === 'failed') {
+		return `region book: ${r.status}${r.reason ? ` - ${r.reason}` : ''}`;
+	}
+	const lines = [`region book (region ${r.regionId}): ${r.status}, ${r.pagesRead} of ${r.pages} pages, ${r.calls} calls (${r.notModified} not modified, ${r.notDue} not due), ${r.tokensUsed} tokens, ${mb(r.rawBytes)} MB of orders (${mb(r.rawBytesStored)} MB written to raw)`];
+	if (r.typesFolded > 0 || r.foldErrors > 0) {
+		const growth = r.logBytesAfter - r.logBytesBefore;
+		lines.push(`  snapshot ${r.fetchedAt}: ${r.orders} orders, ${r.typesInSnapshot} types, ${r.typesFolded} logs folded (${r.logsCreated} new, ${r.typesEnded} with no orders left), logs ${mb(r.logBytesBefore)} MB -> ${mb(r.logBytesAfter)} MB (${growth < 0 ? '-' : '+'}${mb(Math.abs(growth))} MB), ${(r.elapsedMs / 1000).toFixed(1)} s`);
+	} else {
+		lines.push(`  nothing folded, ${(r.elapsedMs / 1000).toFixed(1)} s`);
+	}
+	const bucket = Object.values((r.limits && r.limits.groups) || {}).find(entry => entry.group === 'market-order');
+	if (bucket && Number.isFinite(bucket.remaining)) lines.push(`  tokens left: market-order ${bucket.remaining}${bucket.limit ? `/${bucket.limit}` : ''}`);
+	if (r.reason) lines.push(`  stopped: ${r.reason}`);
+	if (r.foldErrors > 0) lines.push(`  ${r.foldErrors} logs did not fold`);
+	for (const e of r.errors || []) lines.push(`  error: ${e.route}${e.status ? ` ${e.status}` : ''} ${e.message}`.trimEnd());
+	return lines.join('\n');
+};
+
+const HOUR_MS = 60 * 60 * 1000;
+const REPORT_WINDOW_MS = 24 * HOUR_MS;
+
+// The regionBook entries of the public sync log written at or after `sinceMs`, oldest first. The log
+// files are named by their time, so only the ones inside the window are read.
+const readRegionBookEntries = (dataDir, sinceMs) => {
+	const raw = createRawStore({ dataDir });
+	const since = new Date(sinceMs).toISOString();
+	const entries = [];
+	for (const stamp of raw.syncLogStamps('public')) {
+		if (stamp < since) continue;
+		const entry = raw.readSyncLog('public', stamp);
+		if (entry && entry.kind === 'regionBook') entries.push(entry);
+	}
+	return entries;
+};
+
+// The table `--region-book-report` prints: one row per snapshot, then the totals and the averages
+// per hour over the hours the snapshots span (at least one). `entries` are regionBook sync log
+// entries, oldest first; `now` is only for the heading.
+const formatRegionBookReport = (entries, { now }) => {
+	const heading = `region book, the last 24 hours up to ${new Date(now).toISOString().slice(0, 19).replace('T', ' ')} UTC`;
+	if (entries.length === 0) {
+		return `${heading}: no snapshots (EFLIP_REGION_BOOK=1 takes one with each hourly sync; node scripts/sync.js --region-book takes one now)`;
+	}
+	const regions = [...new Set(entries.map(entry => entry.regionId))];
+	const growthOf = (entry) => (entry.logBytesAfter || 0) - (entry.logBytesBefore || 0);
+	const signed = (bytes) => `${bytes < 0 ? '-' : '+'}${mb(Math.abs(bytes))}`;
+	const seconds = (ms) => `${Math.round(ms / 1000)} s`;
+	const span = Math.max(1, (Date.parse(entries[entries.length - 1].syncedAt) - Date.parse(entries[0].syncedAt)) / HOUR_MS + 1);
+	const sum = (field) => entries.reduce((total, entry) => total + (entry[field] || 0), 0);
+	// pages actually read (a partial run read fewer than the snapshot has)
+	const pagesOf = (entry) => (entry.pagesRead !== undefined ? entry.pagesRead : entry.pages) || 0;
+	const total = { pages: entries.reduce((t, entry) => t + pagesOf(entry), 0), tokens: sum('tokensUsed'), raw: sum('rawBytes'), growth: entries.reduce((t, entry) => t + growthOf(entry), 0), elapsed: sum('elapsedMs') };
+	const partial = entries.filter(entry => entry.partial).length;
+
+	const rows = [['time (UTC)', 'status', 'pages', 'tokens', 'raw MB', 'types', 'log growth MB', 'elapsed']];
+	for (const entry of entries) {
+		rows.push([entry.syncedAt.slice(0, 19).replace('T', ' '), entry.status || (entry.partial ? 'partial' : 'ok'), pagesOf(entry), entry.tokensUsed, mb(entry.rawBytes || 0), entry.typesInSnapshot, signed(growthOf(entry)), seconds(entry.elapsedMs || 0)]);
+	}
+	rows.push(['total', '', total.pages, total.tokens, mb(total.raw), '', signed(total.growth), seconds(total.elapsed)]);
+	rows.push([`per hour (${span.toFixed(1)} h)`, '', Math.round(total.pages / span), Math.round(total.tokens / span), mb(total.raw / span), '', signed(total.growth / span), seconds(total.elapsed / span)]);
+	const widths = rows[0].map((_, column) => Math.max(...rows.map(row => String(row[column]).length)));
+	const textual = new Set([0, 1]);
+	const lines = rows.map(row => `  ${row.map((cell, column) => (textual.has(column) ? String(cell).padEnd(widths[column]) : String(cell).padStart(widths[column]))).join('  ')}`.trimEnd());
+	const out = [`${heading}: ${entries.length} snapshot${entries.length === 1 ? '' : 's'}${partial > 0 ? `, ${partial} partial` : ''} (region ${regions.join(', ')})`, ...lines];
+	const stored = entries.some(entry => entry.rawBytesStored !== undefined) ? sum('rawBytesStored') : null;
+	if (stored !== null) out.push(`  written to raw (files, headers included): ${mb(stored)} MB, ${mb(stored / span)} MB per hour`);
+	return out.join('\n');
 };
 
 // The text a watch tick prints; also what the tests read.
@@ -161,8 +258,11 @@ const watchFailed = (result) => {
 // Did anything fail or stop early? ('skipped' is not a failure: nothing was asked of it.)
 const hasFailure = (result) => {
 	const bad = (status) => status === 'failed' || status === 'partial' || status === 'busy' || status === 'relink';
-	return (result.characters || []).some(c => bad(c.status)) || Boolean(result.market && bad(result.market.status));
+	return (result.characters || []).some(c => bad(c.status)) || Boolean(result.market && bad(result.market.status)) || Boolean(result.regionBook && regionBookFailed(result.regionBook));
 };
+
+// A regional book run fails when it came back partial, paused, busy or failed; skipped and deferred are not failures.
+const regionBookFailed = (result) => ['partial', 'paused', 'busy', 'failed'].includes(result.status);
 
 // deps (all optional, for tests): env, fetch, now, out, err, dataDir, tokens (replaces the token
 // manager, so a test needs no SSO round trip).
@@ -206,6 +306,16 @@ const main = async (argv, deps = {}) => {
 		}
 	}
 
+	if (options.regionBookReport) {
+		try {
+			out(formatRegionBookReport(readRegionBookEntries(dataDir, now() - REPORT_WINDOW_MS), { now: now() }));
+			return 0;
+		} catch (e) {
+			err(`report failed: ${e.message}`);
+			return 1;
+		}
+	}
+
 	const clientId = env.EVE_CLIENT_ID || '';
 	const clientSecret = env.EVE_CLIENT_SECRET || '';
 	if (!clientId || !clientSecret) {
@@ -216,7 +326,7 @@ const main = async (argv, deps = {}) => {
 	const store = createTokenStore({ dataDir });
 	const sso = createSso({ clientId, clientSecret, callbackUrl: env.EVE_CALLBACK_URL || DEFAULT_CALLBACK_URL, userAgent, fetch, now });
 	const tokens = deps.tokens || createTokenManager({ sso, store, now });
-	const service = createSyncService({ dataDir, fetch, now, log, userAgent, compatDate: env.ESI_COMPAT_DATE || undefined, tokenStore: store, tokens });
+	const service = createSyncService({ dataDir, fetch, now, log, userAgent, compatDate: env.ESI_COMPAT_DATE || undefined, env, tokenStore: store, tokens });
 
 	let linked;
 	try {
@@ -225,7 +335,7 @@ const main = async (argv, deps = {}) => {
 		err(`token store unreadable: ${e.message}`);
 		return 1;
 	}
-	if (linked.length === 0 && options.characterIds === null) {
+	if (linked.length === 0 && options.characterIds === null && !(options.regionBook && options.regionIds !== null)) {
 		err('no linked characters: link one at /sso/login first');
 		return 2;
 	}
@@ -233,6 +343,18 @@ const main = async (argv, deps = {}) => {
 	if (unknown.length > 0) {
 		err(`not linked: ${unknown.join(', ')}`);
 		return 2;
+	}
+
+	if (options.regionBook) {
+		let result;
+		try {
+			result = await service.syncRegionBook({ regionId: options.regionIds ? options.regionIds[0] : null, force: true });
+		} catch (e) {
+			err(`region book failed: ${e.message}`);
+			return 1;
+		}
+		out(formatRegionBook(result));
+		return regionBookFailed(result) ? 1 : 0;
 	}
 
 	if (options.watch) {
@@ -275,4 +397,4 @@ if (require.main === module) {
 	);
 }
 
-module.exports = { main, parseArgs, formatSummary, formatWatch, hasFailure, watchFailed, UsageError };
+module.exports = { main, parseArgs, formatSummary, formatWatch, formatRegionBook, formatRegionBookReport, readRegionBookEntries, hasFailure, watchFailed, UsageError };

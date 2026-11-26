@@ -212,3 +212,38 @@ test('derived snapshots hold the orders, assets and balance of their sync', asyn
 	assert.deepEqual(all.map(s => s.syncedAt), [...all.map(s => s.syncedAt)].sort());
 	assert.equal(all[all.length - 1].assets.length, 3);
 });
+
+// ---- the regional book: logs folded from rows in hand
+
+test('a book log folded from rows in hand is the log foldBook builds, and the regional order pages in raw are not read as per-type books', async (t) => {
+	const { createLedger, bookLogText } = require('../lib/ledger');
+	const ctx = setup(t);
+	const REGION = 10000043;
+	const row = (id, typeId, price, o = {}) => ({ order_id: id, type_id: typeId, price, is_buy_order: false, volume_remain: 5, volume_total: 10, issued: '2026-11-20T10:00:00Z', duration: 90, range: 'region', location_id: 60008494, system_id: 30002187, min_volume: 1, ...o });
+	const ledger = createLedger({ dataDir: ctx.dataDir });
+
+	const first = [row(1, 35, 100), row(2, 35, 90, { is_buy_order: true })];
+	const second = [row(1, 35, 99)];
+	const file = path.join(ctx.dataDir, 'ledger', 'market', String(REGION), '35.json');
+	const bytes = derive.updateBookLogWithRows({ ledger, regionId: REGION, typeId: 35, at: '2026-11-20T12:00:00.000Z', rows: first });
+	assert.equal(bytes, fs.statSync(file).size, 'the bytes it answers are the file\'s');
+	derive.updateBookLogWithRows({ ledger, regionId: REGION, typeId: 35, at: '2026-11-20T13:00:00.000Z', rows: second });
+	derive.updateBookLogWithRows({ ledger, regionId: REGION, typeId: 35, at: '2026-11-20T14:00:00.000Z', rows: [] });
+
+	const expected = { samples: [], orders: {} };
+	derive.foldBook(expected, { at: '2026-11-20T12:00:00.000Z', stored: true, rows: first });
+	derive.foldBook(expected, { at: '2026-11-20T13:00:00.000Z', stored: true, rows: second });
+	derive.foldBook(expected, { at: '2026-11-20T14:00:00.000Z', stored: true, rows: [] });
+	assert.equal(fs.readFileSync(file, 'utf8'), bookLogText(expected), 'byte for byte');
+	assert.deepEqual(expected.orders[1].path.map(entry => entry.price), [100, 99]);
+	assert.equal(expected.orders[2].lastSeen, '2026-11-20T12:00:00.000Z', 'an order left out of a later sample keeps its last sighting');
+
+	// a regional snapshot in raw: the pages are named `...-order-type-all[-page-n]`, which are not books of a type
+	ctx.fake.market.regionOrders.set(String(REGION), [row(11, 34, 5), row(12, 36, 7), row(13, 36, 8)]);
+	const run = await ctx.service.syncRegionBook({ regionId: REGION, force: true });
+	assert.equal(run.status, 'ok');
+	assert.equal(derive.bookPages(createRawStore({ dataDir: ctx.dataDir })).size, 0);
+	const before = fs.readFileSync(path.join(ctx.dataDir, 'ledger', 'market', String(REGION), '36.json'), 'utf8');
+	assert.deepEqual(derive.rebuildBookLogs({ dataDir: ctx.dataDir }), { logs: 0 }, 'no per-type raw: nothing to rebuild, and no log is touched');
+	assert.equal(fs.readFileSync(path.join(ctx.dataDir, 'ledger', 'market', String(REGION), '36.json'), 'utf8'), before);
+});
