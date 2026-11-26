@@ -1315,7 +1315,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		runDaysToComplete = daysToClear; // fixed for this run
 		runMinRoi = minRoi;
 		horizonFromRun = true;
-		reportGeneratedAt = moment().format('MMM. Do, h:mm a');
+		reportGeneratedAt = typeof moment === 'function' ? moment().format('MMM. Do, h:mm a') : new Date().toLocaleString();
 		reportGeneratedAtIso = new Date().toISOString();
 		const horizon = `${runDaysToComplete} day${runDaysToComplete === 1 ? '' : 's'} to clear`;
 		headerElem.innerHTML = `${esc(startSel.value)} &rarr; ${esc(endSel.value)} <span class="dim">&middot;</span> ${horizon} <span class="dim">&middot;</span> min ROI ${runMinRoi}x <span class="dim">&middot; ${reportGeneratedAt}</span>`;
