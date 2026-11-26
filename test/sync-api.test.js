@@ -2,7 +2,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const express = require('express');
+const fs = require('node:fs');
+const path = require('node:path');
 const { mountApi } = require('../lib/api');
+const { createLedger } = require('../lib/ledger');
 const {
 	ALL_SCOPES, makeClock, tmpDataDir, makeLog, makeTokens, createFakeEsi,
 	tx, journalRow, order, asset, contract, contractItem,
@@ -78,13 +81,13 @@ const fillIvan = (fake) => fake.character(IVAN, {
 
 test('without SSO credentials the data routes answer 503, and the guards still apply', async (t) => {
 	const off = await startApp(t, { configured: false, characters: [] });
-	for (const [method, p] of [['GET', '/api/sync'], ['POST', '/api/sync'], ['GET', '/api/ledger'], ['GET', '/api/snapshots'], ['GET', '/api/market?typeIds=34'], ['GET', '/api/watch'], ['POST', '/api/watch'], ['GET', '/api/order-log']]) {
+	for (const [method, p] of [['GET', '/api/sync'], ['POST', '/api/sync'], ['GET', '/api/ledger'], ['GET', '/api/snapshots'], ['GET', '/api/market?typeIds=34'], ['GET', '/api/watch'], ['POST', '/api/watch'], ['GET', '/api/order-log'], ['POST', '/api/market-stats']]) {
 		const res = await request(off.port, method, p, method === 'POST' ? { body: {} } : {});
 		assert.equal(res.status, 503, `${method} ${p}`);
 		assert.deepEqual(res.json, { error: 'not configured' });
 	}
 	const on = await startApp(t);
-	for (const [method, p] of [['GET', '/api/ledger'], ['GET', '/api/snapshots'], ['GET', '/api/sync'], ['POST', '/api/sync'], ['GET', '/api/market?typeIds=34'], ['GET', '/api/watch'], ['POST', '/api/watch'], ['GET', '/api/order-log'], ['GET', '/api/config']]) {
+	for (const [method, p] of [['GET', '/api/ledger'], ['GET', '/api/snapshots'], ['GET', '/api/sync'], ['POST', '/api/sync'], ['GET', '/api/market?typeIds=34'], ['GET', '/api/watch'], ['POST', '/api/watch'], ['GET', '/api/order-log'], ['POST', '/api/market-stats'], ['GET', '/api/config']]) {
 		const foreignHost = await request(on.port, method, p, { headers: { Host: 'evil.example' }, body: method === 'POST' ? {} : undefined });
 		assert.equal(foreignHost.status, 403, `${method} ${p} with a foreign Host`);
 		const foreignOrigin = await request(on.port, method, p, { headers: { Origin: 'http://evil.example' }, body: method === 'POST' ? {} : undefined });
@@ -323,6 +326,143 @@ test('GET /api/order-log serves the log of each character, and the book log ride
 	assert.equal(withLog.json.types[35][REGION].orders.rows[0].order_id, 8001);
 	assert.equal(withLog.json.types[36][REGION].log, null, 'a type with no log yet');
 	assert.equal((await ctx.get('/api/market?typeIds=35&log=0')).json.types[35][REGION].log, undefined);
+});
+
+// ---- POST /api/market-stats: the observed figures of the types' book logs at one station
+
+const STATION = 60008494;
+const HOUR_AT = (h) => new Date(Date.UTC(2026, 10, 20, h, 0, 0)).toISOString();
+// Three hourly checks (09:00, 10:00, 11:00 UTC on the test clock's day) of one station sell order that
+// re-prices once, from 100 to 95 at 10:00; another order sits at a different station and is ignored.
+const smallBookLog = () => ({
+	samples: [9, 10, 11].map(h => ({ at: HOUR_AT(h), stored: true })),
+	orders: {
+		8001: {
+			isBuy: false, locationId: STATION, firstSeen: HOUR_AT(9), lastSeen: HOUR_AT(11),
+			path: [
+				{ at: HOUR_AT(9), price: 100, volumeRemain: 10, issued: HOUR_AT(8) },
+				{ at: HOUR_AT(10), price: 95, volumeRemain: 10, issued: HOUR_AT(10) }
+			]
+		},
+		8002: {
+			isBuy: false, locationId: 60003760, firstSeen: HOUR_AT(9), lastSeen: HOUR_AT(11),
+			path: [{ at: HOUR_AT(9), price: 5, volumeRemain: 1, issued: HOUR_AT(8) }, { at: HOUR_AT(10), price: 4, volumeRemain: 1, issued: HOUR_AT(10) }]
+		}
+	}
+});
+const writeBookLogs = (ctx, typeIds, region = REGION) => {
+	const ledger = createLedger({ dataDir: ctx.dataDir });
+	for (const typeId of typeIds) ledger.writeBookLog(region, typeId, smallBookLog());
+};
+const statsBody = (over = {}) => ({ regionId: REGION, stationId: STATION, windowDays: 1, types: [{ typeId: 35, ordersPerDay: 1 }], ...over });
+
+test('POST /api/market-stats answers each type from its book log, null for one without a log, and takes the server clock without a now', async (t) => {
+	const ctx = await startApp(t);
+	writeBookLogs(ctx, [35, 37]);
+	const res = await ctx.post('/api/market-stats', statsBody({ types: [{ typeId: 35, ordersPerDay: 1 }, { typeId: 36, ordersPerDay: 1 }, { typeId: 37, ordersPerDay: 48 }] }));
+	assert.equal(res.status, 200, res.text);
+	assert.deepEqual(Object.keys(res.json), ['regionId', 'stationId', 'windowDays', 'now', 'types']);
+	assert.deepEqual([res.json.regionId, res.json.stationId, res.json.windowDays], [REGION, STATION, 1]);
+	assert.equal(res.json.now, '2026-11-20T12:00:00.000Z', 'the server clock');
+	assert.deepEqual(Object.keys(res.json.types).sort(), ['35', '36', '37']);
+	assert.equal(res.json.types[36], null, 'no book log for this type');
+
+	const stats = res.json.types[35];
+	assert.deepEqual(Object.keys(stats), ['coverage', 'repriceEvents', 'avgDaysIdle', 'censored', 'undercutsPerDay', 'fillsPerDay', 'vanishedUnitsPerDay', 'stockTrendPerDay']);
+	assert.equal(stats.coverage.samples, 3);
+	assert.equal(stats.coverage.to, HOUR_AT(11));
+	assert.equal(stats.coverage.events.gapHours, 12, 'ordersPerDay 1: half a day');
+	assert.equal(stats.repriceEvents, 1, 'the order of this station re-priced once; the other station is ignored');
+	assert.equal(stats.censored, false);
+	assert.ok(Math.abs(stats.avgDaysIdle - 2 / 24) < 1e-3, `${stats.avgDaysIdle}`); // 2 covered hours / 1 re-price
+	assert.ok(Math.abs(stats.coverage.events.fraction - 2 / 24) < 1e-3);
+	// a busier type (48 orders a day: a gap of 10 minutes) is not covered by hourly checks, but the volume is
+	const busy = res.json.types[37];
+	assert.equal(busy.coverage.events.fraction, 0);
+	assert.equal(busy.coverage.volume.fraction > 0, true);
+	assert.equal(busy.avgDaysIdle, null);
+
+	// an explicit now, and another station or region, change the answer
+	const earlier = await ctx.post('/api/market-stats', statsBody({ now: HOUR_AT(9) }));
+	assert.equal(earlier.json.now, HOUR_AT(9));
+	assert.equal(earlier.json.types[35].coverage.samples, 1, 'only the 09:00 check is at or before it');
+	const elsewhere = await ctx.post('/api/market-stats', statsBody({ stationId: 60003760 }));
+	assert.equal(elsewhere.json.types[35].repriceEvents, 1, 'the other station\'s order re-priced too (5 to 4)');
+	assert.equal((await ctx.post('/api/market-stats', statsBody({ regionId: REGION + 1 }))).json.types[35], null, 'no log in that region');
+	const before = await ctx.post('/api/market-stats', statsBody({ now: HOUR_AT(1) }));
+	assert.equal(before.json.types[35], null, 'a log with no sample at or before now');
+	assert.equal(ctx.fake.calls.length, 0, 'nothing reaches ESI');
+	assert.deepEqual(ctx.log.lines, []);
+});
+
+test('POST /api/market-stats: a type with a bad pace or id answers null without failing the batch; a log that cannot be read warns once', async (t) => {
+	const ctx = await startApp(t);
+	writeBookLogs(ctx, [35, 37, 38, 39]);
+	// a broken file for two types: the batch still answers, each null, and the log says so once
+	for (const typeId of [38, 39]) fs.writeFileSync(path.join(ctx.dataDir, 'ledger', 'market', String(REGION), `${typeId}.json`), '{not json');
+	const types = [
+		{ typeId: 35, ordersPerDay: 1 },
+		{ typeId: 37, ordersPerDay: -1 },
+		{ typeId: 40, ordersPerDay: 'many' },
+		{ typeId: 41 },
+		{ typeId: 38, ordersPerDay: 1 },
+		{ typeId: 39, ordersPerDay: 1 },
+		{ typeId: 'x', ordersPerDay: 1 },
+		{ typeId: 0, ordersPerDay: 1 },
+		{ typeId: 35, ordersPerDay: 99 }
+	];
+	const res = await ctx.post('/api/market-stats', statsBody({ types }));
+	assert.equal(res.status, 200, res.text);
+	assert.deepEqual(Object.keys(res.json.types).sort(), ['35', '37', '38', '39', '40', '41']);
+	assert.equal(res.json.types[35].coverage.events.gapHours, 12, 'a type named twice is answered from its first entry');
+	for (const typeId of [37, 40, 41, 38, 39]) assert.equal(res.json.types[typeId], null, String(typeId));
+	assert.equal(ctx.log.lines.length, 1, 'one line for the request');
+	assert.match(ctx.log.lines[0], /^warn: market stats: type 38 in region 10000043 failed: /);
+	const zero = await ctx.post('/api/market-stats', statsBody({ types: [{ typeId: 35, ordersPerDay: 0 }] }));
+	assert.equal(zero.json.types[35].coverage.events.gapHours, 24, 'a pace of 0 is allowed: the longest gap');
+});
+
+test('POST /api/market-stats rejects malformed bodies with 400', async (t) => {
+	const ctx = await startApp(t);
+	writeBookLogs(ctx, [35]);
+	const type = { typeId: 35, ordersPerDay: 1 };
+	const bad = [
+		['an array body', []],
+		['no types', statsBody({ types: undefined })],
+		['an empty types list', statsBody({ types: [] })],
+		['types that is not a list', statsBody({ types: { 35: 1 } })],
+		['501 types', statsBody({ types: Array.from({ length: 501 }, (_, i) => ({ typeId: i + 1, ordersPerDay: 1 })) })],
+		['a type that is not an object', statsBody({ types: [type, 35] })],
+		['a null type', statsBody({ types: [null] })],
+		['no regionId', statsBody({ regionId: undefined })],
+		['a regionId of 0', statsBody({ regionId: 0 })],
+		['a regionId as text', statsBody({ regionId: String(REGION) })],
+		['a fractional stationId', statsBody({ stationId: 60008494.5 })],
+		['no stationId', statsBody({ stationId: undefined })],
+		['windowDays 0', statsBody({ windowDays: 0 })],
+		['windowDays 0.5', statsBody({ windowDays: 0.5 })],
+		['windowDays 61', statsBody({ windowDays: 61 })],
+		['windowDays as text', statsBody({ windowDays: '3' })],
+		['no windowDays', statsBody({ windowDays: undefined })],
+		['a now that is not a time', statsBody({ now: 'sometime' })],
+		['a now that is a number', statsBody({ now: 1766000000000 })],
+		['a null now', statsBody({ now: null })]
+	];
+	for (const [label, body] of bad) {
+		const res = await ctx.post('/api/market-stats', body);
+		assert.equal(res.status, 400, label);
+		assert.deepEqual(res.json, { error: 'bad request' }, label);
+	}
+	assert.equal((await ctx.post('/api/market-stats', '{not json')).status, 400);
+	assert.equal((await ctx.post('/api/market-stats', 'plain text', { headers: { 'Content-Type': 'text/plain' } })).status, 400);
+	// the edges that are fine: 500 types, windowDays 1 and 60
+	const edge = await ctx.post('/api/market-stats', statsBody({ windowDays: 60, types: Array.from({ length: 500 }, (_, i) => ({ typeId: 35 + i, ordersPerDay: 1 })) }));
+	assert.equal(edge.status, 200);
+	assert.equal(Object.keys(edge.json.types).length, 500);
+	assert.equal((await ctx.post('/api/market-stats', statsBody({ windowDays: 1 }))).status, 200);
+	// a body over the limit is 413
+	const huge = await ctx.post('/api/market-stats', statsBody({ types: [type], pad: 'x'.repeat(1024 * 1024 + 10) }));
+	assert.equal(huge.status, 413);
 });
 
 test('GET /api/config says where the data is and whether EFLIP_DATA_DIR and ESI_USER_AGENT are set, and nothing secret', async (t) => {

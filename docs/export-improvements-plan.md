@@ -8,6 +8,8 @@ Branch: `claude/export-html-improvements-5cbab1`. Scope: `public/export.html`,
 Principle: every number shown to the user comes from ESI (station orders and
 region history). Fuzzwork aggregates are used only to decide which types get a
 full report; no Fuzzwork figure is displayed or used in a displayed figure.
+(2026-11-25: the observed figures of Phase 2, items 14 to 16, come from the server's
+book logs, which are stored ESI market orders, so the principle holds.)
 
 ## Phase 1 — fetch layer (`public/util.js`)
 
@@ -52,8 +54,10 @@ orders, destination region history. Changes:
 5. **Buy cap**: units to buy over the horizon =
    `max(0, dailyDemand * DAYS_TO_COMPLETE - competingVolume)`, cumulative per
    day as today. This replaces the `sellerCount` share divisor. `sellerCount`
-   and `daysSinceSellerUpdate` are still computed and shown, and the
-   "seller updated too recently" filter stays.
+   and `daysSinceSellerUpdate` are still computed and shown. The "seller
+   updated too recently" filter is gone (2026-11-25: it made the best picks
+   come and go as sellers re-priced; see `docs/ui-decisions/`); the idle
+   figures stay as information only.
 6. **Marginal stop rule**: while walking the source book, stop when the next
    order's `revenuePerItem / (price * (1 + HAULING_REWARD_FRACTION)) < MIN_ROI`.
    Replaces the `profitPerDayEstimate < 2000000` test. The page sets `MIN_ROI`
@@ -75,7 +79,10 @@ orders, destination region history. Changes:
 10. Report shape (all Mil values via `roundMils`): `volume`, `costPerItemMil`,
     `revenuePerItemMil`, `profitPerItemMil`, `roi`, `dailyProfitMil`,
     `dailyProfitOldMil`, `daysToClear`, `competingVolume`, `dailyDemand`,
-    `activeSellers`, `daysSinceSellerUpdate`, `activeDaysFraction`,
+    `activeSellers`, `daysSinceSellerUpdate` (idle days over every destination
+    sell order), `daysSinceInBandSellerUpdate` (the same over the orders within
+    `SUPPLY_BAND` above the sell price; the "days idle" cell tooltip),
+    `activeDaysFraction`,
     `stopReason` (`'horizon' | 'roi' | 'book' | 'cost' | 'target'`: which
     limit bound the volume; `'target'` when a `targetVolume` was given and
     reached), `stopPriceMil` (the source order the walk stopped at, for
@@ -83,15 +90,17 @@ orders, destination region history. Changes:
     `'roi'`, else null), `horizonVolume` (the demand cap as whole units),
     `targetVolume` (the quantity asked for; null for a recommendation),
     `floored` (see 12), `filteredReason` (null when the item passes).
+    (2026-11-25: the report also carries the observed-figure fields of item 16.)
 11. Page-level filters move into `estimate.js` as `applyFilters(report,
     config)` returning a reason string or null, so filtered items can be shown
     with their reason. Reasons, in the order they are checked: `no report`,
     `nothing to buy`, `not profitable` (for a volume of 0 only: an empty
-    source book, no sell price, a target of 0), `seller updated too
-    recently`, `too much competition`. The single-column limits (daily profit
-    1M/day, ROI, active days 0.2) are not estimate filters: they are the
-    page's min/max column filters, seeded once with those values (Phase 3,
-    item 12). The estimate keeps only what no one column can say.
+    source book, no sell price, a target of 0), `too much competition`. (A
+    `seller updated too recently` reason existed until 2026-11-25.) The
+    single-column limits (daily profit 1M/day, ROI, active days 0.2) are not
+    estimate filters: they are the page's min/max column filters, seeded once
+    with those values (Phase 3, item 12). The estimate keeps only what no one
+    column can say.
 12. **Floor of 1**: a recommendation of 0 units (a demand cap of 0, or the
     ROI floor on the cheapest order) shows 1 unit from the cheapest source
     order, so the row still has a real cost, ROI, days to clear and daily
@@ -104,16 +113,100 @@ orders, destination region history. Changes:
     within `COST_LIMIT`; otherwise (an empty source book, no sell price) the
     volume-0 raw-prices fallback stays and the filter says `not profitable`.
 13. `limitBreaches(report, config)` returns the report fields whose value
-    breaks a limit of the estimate, in column order: `daysSinceSellerUpdate`
-    (seller updated too recently), `rivals` (too much competition) and
-    `daysToClear` (beyond `DAYS_TO_COMPLETE`, the horizon: not a filter, a
-    limit the user set). It shares its predicates with `applyFilters` so the
-    two cannot drift, and ignores `isAlwaysShow` and `floored`: it describes
+    breaks a limit of the estimate, in column order: `rivals` (too much
+    competition) and `daysToClear` (beyond `DAYS_TO_COMPLETE`, the horizon: not
+    a filter, a limit the user set). It shares its predicates with
+    `applyFilters` so the two cannot drift, and ignores `isAlwaysShow` and `floored`: it describes
     the figures, not the row's filtered state. The column filters' limits
     (daily profit, ROI, active days) are the page's to check.
+14. **Observed inputs and the blend rule** (2026-11-25;
+    `planning/2026-11-25-export-history-columns`, M1). `computeItemReport`
+    takes an optional `observed` (default null): what the destination
+    station's book log saw for the type, the answer of `computeMarketStats`
+    in `public/market-stats.js` (pure, UMD, tested in
+    `test/market-stats.test.js`), which the page gets from
+    `POST /api/market-stats` (Phase 3, item 15). It is never mutated, and the
+    estimate stays pure: no network, no clock. Without `observed` every
+    figure is the model's, exactly as before.
+    For a figure with an observed form `o` and a model `m` over the window
+    `W`: `shown = f·o + (1 − f)·m`, where `f` is the covered time inside `W`
+    ÷ `W`. Covered time is the union of the intervals between consecutive
+    book-log samples closer than the item's acceptable gap, clipped to `W`; a
+    lone sample covers no time. `f = 0` is exactly the model. There are two
+    acceptable gaps, because counted events and cumulative quantities lose
+    different things across a gap:
+    - events (re-prices, undercuts), fraction `observedFractionEvents`: a gap
+      of at most half the typical interval between orders,
+      `clamp(12 / ordersPerDay hours, 10 min, 24 h)`, with `ordersPerDay` from
+      item 15. A covered gap is then unlikely to hide two moves of one order.
+      A busy item sampled hourly is mostly uncovered, so it stays on the
+      model, until denser sampling reaches it; a slow item is covered by
+      hourly samples.
+    - volume (fills, stock trend), fraction `observedFractionVolume`: a gap
+      of at most 24 h, because volume drops add up across a gap and only the
+      orders that vanished inside it are lost.
+    `order_count` is region-wide, so it overstates the station's pace and
+    shortens the events gap: the conservative side (more model).
+    Blended figures:
+    - `dailyDemand = fVolume × fillsPerDay + (1 − fVolume) × dailyDemandModel`,
+      formed before the walk, so the demand cap, the walk, days to clear,
+      daily profit, days of supply and the "too much competition" filter all
+      follow it. `fillsPerDay` is the summed `volumeRemain` drops of orders
+      present in two consecutive samples, per covered day (order monitor
+      decision 13: a drop is a fill). Orders that vanished between samples
+      (filled or withdrawn, unknown) are not counted; the stats module
+      reports them as `vanishedUnitsPerDay`.
+    - `rivals = fEvents × (undercutsPerDay × max(daysToClear, 1)) + (1 −
+      fEvents) × rivalsModel`, formed after the walk because it needs days to
+      clear. `undercutsPerDay` counts re-prices and new orders that set a new
+      lowest station sell price, per covered day. Competing volume keeps the
+      model's per-order rival weight: it is per order, the observed rate is
+      per type.
+    A null observed rate (nothing covered) or a fraction of 0 leaves the
+    model's figure; fractions are clamped to [0, 1] and a malformed
+    observation counts as none.
+    Observed only, never blended: `avgDaysIdle` (covered days ÷ re-price
+    events of the sellers within `SUPPLY_BAND` of the cheapest station
+    listing; when nobody moved it is the covered days and
+    `avgDaysIdleCensored` is true, a lower bound) and `stockTrendPerDay` (the
+    least-squares slope of the in-band sell volume, units a day). `avgDaysIdle`
+    has no model fallback: `daysSinceSellerUpdate` is a different quantity
+    (time since the newest move, not the mean time between moves), so it stays
+    its own column.
+    The window is `W = max(run days to clear, 3)` days, at most 60 (the
+    route's limit), ending at the newest sample at or before now. The
+    three-day floor keeps a one-day horizon from averaging over a handful of
+    re-prices. Until the hourly destination-book series (M2 of
+    `planning/2026-11-25-export-history-columns`) runs, only types in play
+    (listed, in transit, held, sold in the last 90 days) have book logs and so
+    coverage; every other row has `f = 0` and looks as it did before.
+15. **`typicalOrdersPerDay(destDays, now, config)`** (2026-11-25), exported
+    from `estimate.js`: the recency-weighted mean of the history's
+    `order_count` over ages 1 to `DAYS_CONSIDERED`, with the demand weights
+    (today's partial day counts as age 1, a missing day counts 0), floored at
+    1 and rounded to 2 decimals. Every row has a history, so every row has a
+    pace, book log or not. The page sends it with each type to
+    `/api/market-stats`, where it sets the events gap of item 14.
+16. **Observed-figure report fields** (2026-11-25), all null, 0 or false
+    without observation:
+    - `observedFractionEvents`, `observedFractionVolume`: the two fractions of
+      item 14, 0 to 1 at 2 decimals.
+    - `dailyDemandModel`, `dailyDemandObserved`: the history model's daily
+      demand and the observed `fillsPerDay`; `dailyDemand` is their blend.
+    - `rivalsModel`, `rivalsObserved`: the per-order model's rivals and the
+      observed `undercutsPerDay × max(daysToClear, 1)`; `rivals` is their blend.
+    - `avgDaysIdle`, `avgDaysIdleCensored`, `stockTrendPerDay`: observed only
+      (item 14).
+    - `observedCoverage`: the stats module's `coverage` object, `{windowDays,
+      samples, medianGapHours, maxGapHours, from, to, events: {gapHours,
+      coveredDays, fraction}, volume: {gapHours, coveredDays, fraction}}`,
+      null without observation.
 
 Tests cover: ordinary price window, recency weights, competing volume band,
-buy cap with and without overhang, marginal stop, days to clear, filters.
+buy cap with and without overhang, marginal stop, days to clear, filters,
+the observed blend (f = 0 is the model, f = 1 the observed figure, f = 0.5 the
+midpoint, a censored average passes through) and `typicalOrdersPerDay`; the
+stats module has its own `test/market-stats.test.js`.
 Fixtures are small hand-written order/history arrays.
 
 ## Phase 3 — pipeline and UI (`public/export.html`, `public/export.js`)
@@ -159,10 +252,9 @@ Fixtures are small hand-written order/history arrays.
 10. A cell turns dark red (`td.breach`) and its tooltip gains why when its
     displayed value is outside its column's min/max filter ("below the
     column's min 1.5", "above the column's max …"), or when `limitBreaches`
-    names it: seller updated too recently, too much competition, beyond the
-    N-day horizon. The colour marks the value, not the row's filtered state
-    (filtered rows keep their dimming); the column helps say when a column
-    goes red. A floored row's quantity tooltip says nothing was worth buying
+    names it: too much competition, beyond the N-day horizon. The colour marks
+    the value, not the row's filtered state (filtered rows keep their
+    dimming); the column helps say when a column goes red. A floored row's quantity tooltip says nothing was worth buying
     and the 1 unit is shown so the figures are real.
 11. Saved run (Copy orders, `docs/trade-results-plan.md`): `recommended` is the
     factor-1 volume (`row.base.volume`), not the factored re-estimate's, and
@@ -171,6 +263,12 @@ Fixtures are small hand-written order/history arrays.
     is useful later. The row's own prediction fields are those of the copied
     quantity. `/api/runs` accepts a row without `recommendation` and saves it
     as `null`. The run's config carries the `MIN_ROI` the run used.
+    (2026-11-25: each row also keeps its report's `OBSERVED_FIELDS`
+    (`public/export-persist.js`) after the prediction fields:
+    `observedFractionEvents`, `observedFractionVolume`, `avgDaysIdle`,
+    `dailyDemandObserved`, `rivalsObserved`, numbers or null. `lib/runs.js`
+    validates them like the prediction fields; a page from before they
+    existed leaves them out and the run saves null.)
 12. **Column filters carry the single-column limits.** The min/max filter
     under each numeric column is seeded once (flag `colFiltersSeeded`, so a
     bound the user clears stays cleared) with daily profit min 1, ROI min =
@@ -195,6 +293,57 @@ Fixtures are small hand-written order/history arrays.
     user sets their own (blank or another value stays as left). It can only
     tighten what a run produced, since a recommendation never buys below the
     floor.
+14. **Avg days idle and the observed marks** (2026-11-25; the blend is
+    Phase 2, item 14).
+    - New column `avg days idle`, right after `days idle`: the observed mean
+      days between price moves of the destination sellers priced within
+      `SUPPLY_BAND` above the cheapest listing, over the observed part of the
+      window. Shown like `days idle`, as "≥ n" when nobody moved in the
+      observed time (`avgDaysIdleCensored`: a lower bound), blank without
+      observation. It sorts and filters by the number. Its help says all of
+      this; its tooltip says what the figure stands on ("observed 2.6 of 3
+      days (events gap 3 h, 61 samples, median gap 1 h)") or "no
+      observation". It is observed only, so it carries no mark. `days idle`
+      is unchanged and stays beside it.
+    - `rivals` and `daily profit` cells get the class `observed` (a dotted
+      underline, `td.observed` in `export.html`) when the fraction behind them
+      is above 0: the events fraction for rivals, the volume fraction for daily
+      profit (through demand). Their tooltips end with both figures and the
+      covered share: "observed f=0.62 (events gap 3 h): 1.9 observed · 2.4
+      model" for rivals, "demand observed f=0.40 (volume gap 24 h): 2.01/day
+      observed · 0.51/day model" for daily profit. A row without coverage has
+      neither the mark nor the sentence. The mark is never the only carrier of
+      the meaning: the column helps and the tooltips say it in words, and red
+      (item 10) stays reserved for limits, so one cell can be both red and
+      dotted.
+    - The `days of supply left` tooltip gains "; stock trend +12/day" (the
+      observed slope of the in-band sell volume) when there is one. Its value
+      follows the blended demand.
+15. **The stats fetch** (2026-11-25). `POST /api/market-stats` (`lib/api.js`,
+    behind `requireConfigured`, so 503 while SSO is not set up; 1 MB body
+    limit) takes `{regionId, stationId, windowDays, now?, types: [{typeId,
+    ordersPerDay}]}`, 1 to 500 types, `windowDays` 1 to 60, and answers
+    `{regionId, stationId, windowDays, now, types: {<typeId>: stats | null}}`,
+    computed on each request from `data/ledger/market/<regionId>/<typeId>.json`
+    (sell orders at that station only). A POST because each type carries its
+    own `ordersPerDay`. A type answers null when it has no book log, when its
+    entry is malformed, or when computing it fails; one bad type never fails
+    the batch.
+    The page makes one `createStatsFetcher` per run, for the end station, with
+    `windowDays = min(60, max(days to clear, 3))`. Each report task asks
+    `get(typeId, ordersPerDay)` once its history is in (`ordersPerDay` from
+    `typicalOrdersPerDay`, Phase 2 item 15). Queued types go out as one request
+    250 ms after the first is queued, or at 500 types; a type asked twice while
+    queued shares one entry. After a failed request or any answer but 200 (the
+    503 included) the fetcher answers null for everything queued and later,
+    logs one line, and does not call the route again: observed figures are off
+    for the rest of the run, and every row looks as it did before. A stopped
+    run answers null quietly. `buildRow` passes the answer to the estimate and
+    keeps it in the row's `inputs`, so a factor re-estimate uses the same
+    observation without a request. A live refresh or a search lookup makes its
+    own short-lived fetcher, so a route that was down is tried again. Report
+    tasks hold a worker slot while they wait up to 250 ms for a batch, so
+    batches hold about 40 types; ESI throughput stays the bottleneck.
 
 ## Gates
 

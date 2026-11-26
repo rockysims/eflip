@@ -52,10 +52,23 @@ raw; 358 book logs on this machine), Rocky's answers and the rough edges.
 
 1. **Blend, prorated by covered time.** For a figure with an observed form `o` and a model `m`
    over the window `W`: `shown = f·o + (1 − f)·m`, where `f` = covered time inside `W` ÷ `W`.
-   Covered time is the union of the intervals between consecutive book-log samples that are at
-   most `GAP_HOURS` (2) apart, clipped to `W`. A lone sample covers no time. `f = 0` gives exactly
-   today's figure. (Rocky: "history is preferred but where history has blank spots we fall back to
-   the old method (prorated)".)
+   Covered time is the union of the intervals between consecutive book-log samples that are
+   closer than the item's **acceptable gap**, clipped to `W`. A lone sample covers no time. `f = 0`
+   gives exactly today's figure. (Rocky: "history is preferred but where history has blank spots
+   we fall back to the old method (prorated)".)
+   The acceptable gap depends on the item's pace, not a fixed two hours (Rocky, 2026-11-25:
+   "it should depend on how many orders there usually are in a day"). `ordersPerDay` is the
+   recency-weighted mean of the destination region's daily history `order_count` over the demand
+   window (the same weights as demand; floor 1), which every row has, book log or not. Two
+   coverage fractions:
+   - `fEvents` for counted events (re-prices, undercuts): gap ≤ `clamp(0.5 / ordersPerDay days,
+     10 min, 24 h)`, half the typical interval between orders, so a covered gap is unlikely to hide
+     two moves of one order. A busy item sampled hourly is then mostly uncovered until the
+     five-minute watch or M2's denser sampling reaches it; a slow item is covered by hourly samples.
+   - `fVolume` for cumulative quantities (fills, stock trend): gap ≤ 24 h, because volume drops
+     add up across a gap and only vanished orders are lost.
+   `order_count` is region-wide, so it overstates the station's pace and shortens the gap: the
+   conservative side (more model).
 2. **Window.** `W = max(run days to clear, 3)` days, ending at the newest sample at or before
    `now`. The three-day floor keeps a one-day horizon from averaging over a handful of re-prices;
    Rocky asked for "at least a day or maybe the days to clear", so this is his to shorten.
@@ -81,7 +94,8 @@ raw; 358 book logs on this machine), Rocky's answers and the rough edges.
 5. **Filter removed.** `applyFilters` and `limitBreaches` drop "seller updated too recently";
    `daysSinceInBandSellerUpdate` stays in the report for the "days idle" tooltip. (Q3, Q8.)
 6. **Where computed.** `public/market-stats.js` (UMD like `estimate.js`, `node:test` beside it)
-   runs on the server behind `GET /api/market-stats?regionId=&stationId=&typeIds=&windowDays=`
+   runs on the server behind `POST /api/market-stats` (body `{regionId, stationId, windowDays, now?, types:
+   [{typeId, ordersPerDay}]}`; a POST because each type carries its own pace)
    (≤ 500 ids a call, computed on request from the book logs; revisit caching when M2 multiplies
    the logs). The page fetches it in batches once the books are loaded, passes each type's answer
    to the estimate as `observed`, keeps it in the row's `inputs` for re-estimates, and saves

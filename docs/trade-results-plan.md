@@ -416,8 +416,10 @@ destination station D), the runs, packaged m3 per type, the window, and the bonu
    recommended (the factor-1 volume), recommendation (the factor-1 estimate: volume, floored,
    stopReason, horizonVolume and the prediction fields below; null in an older run), then the
    prediction fields of the copied quantity: costPerItemMil, revenuePerItemMil, sellPriceMil,
-   profitPerItemMil, dailyProfitMil, daysToClear, dailyDemand, competingVolume}], totals: {costMil, revenueMil,
-   profitMil, km3}, lastCopiedAt, copyCount, context}`.
+   profitPerItemMil, dailyProfitMil, daysToClear, dailyDemand, competingVolume, and since
+   2026-11-25 the observed fields of the export page's blend: observedFractionEvents,
+   observedFractionVolume, avgDaysIdle, dailyDemandObserved, rivalsObserved (null in an older run)}],
+   totals: {costMil, revenueMil, profitMil, km3}, lastCopiedAt, copyCount, context}`.
    - `id = <route>-<reportGeneratedAt ISO>-<contentHash>`, where the content hash covers the
      copied rows' `typeId` and `qty` only. A later click with identical content updates
      `lastCopiedAt` and `copyCount` on the same file (Rocky: "don't save 3 times for 3 clicks if

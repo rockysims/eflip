@@ -2,8 +2,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const estimate = require('../public/estimate.js');
 
-const { computeItemReport, applyFilters, limitBreaches, getOrdinaryPrice, defaultConfig } = estimate;
-const { roundMils, recencyWeight } = estimate._internal;
+const { computeItemReport, applyFilters, limitBreaches, getOrdinaryPrice, typicalOrdersPerDay, defaultConfig } = estimate;
+const { roundMils, recencyWeight, dayAge } = estimate._internal;
 
 const NOW = new Date('2026-06-01T12:00:00Z');
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -389,8 +389,10 @@ test('applyFilters reasons', () => {
 	assert.equal(applyFilters({ ...ok, activeDaysFraction: 0.1 }, {}), null);
 	// all three low at once, with units to buy, an idle seller and no rivals, still passes
 	assert.equal(applyFilters({ ...ok, roi: 1.2, revenuePerItemMil: 1.2, dailyProfitMil: 0.5, activeDaysFraction: 0.1 }, {}), null);
-	// dailyProfit 2 => threshold 1.00 day
-	assert.equal(applyFilters({ ...ok, dailyProfitMil: 2, daysSinceSellerUpdate: 0.5 }, {}), 'seller updated too recently');
+	// a seller who just updated is no reason to hide a row (that filter is gone), whichever idle figure is short
+	// and whatever the daily profit
+	assert.equal(applyFilters({ ...ok, dailyProfitMil: 2, daysSinceSellerUpdate: 0.5 }, {}), null);
+	assert.equal(applyFilters({ ...ok, dailyProfitMil: 2, daysSinceSellerUpdate: 0.01, daysSinceInBandSellerUpdate: 0.01 }, {}), null);
 	assert.equal(applyFilters({ ...ok, dailyProfitMil: 2, daysSinceSellerUpdate: 1.01 }, {}), null);
 	// 5 sellers updated 2 days ago => adjusted 4.55; 5.55 > ROI 3 and dailyProfit 10 < 13.65
 	assert.equal(applyFilters({ ...ok, revenuePerItemMil: 3, dailyProfitMil: 10, activeSellers: 5, daysSinceSellerUpdate: 2, rivals: 5 }, {}), 'too much competition');
@@ -415,10 +417,10 @@ test('limitBreaches names the fields that break a limit', () => {
 	assert.deepEqual(limitBreaches(healthy, { DAYS_TO_COMPLETE: 5 }), []);
 	assert.deepEqual(limitBreaches(healthy), [], 'the default config has the 5-day horizon');
 
-	// only the in-band idle figure is tiny (the all-orders figure is ignored when the in-band one exists)
-	assert.deepEqual(limitBreaches({ ...healthy, daysSinceInBandSellerUpdate: 0.01, daysSinceSellerUpdate: 9 }, {}), ['daysSinceSellerUpdate']);
+	// a seller who just updated breaks no limit: the idle figures, short or not, are never named
+	assert.deepEqual(limitBreaches({ ...healthy, daysSinceInBandSellerUpdate: 0.01, daysSinceSellerUpdate: 9 }, {}), []);
 	const { daysSinceInBandSellerUpdate, ...noInBand } = healthy;
-	assert.deepEqual(limitBreaches({ ...noInBand, daysSinceSellerUpdate: 0.01 }, {}), ['daysSinceSellerUpdate'], 'falls back to the all-orders figure on a hand-built report');
+	assert.deepEqual(limitBreaches({ ...noInBand, daysSinceSellerUpdate: 0.01 }, {}), []);
 
 	// too much competition: 5 rivals, ROI 3, daily profit 10 (the case applyFilters names above)
 	assert.deepEqual(limitBreaches({ ...healthy, revenuePerItemMil: 3, costPerItemMil: 1, dailyProfitMil: 10, rivals: 5 }, {}), ['rivals']);
@@ -471,7 +473,9 @@ test('regression: realistic fixture produces the full report shape', () => {
 	const report = computeItemReport({ srcOrders, destOrders, destDays, typeId: 12345, now: NOW });
 	assert.equal(JSON.stringify(srcOrders), before);
 
-	const CONTEXT_KEYS = ['activeDays', 'supplyVolume', 'sellPriceMil', 'srcBestSellPriceMil', 'destBestSellPriceMil', 'destBestBuyPriceMil', 'destSellOrderCount', 'stopReason', 'stopPriceMil', 'stopRoi', 'horizonVolume', 'targetVolume', 'floored'];
+	// the observed-figure fields: all at their no-observation values here (see the 'observed' tests below)
+	const OBSERVED_KEYS = ['observedFractionEvents', 'observedFractionVolume', 'dailyDemandModel', 'dailyDemandObserved', 'rivalsModel', 'rivalsObserved', 'avgDaysIdle', 'avgDaysIdleCensored', 'stockTrendPerDay', 'observedCoverage'];
+	const CONTEXT_KEYS = ['activeDays', 'supplyVolume', 'sellPriceMil', 'srcBestSellPriceMil', 'destBestSellPriceMil', 'destBestBuyPriceMil', 'destSellOrderCount', 'stopReason', 'stopPriceMil', 'stopRoi', 'horizonVolume', 'targetVolume', 'floored', ...OBSERVED_KEYS];
 	assert.deepEqual(Object.keys(report).sort(), [
 		'activeDaysFraction',
 		'activeSellers',
@@ -496,6 +500,8 @@ test('regression: realistic fixture produces the full report shape', () => {
 		if (key === 'filteredReason' || key === 'stopReason' || key === 'floored') continue; // text and a boolean
 		if (val === null && (key === 'stopPriceMil' || key === 'stopRoi')) continue; // null when the demand cap bound
 		if (val === null && key === 'targetVolume') continue; // null for a recommendation
+		if (key === 'avgDaysIdleCensored') { assert.equal(val, false); continue; } // a boolean
+		if (val === null && OBSERVED_KEYS.includes(key)) continue; // null without observation (observedCoverage is an object when observed)
 		assert.equal(typeof val, 'number', `${key} should be a number`);
 		assert.ok(Number.isFinite(val), `${key} should be finite`);
 	}
@@ -515,7 +521,17 @@ test('regression: realistic fixture produces the full report shape', () => {
 		stopRoi: null,
 		horizonVolume: 5,
 		targetVolume: null,
-		floored: false
+		floored: false,
+		observedFractionEvents: 0,
+		observedFractionVolume: 0,
+		dailyDemandModel: 2.83, // = dailyDemand: nothing observed
+		dailyDemandObserved: null,
+		rivalsModel: 1.26, // = rivals
+		rivalsObserved: null,
+		avgDaysIdle: null,
+		avgDaysIdleCensored: false,
+		stockTrendPerDay: null,
+		observedCoverage: null
 	});
 
 	assert.deepEqual(report, {
@@ -614,9 +630,9 @@ test('active sellers and days idle count every dest sell order; the in-band idle
 	assert.equal(onlyJoke.daysOfSupply, 0);
 });
 
-test('seller updated too recently looks only at in-band sellers: a refreshed far-above-market order does not hide an item', () => {
-	// Modest-profit item (history 1M, source 0.1M, dailyProfit ~6.5M) so the too-recent threshold is ~0.46 day
-	// rather than the 1/24 floor that high-profit items get. In-band order at 0.9M, joke order at 9M.
+test('a recently updated seller does not hide an item, whether the fresh order is in band or far above the market', () => {
+	// Modest-profit item (history 1M, source 0.1M, dailyProfit ~6.5M): the old filter's threshold for it was ~0.46 day.
+	// In-band order at 0.9M, joke order at 9M.
 	const run = (inBandHoursAgo, jokeHoursAgo) => computeItemReport({
 		srcOrders: [sellOrder(0.1 * M, 1000)],
 		destOrders: [sellOrder(0.9 * M, 3, inBandHoursAgo), sellOrder(9 * M, 5, jokeHoursAgo)],
@@ -624,24 +640,25 @@ test('seller updated too recently looks only at in-band sellers: a refreshed far
 		now: NOW
 	});
 
-	// In-band seller idle 2 days, joke order refreshed 1h ago: the all-orders figure is 0.04 but the filter ignores it.
+	// In-band seller idle 2 days, joke order refreshed 1h ago: the all-orders figure is 0.04, the in-band one 2.
 	const jokeFresh = run(48, 1);
 	assert.equal(jokeFresh.daysSinceSellerUpdate, 0.04);
 	assert.equal(jokeFresh.daysSinceInBandSellerUpdate, 2);
-	assert.ok(jokeFresh.dailyProfitMil < 10, `dailyProfitMil ${jokeFresh.dailyProfitMil}`); // threshold well above 0.04 day
+	assert.ok(jokeFresh.dailyProfitMil < 10, `dailyProfitMil ${jokeFresh.dailyProfitMil}`);
 	assert.equal(jokeFresh.filteredReason, null);
 
-	// The same item with the in-band order refreshed 1h ago is filtered.
+	// The same item with the in-band order refreshed 1h ago used to be filtered; both idle figures stay reported, the row stays.
 	const inBandFresh = run(1, 1);
 	assert.equal(inBandFresh.daysSinceSellerUpdate, 0.04);
 	assert.equal(inBandFresh.daysSinceInBandSellerUpdate, 0.04);
-	assert.equal(inBandFresh.filteredReason, 'seller updated too recently');
+	assert.equal(inBandFresh.filteredReason, null);
+	assert.deepEqual(limitBreaches(inBandFresh, {}), []);
 
-	// Hand-built reports without the in-band field fall back to daysSinceSellerUpdate.
+	// Hand-built reports: no combination of the two idle figures filters a row.
 	const ok = { volume: 10, costPerItemMil: 1, revenuePerItemMil: 5, dailyProfitMil: 2, activeDaysFraction: 0.5, activeSellers: 0 };
-	assert.equal(applyFilters({ ...ok, daysSinceSellerUpdate: 0.5 }, {}), 'seller updated too recently');
+	assert.equal(applyFilters({ ...ok, daysSinceSellerUpdate: 0.5 }, {}), null);
 	assert.equal(applyFilters({ ...ok, daysSinceSellerUpdate: 0.5, daysSinceInBandSellerUpdate: 3 }, {}), null);
-	assert.equal(applyFilters({ ...ok, daysSinceSellerUpdate: 3, daysSinceInBandSellerUpdate: 0.5 }, {}), 'seller updated too recently');
+	assert.equal(applyFilters({ ...ok, daysSinceSellerUpdate: 3, daysSinceInBandSellerUpdate: 0.5 }, {}), null);
 	assert.equal(applyFilters({ ...ok, daysSinceSellerUpdate: 0.5, daysSinceInBandSellerUpdate: null }, {}), null);
 });
 
@@ -688,4 +705,201 @@ test('out-of-band stock counts toward competing volume only by its rival weight'
 	// the same 100 units twelve days idle contribute ~0.25 * 0.75^12 * 100 = 0.79
 	const stale = computeItemReport({ srcOrders: [sellOrder(0.1 * M, 1000)], destOrders: [sellOrder(1 * M, 3, 0), sellOrder(3.5 * M, 100, 12 * 24)], destDays: baseDays(), now: NOW });
 	approx(stale.competingVolume, 3.79, 0.02);
+});
+
+// ---- typicalOrdersPerDay
+
+test('typicalOrdersPerDay: a flat history gives its order count; none gives 1; a missing day lowers it', () => {
+	const flat = (count, fromAge = 1, toAge = 30) => flatHistory(fromAge, toAge, 10 * M, 10).map(day => ({ ...day, order_count: count }));
+	assert.equal(typicalOrdersPerDay(flat(4), NOW), 4);
+	assert.equal(typicalOrdersPerDay([], NOW), 1, 'no history: the floor');
+	assert.equal(typicalOrdersPerDay(flat(0), NOW), 1, 'a quiet history is floored at 1');
+	assert.equal(typicalOrdersPerDay(flat(0.4), NOW), 1);
+
+	// a day with no trades counts 0, at its recency weight: dropping age 2 takes 4 x w(2) / sum(w) off
+	const missing = flat(4).filter(day => day.date !== dateForAge(2));
+	const expected = 4 - 4 * recencyWeight(2, defaultConfig.RECENCY_HALF_LIFE_DAYS) / weightTotal;
+	assert.equal(typicalOrdersPerDay(missing, NOW), Math.round(expected * 100) / 100);
+	assert.ok(typicalOrdersPerDay(missing, NOW) < 4);
+
+	// 10 days of history instead of 30: only their weights count, the rest of the window is 0
+	const tenDays = flat(4, 1, 10);
+	let tenWeights = 0;
+	for (let age = 1; age <= 10; age++) tenWeights += recencyWeight(age, defaultConfig.RECENCY_HALF_LIFE_DAYS);
+	assert.equal(typicalOrdersPerDay(tenDays, NOW), Math.round(4 * tenWeights / weightTotal * 100) / 100);
+});
+
+test('typicalOrdersPerDay: recent days weigh more, days past DAYS_CONSIDERED are ignored, today counts as age 1', () => {
+	// the same two counts either way round, split at 15 days: the half-life weights favour the recent half
+	const history = (recentCount, oldCount) => flatHistory(1, 30, 10 * M, 10).map(day => ({ ...day, order_count: dayAge(day.date, NOW) <= 15 ? recentCount : oldCount }));
+	assert.ok(typicalOrdersPerDay(history(20, 2), NOW) > typicalOrdersPerDay(history(2, 20), NOW));
+
+	const base = flatHistory(1, 30, 10 * M, 10).map(day => ({ ...day, order_count: 4 }));
+	const withOld = [...base, { ...flatDay(31, 10 * M, 10), order_count: 500 }, { ...flatDay(45, 10 * M, 10), order_count: 500 }];
+	assert.equal(typicalOrdersPerDay(withOld, NOW), 4);
+
+	// age 0 is today's partial day, weighed as age 1 (the same as calcDemand): one 4-order day today alone is w(1) x 4 / sum(w)
+	const today = [{ ...flatDay(0, 10 * M, 10), order_count: 4 }];
+	assert.equal(typicalOrdersPerDay(today, NOW), Math.max(1, Math.round(4 * recencyWeight(1, defaultConfig.RECENCY_HALF_LIFE_DAYS) / weightTotal * 100) / 100));
+	// the clock and the config are read: a shorter window counts a shorter history
+	assert.equal(typicalOrdersPerDay(base, NOW, { DAYS_CONSIDERED: 10 }), 4);
+	// ten days later the same history is aged 11..40: the days still within 30 weigh at their new, older age
+	let laterWeights = 0;
+	for (let age = 11; age <= 30; age++) laterWeights += recencyWeight(age, defaultConfig.RECENCY_HALF_LIFE_DAYS);
+	assert.equal(typicalOrdersPerDay(base, new Date(NOW.getTime() + 10 * DAY_MS)), Math.round(4 * laterWeights / weightTotal * 100) / 100);
+});
+
+// ---- observed figures blended into the report
+
+// What computeMarketStats answers, built by hand: only the fields the estimate reads.
+const observedOf = (over = {}) => ({
+	coverage: { windowDays: 3, samples: 40, medianGapHours: 1, maxGapHours: 2, from: '2026-05-29T12:00:00.000Z', to: '2026-06-01T12:00:00.000Z', events: { gapHours: 3, coveredDays: 3, fraction: 1 }, volume: { gapHours: 24, coveredDays: 3, fraction: 1 } },
+	repriceEvents: 7,
+	avgDaysIdle: 0.4,
+	censored: false,
+	undercutsPerDay: 2,
+	fillsPerDay: 20,
+	vanishedUnitsPerDay: 1,
+	stockTrendPerDay: -3,
+	...over
+});
+const withFractions = (events, volume, over = {}) => {
+	const observed = observedOf(over);
+	observed.coverage.events.fraction = events;
+	observed.coverage.volume.fraction = volume;
+	return observed;
+};
+const baseReport = (observed) => computeItemReport({ srcOrders: [sellOrder(1 * M, 1000)], destOrders: baseDest(), destDays: baseDays(), now: NOW, observed });
+
+test('observed, fully covered: demand is the observed fills, the cap follows, rivals are undercuts x days to clear', () => {
+	const report = baseReport(observedOf());
+	assert.equal(report.dailyDemand, 20);
+	assert.equal(report.dailyDemandObserved, 20);
+	assert.equal(report.dailyDemandModel, 10);
+	assert.equal(report.horizonVolume, 20 * 5 - 7, 'the demand cap is observed demand x horizon - competing');
+	assert.equal(report.volume, 93, 'against 1000 units on the book');
+	assert.equal(report.stopReason, 'horizon');
+	assert.equal(report.daysToClear, 5); // (93 + 7) / 20
+	assert.equal(report.rivalsObserved, 2 * report.daysToClear);
+	assert.equal(report.rivals, report.rivalsObserved);
+	assert.equal(report.rivals, 10);
+	assert.equal(report.rivalsModel, baseReport(null).rivals, 'the model figure is what no observation gives');
+	assert.equal(report.observedFractionEvents, 1);
+	assert.equal(report.observedFractionVolume, 1);
+	assert.equal(report.avgDaysIdle, 0.4);
+	assert.equal(report.avgDaysIdleCensored, false);
+	assert.equal(report.stockTrendPerDay, -3);
+	assert.deepEqual(report.observedCoverage, observedOf().coverage);
+	// everything downstream follows the blended demand: days of supply and daily profit
+	assert.equal(report.daysOfSupply, 0.6); // 12 units listed within the band / 20 a day
+	approx(report.dailyProfitMil, report.profitPerItemMil * 93 / 5, 1.5); // profit over max(days to clear, 1), roundNonZero truncating
+	assert.ok(report.dailyProfitMil > baseReport(null).dailyProfitMil);
+});
+
+test('observed at half coverage: the midpoint of the observed and the model figures', () => {
+	const model = baseReport(null);
+	const half = baseReport(withFractions(0.5, 0.5));
+	assert.equal(model.dailyDemand, 10);
+	assert.equal(half.dailyDemand, 15); // 0.5 x 20 + 0.5 x 10
+	assert.equal(half.dailyDemandModel, model.dailyDemand);
+	assert.equal(half.dailyDemandObserved, 20);
+	assert.equal(half.observedFractionEvents, 0.5);
+	assert.equal(half.observedFractionVolume, 0.5);
+	assert.equal(half.horizonVolume, 15 * 5 - 7);
+	assert.equal(half.daysToClear, round2Of((half.volume + 7) / 15));
+	// rivals: observed = 2/day x days to clear; the model sum is untouched by the observation
+	approx(half.rivalsModel, model.rivals, 0.011);
+	approx(half.rivalsObserved, 2 * (half.volume + 7) / 15, 0.011);
+	approx(half.rivals, 0.5 * half.rivalsObserved + 0.5 * half.rivalsModel, 0.011);
+	assert.ok(half.rivals > half.rivalsModel && half.rivals < half.rivalsObserved, 'between the model and the observed figure');
+
+	// the two fractions are independent: events fully covered, volume not at all
+	const eventsOnly = baseReport(withFractions(1, 0));
+	assert.equal(eventsOnly.dailyDemand, model.dailyDemand, 'no volume coverage: the model demand');
+	assert.equal(eventsOnly.rivals, eventsOnly.rivalsObserved);
+	const volumeOnly = baseReport(withFractions(0, 1));
+	assert.equal(volumeOnly.dailyDemand, 20);
+	assert.equal(volumeOnly.rivals, volumeOnly.rivalsModel);
+});
+const round2Of = (x) => Math.round(x * 100) / 100;
+
+test('observed with no coverage is the same as no observation, apart from the carried fields', () => {
+	const none = baseReport(null);
+	const zero = baseReport(withFractions(0, 0, { avgDaysIdle: null, undercutsPerDay: null, fillsPerDay: null, stockTrendPerDay: null }));
+	const figures = (report) => {
+		const { observedCoverage, ...rest } = report;
+		return rest;
+	};
+	assert.deepEqual(figures(zero), figures(none));
+	// even with rates present, a fraction of 0 leaves the model alone
+	const ignored = baseReport(withFractions(0, 0));
+	assert.equal(ignored.dailyDemand, none.dailyDemand);
+	assert.equal(ignored.rivals, none.rivals);
+	assert.equal(ignored.volume, none.volume);
+	assert.equal(ignored.daysToClear, none.daysToClear);
+	assert.equal(ignored.dailyProfitMil, none.dailyProfitMil);
+	assert.equal(ignored.dailyDemandObserved, 20, 'the observed figure is still reported');
+	assert.equal(ignored.rivalsObserved, 2 * ignored.daysToClear);
+	assert.deepEqual(none.observedCoverage, null);
+});
+
+test('observed: a null rate leaves the model figure whatever the coverage says', () => {
+	const none = baseReport(null);
+	const noFills = baseReport(observedOf({ fillsPerDay: null }));
+	assert.equal(noFills.dailyDemand, none.dailyDemand, 'fraction 1 but nothing to blend: the model demand');
+	assert.equal(noFills.dailyDemandObserved, null);
+	assert.equal(noFills.volume, none.volume);
+	assert.equal(noFills.observedFractionVolume, 1, 'the coverage is still reported');
+	const noUndercuts = baseReport(observedOf({ undercutsPerDay: null }));
+	assert.equal(noUndercuts.rivals, none.rivals);
+	assert.equal(noUndercuts.rivalsObserved, null);
+	assert.equal(noUndercuts.dailyDemand, 20, 'the fills still blend');
+	// no demand at all: days to clear is null, and the observed rivals count a one-day clear
+	const noDemand = computeItemReport({ srcOrders: [sellOrder(1 * M, 1000)], destOrders: baseDest(), destDays: [], now: NOW, observed: withFractions(1, 0) });
+	assert.equal(noDemand.daysToClear, null);
+	assert.equal(noDemand.rivalsObserved, 2);
+	assert.equal(noDemand.rivals, 2);
+});
+
+test('observed: censored, the idle figure and the stock trend pass through unblended; the input is never mutated', () => {
+	const observed = observedOf({ avgDaysIdle: 1.5, censored: true, repriceEvents: 0, stockTrendPerDay: null });
+	const before = JSON.stringify(observed);
+	const report = baseReport(observed);
+	assert.equal(JSON.stringify(observed), before);
+	assert.equal(report.avgDaysIdle, 1.5);
+	assert.equal(report.avgDaysIdleCensored, true);
+	assert.equal(report.stockTrendPerDay, null);
+	const nobody = baseReport(observedOf({ avgDaysIdle: null, censored: false }));
+	assert.equal(nobody.avgDaysIdle, null);
+	assert.equal(nobody.avgDaysIdleCensored, false);
+	// a half-covered observation still reports the observed idle figure as it is
+	assert.equal(baseReport(withFractions(0.25, 0.25, { avgDaysIdle: 0.4 })).avgDaysIdle, 0.4);
+	// the report does not share the model figures with the page by accident: a re-estimate with the same
+	// observation (the page's factor path) is the same report
+	const again = baseReport(observed);
+	assert.deepEqual(again, report);
+});
+
+test('observed: a malformed observation counts as none rather than failing the report', () => {
+	const none = baseReport(null);
+	for (const bad of [{}, { coverage: {} }, { coverage: { events: {}, volume: {} }, fillsPerDay: 'x' }, { coverage: { events: { fraction: NaN }, volume: { fraction: NaN } }, fillsPerDay: 20, undercutsPerDay: 2 }]) {
+		const report = baseReport(bad);
+		assert.notEqual(report, null);
+		assert.equal(report.dailyDemand, none.dailyDemand);
+		assert.equal(report.rivals, none.rivals);
+	}
+	// fractions are held to [0, 1]
+	assert.equal(baseReport(withFractions(7, 7)).observedFractionVolume, 1);
+	assert.equal(baseReport(withFractions(-1, -1)).observedFractionVolume, 0);
+});
+
+test('too much competition reads the blended rivals', () => {
+	// the base scenario's model rivals are small; observing 30 undercuts a day makes the row "too much competition"
+	const calm = baseReport(null);
+	assert.equal(calm.filteredReason, null);
+	const busy = baseReport(observedOf({ undercutsPerDay: 30 }));
+	assert.ok(busy.rivals > calm.rivals);
+	assert.equal(busy.rivals, busy.rivalsObserved);
+	assert.equal(busy.filteredReason, 'too much competition');
+	assert.deepEqual(limitBreaches(busy, {}), ['rivals']);
 });
