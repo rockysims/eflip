@@ -270,6 +270,51 @@ test('a group under 20 percent pauses that group only, and the pause survives a 
 	assert.equal(restarted.peek({ owner: CHAR, path: JOURNAL }), null, 'the window has passed');
 });
 
+test('a flush keeps a pause another process stored after this one loaded, though this one saw the group later', async (t) => {
+	const dataDir = tmpDataDir(t);
+	const clock = makeClock();
+	const group = { 'x-ratelimit-group': 'market-order', 'x-ratelimit-limit': '12000/15m' };
+	const a = createEsiClient({ dataDir, now: clock, fetch: scripted([respond(200, [], { ...group, 'x-ratelimit-remaining': '9000' })]) }); // the server, mid-run
+	const b = createEsiClient({ dataDir, now: clock, fetch: scripted([respond(429, { error: 'rate limited' }, { ...group, 'x-ratelimit-remaining': '0', 'retry-after': '600' })]) }); // the script
+	const book = (typeId) => ({ owner: 'public', path: '/markets/10000043/orders', query: { type_id: typeId } });
+	const stored = () => JSON.parse(fs.readFileSync(path.join(dataDir, 'esi-cache', '_limits.json'), 'utf8')).groups['public|market-order'].pausedUntil;
+	a.loadLimits();
+
+	clock.advance(1000);
+	const limited = await b.get(book(35));
+	assert.equal(limited.outcome, 'rate-limited');
+	b.flushLimits();
+	assert.equal(stored(), limited.until);
+
+	clock.advance(1000);
+	assert.equal((await a.get(book(36))).outcome, 'ok');
+	a.flushLimits();
+	assert.equal(stored(), limited.until, 'the 429\'s pause is still in the file');
+	a.loadLimits();
+	assert.deepEqual(a.peek(book(37)), { slug: 'markets-10000043-orders-type-id-37', outcome: 'paused', reason: 'group', group: 'market-order', until: limited.until });
+});
+
+test('a flush keeps an error-limit pause another process stored, though this one saw a later reset', async (t) => {
+	const dataDir = tmpDataDir(t);
+	const clock = makeClock();
+	const a = createEsiClient({ dataDir, now: clock, tokens: makeTokens(), fetch: scripted([respond(200, 5, { 'x-esi-error-limit-remain': '100', 'x-esi-error-limit-reset': '60' })]) });
+	const b = createEsiClient({ dataDir, now: clock, tokens: makeTokens(), fetch: scripted([respond(420, { error: 'error limited' }, { 'retry-after': '30' })]) });
+	const stored = () => JSON.parse(fs.readFileSync(path.join(dataDir, 'esi-cache', '_limits.json'), 'utf8')).errorLimit;
+	a.loadLimits();
+
+	clock.advance(1000);
+	const limited = await b.get({ owner: CHAR, path: `/characters/${CHAR}/wallet` });
+	assert.equal(limited.outcome, 'rate-limited');
+	b.flushLimits();
+
+	clock.advance(1000);
+	assert.equal((await a.get({ owner: CHAR, path: `/characters/${CHAR}/wallet` })).outcome, 'ok');
+	a.flushLimits();
+	assert.deepEqual(stored(), { remain: 100, resetAt: clock() + 60 * 1000, pausedUntil: limited.until }, 'the newer reset, and the 420\'s pause');
+	a.loadLimits();
+	assert.equal(a.peek({ owner: CHAR, path: `/characters/${CHAR}/assets` }).reason, 'error-limit');
+});
+
 test('network errors and unusable answers are reported, not thrown, and store nothing', async (t) => {
 	const { dataDir, client } = setup(t, [
 		() => { throw new TypeError('fetch failed'); },
