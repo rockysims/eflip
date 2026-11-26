@@ -512,7 +512,6 @@
 					profitPerItemMil: milsNum(profit / total.volume, 3),
 					roi: round2(total.revenue / total.cost),
 					dailyProfitMil: milsNum(profit / Math.max(daysToClearRaw, 1)),
-					dailyProfitOldMil: milsNum(profit / c.DAYS_TO_COMPLETE),
 					...common
 				};
 			} else {
@@ -530,7 +529,6 @@
 					profitPerItemMil: milsNum(destBest - srcBestSellPrice, 3),
 					roi: round2(destBest / srcBestSellPrice),
 					dailyProfitMil: 0,
-					dailyProfitOldMil: 0,
 					...common
 				};
 			}

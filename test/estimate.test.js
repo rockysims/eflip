@@ -141,7 +141,6 @@ test('buy cap with overhang >= horizon demand => 1 unit shown, filtered as nothi
 	assert.equal(report.roi, 7.33);
 	assert.equal(report.daysToClear, 6.1); // (1 + 60) / 10
 	assert.equal(report.dailyProfitMil, Number(roundMils((REVENUE_PER_ITEM - 1.1 * M) / 6.1)));
-	assert.equal(report.dailyProfitOldMil, Number(roundMils((REVENUE_PER_ITEM - 1.1 * M) / 5)));
 	assert.equal(report.filteredReason, 'nothing to buy');
 });
 
@@ -203,7 +202,6 @@ test('marginal ROI stop walks only the cheap orders; caller orders are not mutat
 	const revenue = 20 * REVENUE_PER_ITEM;
 	const profit = revenue - cost;
 	assert.equal(report.dailyProfitMil, Number(roundMils(profit / 2.7)));
-	assert.equal(report.dailyProfitOldMil, Number(roundMils(profit / 5)));
 	assert.equal(report.roi, Math.round(revenue / cost * 100) / 100);
 	assert.equal(report.costPerItemMil, Number(roundMils(Math.ceil(cost / 20), 3)));
 	assert.equal(report.revenuePerItemMil, Number(roundMils(Math.floor(revenue / 20), 3)));
@@ -493,7 +491,6 @@ test('regression: realistic fixture produces the full report shape', () => {
 		'costPerItemMil',
 		'dailyDemand',
 		'dailyProfitMil',
-		'dailyProfitOldMil',
 		'daysOfSupply',
 		'daysSinceInBandSellerUpdate',
 		'daysSinceSellerUpdate',
@@ -552,7 +549,6 @@ test('regression: realistic fixture produces the full report shape', () => {
 		profitPerItemMil: 11.17,
 		roi: 2.04,
 		dailyProfitMil: 11.2, // 55.85 / 4.97
-		dailyProfitOldMil: 11.1, // roundNonZero truncates
 		daysToClear: 4.97, // (5 + 9.08) / 2.83
 		daysOfSupply: 6.7, // 19 within 75% of sellPrice (31.0M is inside) / ~2.834
 		competingVolume: 9.08, // 24.5M x6 and 26.0M x3 within 10% of 24.5M - 0.01, plus 31.0M x10 at its rival weight 0.75^16.7
