@@ -1,17 +1,22 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const http = require('node:http');
+const os = require('node:os');
+const path = require('node:path');
 const express = require('express');
 const { mountApi } = require('../lib/api');
 
 const startServer = async () => {
 	const app = express();
-	mountApi(app);
+	// mountApi probes its data directory (creating it); a temp one keeps these tests off the repository's data/
+	const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'eflip-guards-test-'));
+	mountApi(app, { dataDir });
 	const server = await new Promise(resolve => {
 		const s = app.listen(0, '127.0.0.1', () => resolve(s));
 	});
 	const port = server.address().port;
-	const close = () => new Promise(resolve => server.close(resolve));
+	const close = () => new Promise(resolve => server.close(resolve)).then(() => fs.rmSync(dataDir, { recursive: true, force: true }));
 	return { port, close };
 };
 

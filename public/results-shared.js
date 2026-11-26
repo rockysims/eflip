@@ -3,8 +3,10 @@
 // calls, the window bar (run or since-date, route, "count hauler bonuses"), and the loader that reads the
 // linked characters' ledgers, runs, snapshots, destination prices and item names, then works the results
 // out with results-calc.js. It also fills a page's `#envNotice` container, when it has one, with the
-// notice for an unset EFLIP_DATA_DIR or ESI_USER_AGENT (GET /api/config's `env`). Plain script, one
-// global (`resultsShared`), no build step.
+// notice for an unset EFLIP_DATA_DIR or ESI_USER_AGENT and the error for a data directory that cannot
+// be written (GET /api/config's `env`), and reads where an EVE sign-in came back from (?linked= and
+// ?ssoError=&ssoReason=, readSsoResult) so the results and orders pages word it alike. Plain script,
+// one global (`resultsShared`), no build step.
 //
 // Usage (after util.js and results-calc.js, before the page's own script):
 //   const shared = resultsShared.create({ render, renderStatus, typesChanged, reloaded });
@@ -283,7 +285,7 @@ const resultsShared = (() => {
 			state.fatal = {
 				title: reached ? 'Could not load the trade data' : 'Could not reach the eFlip server',
 				html: reached
-					? `<p>The server answered \u201c${esc(e.message)}\u201d. Check the server\u2019s console for the cause, then try again.</p>`
+					? `<p>The server answered “${esc(e.message)}”. Check the server’s console for the cause, then try again.</p>`
 					: `<p>${esc(e.message)}. This page reads everything through the eFlip server on this computer: start it with <code>npm start</code>, then try again.</p>`,
 				retry: true
 			};
@@ -725,25 +727,86 @@ const resultsShared = (() => {
 		};
 	};
 
+	//--- where an EVE sign-in came back from (results and orders pages)
+
+	// /sso/callback sends the browser back to the page that started the login with ?linked=<characterId>, or
+	// with ?ssoError=<stage> and, for a failure of ours, ?ssoReason=<code> (the error's own code, EACCES and
+	// the like, else `error`; lib/api.js). The first answer the user gets after "+ Add character" is this
+	// text, so it says what failed and, when the server knew, why.
+	const SSO_ERRORS = {
+		state: 'The sign-in took too long or came from another tab. Try “+ Add character” again.',
+		exchange: 'EVE did not accept the sign-in. Try “+ Add character” again.',
+		jwt: 'EVE’s answer could not be verified. Try “+ Add character” again.',
+		store: 'The character could not be saved on this computer. Check that the data folder is writable, then try again.',
+		access_denied: 'The sign-in was cancelled at EVE. Nothing was linked.'
+	};
+	// `dataDir` (GET /api/config's env.dataDir) names the folder in the `store` text; without it the text
+	// says "the data folder". A reason of `error` (no usable code) adds nothing.
+	const ssoErrorText = (code, reason, dataDir) => {
+		const known = typeof reason === 'string' && reason !== '' && reason !== 'error' ? reason : null;
+		if (code === 'store' && known) {
+			return `The character could not be saved on this computer: writing ${typeof dataDir === 'string' && dataDir !== '' ? dataDir : 'the data folder'} failed (${known}). Fix the folder’s permissions, then try again.`;
+		}
+		const base = SSO_ERRORS[code] || `EVE sign-in failed (${code}). Try “+ Add character” again.`;
+		return known ? `${base} (${known})` : base;
+	};
+	// The page learns the data directory only after /api/config answers, after its first paint: it calls
+	// this then, and draws its banners again. A no-op for a notice that is not a sign-in error.
+	const fillSsoNotice = (notice, dataDir) => {
+		if (notice && notice.ssoCode && typeof dataDir === 'string' && dataDir !== '') notice.text = ssoErrorText(notice.ssoCode, notice.ssoReason, dataDir);
+	};
+	// {notice: {kind: 'err', text, ssoCode, ssoReason} | null, linkedId: number | null}. The query is dropped
+	// from the address so a reload does not repeat the message. Both values are cut to a safe shape here
+	// and the page still escapes the text it draws.
+	const readSsoResult = (dataDir) => {
+		const result = { notice: null, linkedId: null };
+		let params;
+		try { params = new URLSearchParams(location.search); } catch (e) { return result; }
+		const code = params.get('ssoError');
+		const reason = params.get('ssoReason');
+		const linked = params.get('linked');
+		if (code) {
+			const ssoCode = /^[A-Za-z0-9_.-]{1,64}$/.test(code) ? code : 'error';
+			const ssoReason = reason && /^[A-Z][A-Z0-9_]{2,15}$/.test(reason) ? reason : 'error';
+			result.notice = { kind: 'err', text: ssoErrorText(ssoCode, ssoReason, dataDir), ssoCode, ssoReason };
+		}
+		if (linked && /^\d+$/.test(linked)) result.linkedId = Number(linked);
+		if (code || linked || reason) {
+			try { history.replaceState(null, '', location.pathname); } catch (e) { /* ignore */ }
+		}
+		return result;
+	};
+
 	//--- the environment notice (results, insights and orders pages; the export page prints the same lines)
 
-	// GET /api/config says whether the two optional settings that matter are in the environment. A bar under
-	// the page's top, in the page's `#envNotice` container, says so for as long as either is unset: not a
-	// dialog, not dismissible. The wording is the plan's (docs/order-monitor-plan.md, UI 2); the export page
-	// prints the same two sentences. `env` is `config.env`: {dataDir, dataDirFromEnv, userAgentFromEnv}.
+	// GET /api/config says whether the two optional settings that matter are in the environment, and whether
+	// the data directory takes a file. A bar under the page's top, in the page's `#envNotice` container, says
+	// so for as long as either is unset or the folder is unwritable: not a dialog, not dismissible. The
+	// wording is the plan's (docs/order-monitor-plan.md, UI 2); the export page prints the same sentences.
+	// An unwritable directory is an error (red, "Error:"): nothing can be linked or synced until it is fixed;
+	// the two unset variables stay amber notes. `env` is `config.env`: {dataDir, dataDirFromEnv,
+	// userAgentFromEnv, dataDirError}. The lines are [{kind: 'err' | 'warn', html}], html already escaped.
 	const envNoticeLines = (env) => {
 		const lines = [];
 		if (!env || typeof env !== 'object') return lines;
-		if (env.dataDirFromEnv === false && typeof env.dataDir === 'string') {
-			lines.push(`Synced data is in <code>${esc(env.dataDir)}</code> because EFLIP_DATA_DIR is not set. Add <code>EFLIP_DATA_DIR=/path</code> to .env so every checkout shares one store.`);
+		if (env.dataDirError && typeof env.dataDirError === 'object') {
+			const where = typeof env.dataDir === 'string' ? ` <code>${esc(env.dataDir)}</code>` : '';
+			const code = esc(env.dataDirError.code || 'error');
+			const message = env.dataDirError.message ? ` ${esc(env.dataDirError.message)}` : '';
+			lines.push({ kind: 'err', html: `The data directory${where} is not writable (${code}): characters cannot be linked and syncs cannot be saved.${message}` });
 		}
-		if (env.userAgentFromEnv === false) lines.push('ESI_USER_AGENT is not set; CCP asks for a contact in it.');
+		if (env.dataDirFromEnv === false && typeof env.dataDir === 'string') {
+			lines.push({ kind: 'warn', html: `Synced data is in <code>${esc(env.dataDir)}</code> because EFLIP_DATA_DIR is not set. Add <code>EFLIP_DATA_DIR=/path</code> to .env so every checkout shares one store.` });
+		}
+		if (env.userAgentFromEnv === false) lines.push({ kind: 'warn', html: 'ESI_USER_AGENT is not set; CCP asks for a contact in it.' });
 		return lines;
 	};
 	const renderEnvNotice = (env, el = document.getElementById('envNotice')) => {
 		if (!el) return;
 		const html = envNoticeLines(env)
-			.map(line => `<div class="envNote"><span class="sev"><span aria-hidden="true">⚠</span> Note:</span><span>${line}</span></div>`).join('');
+			.map(line => (line.kind === 'err'
+				? `<div class="envNote err"><span class="sev">Error:</span><span>${line.html}</span></div>`
+				: `<div class="envNote"><span class="sev"><span aria-hidden="true">⚠</span> Note:</span><span>${line.html}</span></div>`)).join('');
 		setHtml(el, html);
 	};
 	const initEnvNotice = async () => {
@@ -757,5 +820,5 @@ const resultsShared = (() => {
 	if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initEnvNotice);
 	else initEnvNotice();
 
-	return { constants: { STATIONS, DAY_MS, DASH, MINUS, ARROW, SNAPSHOT_MARGIN_DAYS }, storage, ls, fmt: { nf, nf2, isNum, esc, fmtIsk, fmtExact, fmtQty, fmtPct, fmtPct0, fmtDays, fmtRate, ago, clock, stamp, ymd, toMs }, setHtml, setText, api, widenNext, create, renderEnvNotice };
+	return { constants: { STATIONS, DAY_MS, DASH, MINUS, ARROW, SNAPSHOT_MARGIN_DAYS }, storage, ls, fmt: { nf, nf2, isNum, esc, fmtIsk, fmtExact, fmtQty, fmtPct, fmtPct0, fmtDays, fmtRate, ago, clock, stamp, ymd, toMs }, setHtml, setText, api, widenNext, create, renderEnvNotice, readSsoResult, fillSsoNotice };
 })();

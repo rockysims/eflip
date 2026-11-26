@@ -553,10 +553,15 @@
 
 	//--- rendering: banners, characters
 
+	// One-off banners, dismissible: where an EVE sign-in came back from (readSsoResult at boot, below) and
+	// the "Linked ..." note. Everything else in the banner list is derived afresh on each draw.
+	const notices = [];
+
 	const bannerHtml = (b) => `<div class="banner ${b.kind}"><span class="sev">${b.kind === 'err' ? 'Error:' : b.kind === 'warn' ? 'Warning:' : 'Note:'}</span><span>${esc(b.text)}</span>${b.action || ''}</div>`;
 
 	const renderBanners = () => {
 		const list = [];
+		notices.forEach((n, i) => list.push({ kind: n.kind, text: n.text, action: `<button type="button" class="linkish" data-act="dismiss" data-i="${i}" data-fk="dismiss-${i}">Dismiss</button>` }));
 		if (state.loadError) list.push({ kind: 'warn', text: state.loadError });
 		if (data.error) list.push({ kind: 'warn', text: data.error });
 		for (const c of state.characters || []) {
@@ -1442,7 +1447,12 @@
 		const w = e.target.closest('button[data-win]');
 		if (w) { chooseWindow(w.dataset.win); return; }
 		const b = e.target.closest('button[data-act="retryLoad"]');
-		if (b) retryLoad();
+		if (b) { retryLoad(); return; }
+		const d = e.target.closest('button[data-act="dismiss"]');
+		if (d) {
+			notices.splice(Number(d.dataset.i), 1);
+			renderBanners();
+		}
 	});
 	eventsChk.addEventListener('change', () => {
 		showEvents = eventsChk.checked;
@@ -1485,6 +1495,18 @@
 		await init();
 	};
 
+	// Where a sign-in came back from: ?linked=<id>, or ?ssoError=<stage> with ?ssoReason=<code>, read once at
+	// boot (results-shared drops the query from the address). The error is in the banners from the first
+	// paint; its text learns the data directory when the config arrives. "Linked ..." waits for the characters.
+	let ssoNotice = null;
+	let linkedId = null;
+	const readSignIn = () => {
+		const result = resultsShared.readSsoResult();
+		ssoNotice = result.notice;
+		linkedId = result.linkedId;
+		if (ssoNotice) notices.push(ssoNotice);
+	};
+
 	const init = async () => {
 		try {
 			state.cfg = await api('/api/config');
@@ -1493,9 +1515,15 @@
 			render();
 			return;
 		}
+		if (ssoNotice) resultsShared.fillSsoNotice(ssoNotice, state.cfg.env && state.cfg.env.dataDir);
 		render();
 		if (!state.cfg.configured) return;
 		await shared.reloadData();
+		if (linkedId !== null && !state.fatal) {
+			notices.push({ kind: 'info', text: `Linked ${charName(linkedId)}. Its history is being synced now.` });
+			linkedId = null;
+			renderBanners();
+		}
 		if (state.fatal || !state.characters || state.characters.length === 0) { render(); return; }
 		await loadOrdersData();
 		const w = data.watch;
@@ -1504,6 +1532,7 @@
 		else await tick();
 	};
 
+	readSignIn();
 	winSegEl.replaceChildren(...WINDOWS.map(w => el('button', { type: 'button', 'data-win': w.key, 'aria-pressed': 'false', text: w.label })));
 	syncThresholdInputs();
 	renderRefresh();

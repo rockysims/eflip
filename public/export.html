@@ -94,13 +94,19 @@
 			font-variant-numeric: tabular-nums;
 			margin: 4px 0;
 		}
-		/* env notice: amber, with a "Note:" label so colour is not the only cue; not dismissible */
+		/* env notice: amber with a "Note:" label, or red (.err) with an "Error:" label for an unwritable data
+		   directory, so colour is not the only cue; not dismissible */
 		#envNotice div {
 			background: #fff4d6;
 			border: 1px solid #d99a00;
 			color: #5c3d00;
 			padding: 3px 8px;
 			margin: 0 0 4px;
+		}
+		#envNotice div.err {
+			background: #fdeeed;
+			border-color: #b3261e;
+			color: #5a0f0a;
 		}
 		#reportHeader {
 			margin: 4px 0;

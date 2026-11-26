@@ -1443,20 +1443,28 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	if (autoRunChk.checked) run();
 
 	// Env notice (docs/order-monitor-plan.md, UI 2): a reminder while EFLIP_DATA_DIR or ESI_USER_AGENT
-	// is unset. It reads /api/config, which answers before SSO is set up, so it shows whether or not
-	// the app is configured. Built with textContent only; when the read fails, nothing is shown.
+	// is unset, and an error while the data directory cannot be written (env.dataDirError: characters
+	// cannot be linked and syncs cannot be saved there). It reads /api/config, which answers before SSO
+	// is set up, so it shows whether or not the app is configured. Built with textContent only; when
+	// the read fails, nothing is shown. The same sentences as results-shared.js's envNoticeLines.
 	const showEnvNotice = (env) => {
 		const box = $('#envNotice');
 		if (!box || !env || typeof env !== 'object') return;
 		const lines = [];
-		if (env.dataDirFromEnv === false && typeof env.dataDir === 'string') {
-			lines.push(`Synced data is in ${env.dataDir} because EFLIP_DATA_DIR is not set. Add EFLIP_DATA_DIR=/path to .env so every checkout shares one store.`);
+		if (env.dataDirError && typeof env.dataDirError === 'object') {
+			const where = typeof env.dataDir === 'string' ? ` ${env.dataDir}` : '';
+			const message = env.dataDirError.message ? ` ${env.dataDirError.message}` : '';
+			lines.push({ kind: 'err', text: `The data directory${where} is not writable (${env.dataDirError.code || 'error'}): characters cannot be linked and syncs cannot be saved.${message}` });
 		}
-		if (env.userAgentFromEnv === false) lines.push('ESI_USER_AGENT is not set; CCP asks for a contact in it.');
-		for (const text of lines) {
+		if (env.dataDirFromEnv === false && typeof env.dataDir === 'string') {
+			lines.push({ kind: 'note', text: `Synced data is in ${env.dataDir} because EFLIP_DATA_DIR is not set. Add EFLIP_DATA_DIR=/path to .env so every checkout shares one store.` });
+		}
+		if (env.userAgentFromEnv === false) lines.push({ kind: 'note', text: 'ESI_USER_AGENT is not set; CCP asks for a contact in it.' });
+		for (const { kind, text } of lines) {
 			const line = document.createElement('div');
+			if (kind === 'err') line.className = 'err';
 			const label = document.createElement('strong');
-			label.textContent = 'Note:';
+			label.textContent = kind === 'err' ? 'Error:' : 'Note:';
 			line.append(label, ` ${text}`);
 			box.append(line);
 		}

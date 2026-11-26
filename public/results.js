@@ -957,26 +957,15 @@
 
 	//--- init
 
-	// Where a sign-in came back from: ?linked=<id> or ?ssoError=<code>. The query is dropped so a
-	// reload does not repeat the message.
-	const SSO_ERRORS = {
-		state: 'The sign-in took too long or came from another tab. Try “+ Add character” again.',
-		exchange: 'EVE did not accept the sign-in. Try “+ Add character” again.',
-		jwt: 'EVE’s answer could not be verified. Try “+ Add character” again.',
-		store: 'The character could not be saved on this computer. Check that the data folder is writable, then try again.',
-		access_denied: 'The sign-in was cancelled at EVE. Nothing was linked.'
-	};
+	// Where a sign-in came back from: ?linked=<id>, or ?ssoError=<stage> with ?ssoReason=<code> (the wording
+	// and the dropping of the query are results-shared's readSsoResult, which the orders page uses too).
 	let linkedId = null;
+	let ssoNotice = null;
 	const readUrlNotices = () => {
-		let params;
-		try { params = new URLSearchParams(location.search); } catch (e) { return; }
-		const code = params.get('ssoError');
-		const linked = params.get('linked');
-		if (code) state.notices.push({ kind: 'err', text: SSO_ERRORS[code] || `EVE sign-in failed (${code}). Try “+ Add character” again.` });
-		if (linked && /^\d+$/.test(linked)) linkedId = Number(linked);
-		if (code || linked) {
-			try { history.replaceState(null, '', location.pathname); } catch (e) { /* ignore */ }
-		}
+		const result = resultsShared.readSsoResult();
+		ssoNotice = result.notice;
+		linkedId = result.linkedId;
+		if (ssoNotice) state.notices.push(ssoNotice);
 	};
 
 	const init = async () => {
@@ -987,6 +976,8 @@
 			render();
 			return;
 		}
+		// the `store` text names the data directory, which only the config knows
+		if (ssoNotice) resultsShared.fillSsoNotice(ssoNotice, state.cfg.env && state.cfg.env.dataDir);
 		if (!state.cfg.configured) {
 			render();
 			return;

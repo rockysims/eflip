@@ -329,7 +329,7 @@ test('GET /api/config says where the data is and whether EFLIP_DATA_DIR and ESI_
 	const bare = await startApp(t);
 	const res = await bare.get('/api/config');
 	assert.equal(res.status, 200);
-	assert.deepEqual(res.json.env, { dataDir: bare.dataDir, dataDirFromEnv: false, userAgentFromEnv: true });
+	assert.deepEqual(res.json.env, { dataDir: bare.dataDir, dataDirFromEnv: false, userAgentFromEnv: true, dataDirError: null });
 	assert.equal(res.json.configured, true);
 
 	const set = await startApp(t, { env: { EFLIP_DATA_DIR: '/somewhere/shared' } });
@@ -340,9 +340,9 @@ test('GET /api/config says where the data is and whether EFLIP_DATA_DIR and ESI_
 	const offRes = await off.get('/api/config');
 	assert.equal(offRes.status, 200);
 	assert.equal(offRes.json.configured, false);
-	assert.deepEqual(offRes.json.env, { dataDir: off.dataDir, dataDirFromEnv: false, userAgentFromEnv: false });
+	assert.deepEqual(offRes.json.env, { dataDir: off.dataDir, dataDirFromEnv: false, userAgentFromEnv: false, dataDirError: null });
 	const loud = await startApp(t, { env: { EVE_CLIENT_SECRET: 'client-secret-xyz', EFLIP_DATA_DIR: '/x', ESI_USER_AGENT: 'me@example.com' } });
 	const loudRes = await loud.get('/api/config');
 	assert.ok(!loudRes.text.includes('client-secret-xyz') && !loudRes.text.includes('me@example.com'), 'flags only, never the values');
-	assert.deepEqual(Object.keys(loudRes.json.env), ['dataDir', 'dataDirFromEnv', 'userAgentFromEnv']);
+	assert.deepEqual(Object.keys(loudRes.json.env), ['dataDir', 'dataDirFromEnv', 'userAgentFromEnv', 'dataDirError']);
 });

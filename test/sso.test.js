@@ -9,7 +9,7 @@ const express = require('express');
 const { createSso, SsoError } = require('../lib/sso');
 const { createTokenStore } = require('../lib/tokenStore');
 const { createTokenManager, TokenError } = require('../lib/tokens');
-const { mountApi, SCOPES, safeReturnPath } = require('../lib/api');
+const { mountApi, SCOPES, safeReturnPath, probeDataDir } = require('../lib/api');
 
 // Nothing here touches the network: every fetch goes to a stub that serves CCP's URLs.
 
@@ -534,8 +534,7 @@ const request = (port, method, urlPath, headers = {}) => new Promise((resolve, r
 	req.end();
 });
 
-const startApp = async (t, { configured = true, handlers = {}, clock = () => NOW } = {}) => {
-	const dataDir = tmpDir(t);
+const startApp = async (t, { configured = true, handlers = {}, clock = () => NOW, dataDir = tmpDir(t) } = {}) => {
 	const app = express();
 	const server = await new Promise(resolve => {
 		const s = app.listen(0, '127.0.0.1', () => resolve(s));
@@ -573,14 +572,14 @@ test('GET /api/config tells whether SSO is configured and leaks nothing else', a
 	const on = await startApp(t);
 	const res = await on.get('/api/config');
 	assert.equal(res.status, 200);
-	assert.deepEqual(res.json, { configured: true, callbackUrl: `http://localhost:${on.port}/sso/callback`, scopes: [...SCOPES], env: { dataDir: on.dataDir, dataDirFromEnv: false, userAgentFromEnv: true } });
+	assert.deepEqual(res.json, { configured: true, callbackUrl: `http://localhost:${on.port}/sso/callback`, scopes: [...SCOPES], env: { dataDir: on.dataDir, dataDirFromEnv: false, userAgentFromEnv: true, dataDirError: null } });
 	assert.ok(!res.text.includes(CLIENT_SECRET));
 	assert.equal(res.text.split(on.dataDir).length, 2, 'the data directory appears once, as env.dataDir (a local path, shown so the pages can remind the user)');
 
 	const off = await startApp(t, { configured: false });
 	const offRes = await off.get('/api/config');
 	assert.equal(offRes.status, 200);
-	assert.deepEqual(offRes.json, { configured: false, callbackUrl: 'http://localhost:5001/sso/callback', scopes: [...SCOPES], env: { dataDir: off.dataDir, dataDirFromEnv: false, userAgentFromEnv: false } });
+	assert.deepEqual(offRes.json, { configured: false, callbackUrl: 'http://localhost:5001/sso/callback', scopes: [...SCOPES], env: { dataDir: off.dataDir, dataDirFromEnv: false, userAgentFromEnv: false, dataDirError: null } });
 
 	const foreign = await on.get('/api/config', { Host: 'evil.example' });
 	assert.equal(foreign.status, 403);
@@ -722,18 +721,137 @@ test('re-linking replaces the record and its token', async (t) => {
 test('/sso/callback failures return to the page with a short code and store nothing', async (t) => {
 	const ctx = await startApp(t, { handlers: { [TOKEN_URL]: () => jsonResponse(400, { error: 'invalid_grant' }) } });
 	// An unsafe return falls back to /results.html; a safe one keeps its query.
-	assert.equal((await callback(ctx, await login(ctx, '//evil.example'))).headers.location, '/results.html?ssoError=exchange');
-	assert.equal((await callback(ctx, await login(ctx, '/export.html?tab=1'))).headers.location, '/export.html?tab=1&ssoError=exchange');
+	assert.equal((await callback(ctx, await login(ctx, '//evil.example'))).headers.location, '/results.html?ssoError=exchange&ssoReason=error');
+	assert.equal((await callback(ctx, await login(ctx, '/export.html?tab=1'))).headers.location, '/export.html?tab=1&ssoError=exchange&ssoReason=error');
 	assert.equal(fs.existsSync(path.join(ctx.dataDir, 'tokens.json')), false);
 
 	const badJwt = await startApp(t, { handlers: { [TOKEN_URL]: () => jsonResponse(200, tokenBody(signJwt(claimsFor(), { key: otherRsa.privateKey }))) } });
-	assert.equal((await callback(badJwt, await login(badJwt))).headers.location, '/results.html?ssoError=jwt');
+	assert.equal((await callback(badJwt, await login(badJwt))).headers.location, '/results.html?ssoError=jwt&ssoReason=error');
 	assert.equal(fs.existsSync(path.join(badJwt.dataDir, 'tokens.json')), false);
 
 	const badStore = await startApp(t, { handlers: { [TOKEN_URL]: () => jsonResponse(200, tokenBody()) } });
 	fs.mkdirSync(path.join(badStore.dataDir, 'tokens.json')); // unreadable as a file
-	assert.equal((await callback(badStore, await login(badStore))).headers.location, '/results.html?ssoError=store');
+	assert.equal((await callback(badStore, await login(badStore))).headers.location, '/results.html?ssoError=store&ssoReason=EISDIR');
 	assert.ok(!badStore.logs.join('\n').includes('refresh-token-1'));
+});
+
+// The reason on the redirect is what lets the page say why a link failed (EACCES, EROFS ...). It is the
+// error's own code when that is a short upper-case token, never its message.
+test('/sso/callback: a store error with a code puts the code on the redirect and in the log', async (t) => {
+	const ctx = await startApp(t, { handlers: { [TOKEN_URL]: () => jsonResponse(200, tokenBody()) } });
+	const message = `EACCES: permission denied, open '${path.join(ctx.dataDir, 'tokens.json')}'`;
+	ctx.app.locals.tokenStore.upsert = () => { throw Object.assign(new Error(message), { code: 'EACCES' }); };
+
+	const res = await callback(ctx, await login(ctx));
+	assert.equal(res.status, 302);
+	assert.equal(res.headers.location, '/results.html?ssoError=store&ssoReason=EACCES');
+	assert.ok(ctx.logs.includes(`sso callback: store failed (EACCES): ${message}`), ctx.logs.join('\n'));
+	assert.ok(!res.headers.location.includes('refresh-token-1') && !ctx.logs.join('\n').includes('refresh-token-1'));
+
+	// the page that asked comes back with both parameters added to its own query
+	const orders = await callback(ctx, await login(ctx, '/orders.html'));
+	assert.equal(orders.headers.location, '/orders.html?ssoError=store&ssoReason=EACCES');
+	const withQuery = await callback(ctx, await login(ctx, '/export.html?tab=1'));
+	assert.equal(withQuery.headers.location, '/export.html?tab=1&ssoError=store&ssoReason=EACCES');
+	assert.equal(fs.existsSync(path.join(ctx.dataDir, 'tokens.json')), false);
+});
+
+test('/sso/callback: an error without a usable code gives the reason `error`, and no message reaches the redirect', async (t) => {
+	const ctx = await startApp(t, { handlers: { [TOKEN_URL]: () => jsonResponse(200, tokenBody()) } });
+	const throwing = (error) => { ctx.app.locals.tokenStore.upsert = () => { throw error; }; };
+	const reasonOf = async () => new URL((await callback(ctx, await login(ctx))).headers.location, 'http://x').searchParams;
+
+	throwing(new Error('token store: /somewhere/tokens.json has an unexpected shape'));
+	let params = await reasonOf();
+	assert.equal(params.get('ssoError'), 'store');
+	assert.equal(params.get('ssoReason'), 'error');
+	assert.ok(ctx.logs.includes('sso callback: store failed: token store: /somewhere/tokens.json has an unexpected shape'), ctx.logs.join('\n'));
+
+	// a code that is not a short upper-case token is not passed on
+	for (const code of ['eacces', 'E', 'ERR_THIS_CODE_IS_FAR_TOO_LONG', 'EACCES; x=1', 42]) {
+		throwing(Object.assign(new Error('boom'), { code }));
+		params = await reasonOf();
+		assert.equal(params.get('ssoReason'), 'error', `code ${String(code)}`);
+	}
+	throwing(Object.assign(new Error('boom'), { code: 'ERR_FS_EISDIR' }));
+	assert.equal((await reasonOf()).get('ssoReason'), 'ERR_FS_EISDIR');
+});
+
+test('/sso/callback: the exchange and jwt failures carry their error code too', async (t) => {
+	const reset = await startApp(t, { handlers: { [TOKEN_URL]: () => { throw Object.assign(new TypeError('fetch failed'), { code: 'ECONNRESET' }); } } });
+	assert.equal((await callback(reset, await login(reset))).headers.location, '/results.html?ssoError=exchange&ssoReason=ECONNRESET');
+	assert.ok(reset.logs.includes('sso callback: exchange failed (ECONNRESET): fetch failed'), reset.logs.join('\n'));
+
+	const noRefresh = await startApp(t, { handlers: { [TOKEN_URL]: () => jsonResponse(200, { access_token: signJwt(claimsFor()) }) } });
+	assert.equal((await callback(noRefresh, await login(noRefresh))).headers.location, '/results.html?ssoError=exchange&ssoReason=error');
+
+	const badJwt = await startApp(t, { handlers: { [TOKEN_URL]: () => jsonResponse(200, tokenBody(signJwt(claimsFor(), { key: otherRsa.privateKey }))) } });
+	assert.equal((await callback(badJwt, await login(badJwt))).headers.location, '/results.html?ssoError=jwt&ssoReason=error');
+});
+
+// The data directory probe: /api/config says, on every call, whether <dataDir> takes a file, so the pages
+// can say so before a link fails.
+test('GET /api/config: dataDirError is null for a writable directory and the probe leaves nothing behind', async (t) => {
+	const ctx = await startApp(t);
+	for (let i = 0; i < 3; i++) {
+		const res = await ctx.get('/api/config');
+		assert.equal(res.json.env.dataDirError, null);
+	}
+	assert.deepEqual(fs.readdirSync(ctx.dataDir).filter(name => name.includes('probe')), []);
+	assert.deepEqual(ctx.logs.filter(line => line.includes('not writable')), [], 'nothing said while the directory works');
+
+	// the probe on its own: a directory that does not exist yet is created (0700) and left empty
+	const fresh = path.join(tmpDir(t), 'a', 'b');
+	assert.equal(probeDataDir(fresh), null);
+	assert.deepEqual(fs.readdirSync(fresh), []);
+	assert.equal(modeOf(fresh), 0o700);
+});
+
+test('GET /api/config: a data directory that is a file is reported with its code, and a fix shows without a restart', async (t) => {
+	const parent = tmpDir(t);
+	const file = path.join(parent, 'data');
+	fs.writeFileSync(file, 'not a directory');
+	const ctx = await startApp(t, { dataDir: file });
+
+	const res = await ctx.get('/api/config');
+	assert.equal(res.status, 200);
+	const { dataDirError } = res.json.env;
+	assert.deepEqual(Object.keys(dataDirError), ['code', 'message']);
+	assert.ok(['EEXIST', 'ENOTDIR'].includes(dataDirError.code), `code ${dataDirError.code}`);
+	assert.ok(dataDirError.message.includes(file), 'the fs message names the path');
+	assert.equal(res.json.env.dataDir, file);
+
+	// said once at mount, not on every /api/config
+	await ctx.get('/api/config');
+	const said = ctx.logs.filter(line => line.includes('not writable'));
+	assert.equal(said.length, 1, ctx.logs.join('\n'));
+	assert.equal(said[0], `data directory ${file} is not writable (${dataDirError.code}): ${dataDirError.message}`);
+
+	// below a file is the same trouble
+	const below = await startApp(t, { dataDir: path.join(file, 'deeper') });
+	const belowError = (await below.get('/api/config')).json.env.dataDirError;
+	assert.ok(['EEXIST', 'ENOTDIR'].includes(belowError.code), `code ${belowError.code}`);
+
+	// the folder is fixed while the server runs: the next /api/config reflects it
+	fs.rmSync(file);
+	fs.mkdirSync(file);
+	assert.equal((await ctx.get('/api/config')).json.env.dataDirError, null);
+	assert.deepEqual(fs.readdirSync(file), []);
+});
+
+test('GET /api/config: a read-only data directory is EACCES, and no token or secret is in the answer', { skip: process.platform === 'win32' || (process.getuid && process.getuid() === 0) }, async (t) => {
+	const dir = tmpDir(t);
+	fs.chmodSync(dir, 0o500);
+	try {
+		const ctx = await startApp(t, { dataDir: dir });
+		const res = await ctx.get('/api/config');
+		assert.equal(res.json.env.dataDirError.code, 'EACCES');
+		assert.ok(res.json.env.dataDirError.message.includes(dir));
+		assert.ok(!res.text.includes(CLIENT_SECRET));
+		assert.deepEqual(fs.readdirSync(dir), []);
+	} finally {
+		fs.chmodSync(dir, 0o700);
+	}
 });
 
 test('GET /api/characters lists characters by name without refresh tokens', async (t) => {

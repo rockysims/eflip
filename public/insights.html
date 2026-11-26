@@ -109,7 +109,7 @@
 			font-weight: bold;
 		}
 
-		/* env notice: results-shared.js fills #envNotice while EFLIP_DATA_DIR or ESI_USER_AGENT is unset */
+		/* env notice: results-shared.js fills #envNotice while EFLIP_DATA_DIR or ESI_USER_AGENT is unset (amber) or the data directory is not writable (red, .err) */
 		#envNotice .envNote {
 			display: flex;
 			flex-wrap: wrap;
@@ -122,6 +122,10 @@
 		}
 		#envNotice .envNote .sev {
 			font-weight: bold;
+		}
+		#envNotice .envNote.err {
+			border-left-color: #b3261e;
+			background: #fdeeed;
 		}
 		#envNotice code {
 			background: rgba(0, 0, 0, 0.06);
