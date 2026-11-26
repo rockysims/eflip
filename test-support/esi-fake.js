@@ -319,7 +319,6 @@ const contractItem = (recordId, typeId, quantity) => ({ is_included: true, is_si
 
 module.exports = {
 	ALL_SCOPES,
-	START,
 	makeClock,
 	tmpDataDir,
 	makeLog,

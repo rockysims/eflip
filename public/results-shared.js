@@ -760,7 +760,7 @@ const resultsShared = (() => {
 	// {notice: {kind: 'err', text, ssoCode, ssoReason} | null, linkedId: number | null}. The query is dropped
 	// from the address so a reload does not repeat the message. Both values are cut to a safe shape here
 	// and the page still escapes the text it draws.
-	const readSsoResult = (dataDir) => {
+	const readSsoResult = () => {
 		const result = { notice: null, linkedId: null };
 		let params;
 		try { params = new URLSearchParams(location.search); } catch (e) { return result; }
@@ -770,7 +770,7 @@ const resultsShared = (() => {
 		if (code) {
 			const ssoCode = /^[A-Za-z0-9_.-]{1,64}$/.test(code) ? code : 'error';
 			const ssoReason = reason && /^[A-Z][A-Z0-9_]{2,15}$/.test(reason) ? reason : 'error';
-			result.notice = { kind: 'err', text: ssoErrorText(ssoCode, ssoReason, dataDir), ssoCode, ssoReason };
+			result.notice = { kind: 'err', text: ssoErrorText(ssoCode, ssoReason), ssoCode, ssoReason };
 		}
 		if (linked && /^\d+$/.test(linked)) result.linkedId = Number(linked);
 		if (code || linked || reason) {
@@ -829,5 +829,5 @@ const resultsShared = (() => {
 	if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initEnvNotice);
 	else initEnvNotice();
 
-	return { constants: { STATIONS, DAY_MS, DASH, MINUS, ARROW, SNAPSHOT_MARGIN_DAYS }, storage, ls, fmt: { nf, nf2, isNum, esc, fmtIsk, fmtExact, fmtQty, fmtPct, fmtPct0, fmtDays, fmtRate, ago, clock, stamp, ymd, toMs }, setHtml, setText, api, widenNext, create, renderEnvNotice, readSsoResult, fillSsoNotice };
+	return { constants: { STATIONS, DAY_MS, DASH, MINUS, ARROW, SNAPSHOT_MARGIN_DAYS }, storage, ls, fmt: { nf, nf2, isNum, esc, fmtIsk, fmtExact, fmtQty, fmtPct, fmtPct0, fmtDays, fmtRate, ago, clock, stamp, ymd, toMs }, setHtml, setText, api, widenNext, create, readSsoResult, fillSsoNotice };
 })();

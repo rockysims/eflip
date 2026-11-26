@@ -575,4 +575,4 @@ if (require.main === module) {
 	);
 }
 
-module.exports = { main, parseArgs, WATCH_BOOK_ON, WATCH_BOOK_OFF, formatSummary, formatWatch, formatRegionBook, formatRegionBookReport, formatStorage, readRegionBookEntries, hasFailure, watchFailed, UsageError };
+module.exports = { main, parseArgs, WATCH_BOOK_OFF, formatSummary, formatWatch, formatRegionBook, formatRegionBookReport, formatStorage, hasFailure, watchFailed, UsageError };

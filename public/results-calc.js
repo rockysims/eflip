@@ -1523,7 +1523,6 @@
 	};
 
 	return {
-		defaultOptions,
 		compute,
 		// exposed for tests
 		_internal: { toMs, iso, pickBatchesByVolume, perUnitByM3, assignByGap }

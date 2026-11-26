@@ -190,7 +190,6 @@
 
 	return {
 		BOOK_DEPTH,
-		DEFAULT_HISTORY_DAYS,
 		ORDER_FIELDS,
 		HISTORY_FIELDS,
 		PREDICTION_FIELDS,
@@ -200,7 +199,6 @@
 		CONFIG_FIELDS,
 		ROUTE_ID_FIELDS,
 		SYNC_MAX_AGE_MS,
-		routeName,
 		contentKey,
 		contentHash,
 		runId,
