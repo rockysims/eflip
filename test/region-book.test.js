@@ -431,6 +431,39 @@ test('a type with raw per-type books but no log gets its log built from them bef
 	assert.equal(service.regionBookStatus().syncedAt, damaged.syncedAt);
 });
 
+test('a type with per-type raw but no log that the snapshot does not hold gets its log built from that raw and an empty sample, as the rebuild gives it', async (t) => {
+	const { dataDir, fake, clock, service } = setup(t, { fake: { pageSize: 3 } });
+	fake.character(IVAN, { orders: [order(8001, { type_id: 35 })], assets: [asset(1, { type_id: 34 })] });
+	await service.syncCharacter(IVAN, { force: true });
+	fake.market.orders.set(`${REGION}:34`, [bookOrder(20, 34, 5)]);
+	fake.market.orders.set(`${REGION}:35`, [bookOrder(1, 35, 100)]);
+	const market = await service.syncMarket({ force: true, concurrency: 1 });
+	assert.equal(market.status, 'ok', JSON.stringify(market.errors));
+	const checked = bookLog(dataDir, 34).samples;
+	assert.equal(checked.length, 1);
+	// a data directory from before the book logs: 34 has per-type raw and no log
+	fs.rmSync(logFile(dataDir, 34));
+
+	clock.advance(HOUR);
+	fake.market.regionOrders.set(String(REGION), SNAPSHOT_A); // no orders of 34
+	const run = await service.syncRegionBook({ regionId: REGION });
+	assert.equal(run.status, 'ok', JSON.stringify(run.errors));
+	assert.ok(hasLog(dataDir, 34), 'treated as a type with a log');
+	const log34 = bookLog(dataDir, 34);
+	assert.deepEqual(log34.samples, [checked[0], { at: run.fetchedAt, stored: true }], 'the per-type check, then an empty sample: its orders ended');
+	assert.equal(log34.orders[20].lastSeen, checked[0].at);
+	assert.equal(run.typesEnded, 1);
+	assert.equal(run.logsCreated, 3, '34 rebuilt, 36 and 37 new');
+	assert.deepEqual(marketBytes(dataDir), rebuiltMarket(t, dataDir), 'a rebuild from raw gives the same bytes');
+
+	// and once the market step checks 34 again, live and rebuild still agree
+	clock.advance(HOUR);
+	fake.market.orders.set(`${REGION}:34`, [bookOrder(21, 34, 6)]);
+	assert.equal((await service.syncMarket({ force: true, concurrency: 1 })).status, 'ok');
+	assert.equal(bookLog(dataDir, 34).samples.length, 3);
+	assert.deepEqual(marketBytes(dataDir), rebuiltMarket(t, dataDir));
+});
+
 test('the hourly sync takes the region book after the market only when EFLIP_REGION_BOOK=1; a deferred market defers it; the request can say yes or no', async (t) => {
 	const env = {};
 	const { fake, clock, service } = setup(t, { env });
