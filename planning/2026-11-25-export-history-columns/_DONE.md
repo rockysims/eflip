@@ -48,8 +48,14 @@ None; the repo records decisions in `docs/*-plan.md` and `docs/ui-decisions/`.
 
 ## Follow-up work
 
-- Tune `DEFAULT_SHARES` and the README's figures against the 8-hour measurement (Rocky's
-  `--region-book-report` on 2026-11-26).
+- Done 2026-11-26: Rocky's 11.8-hour measurement on the live machine (11 snapshots, 7 complete at
+  194 pages, 388 tokens, 45.5 MB raw and 56-79 s each; 41.9 MB of gzipped raw in all, 3.5 MB an
+  hour; book logs +7.6 MB at the first fold, then +0.1-0.3 MB an hour; 69.6 MB on disk against the
+  1 GB budget after 12 hours) keeps `DEFAULT_SHARES` as they are: 400 MB of raw pages is about four
+  days of replay, 450 MB of book logs about three months of growth. The README's on-disk figures
+  were corrected (4.7 MB a snapshot, some 110 MB a day, not 8 MB and 190 MB). Four of the eleven
+  runs were partial (77-133 pages, nothing folded, about 940 s each); the report does not yet say
+  why a run was partial.
 - The multi-page per-type raw trim's one remaining edge (the last check before the cutoff) and the
   `_storage.json`/sync-log volume (two small entries an hour) are noted in notes.md.
 - Possible later: a per-type sell-price correction from calibration; competitor profiles.

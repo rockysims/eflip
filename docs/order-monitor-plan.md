@@ -603,6 +603,24 @@ page on the local data, commits and fast-forwards `feature/export-rework`.
    (one character), the arrow shows on the verdict header, since that is the order seen; clicking
    verdict there toggles its direction as usual.
 
+**Round 3b — triangle area is the missed profit (decision 28, same day).** Module: each `otherFills`
+event gains `ourUnitsThen` (the units of the type we had listed in the event's scope at `to`: the
+sum over our orders open then, per the order log's latest path entry at or before `to`, its
+`volumeTotal` for an order open but not yet sighted; 0 with no order), `unitsCounted =
+min(units, ourUnitsThen)`, `landedCost` (the type's per-unit landed cost of rule 6, null when no lot
+covers it), `netPerUnit = price × (1 - taxRate) - landedCost` (null without a cost) and
+`lostProfit = unitsCounted × netPerUnit` (null without a cost; 0 with nothing listed). Page: the
+triangles leave Plot's dot mark and are drawn by hand under the sale dots, one per cluster, its
+area that of a circle of radius `radiusOf(|sum of lostProfit|)` on the one profit scale (so a
+triangle enters `M`); upward in the ink colour when the sum is positive, downward in the loss
+colour when negative (their price under our cost: a sale we were better off missing); at the floor
+size when the sum is 0 (nothing listed then) or no event has a cost; hollow as before when any
+event's order vanished. The tooltip gives per event the units, their price, the units of ours
+listed then and the ISK missed (or "no landed cost: no lot covers the type" / "nothing of ours
+listed then"); the legend keys say "missed profit (their sale, our cost): area = what we would have
+made at their price" and "a sale we were better off missing: their price under our cost"; the
+footnote says the units counted are at most what we had listed.
+
 Gate: `node --test test/*.test.js` green (new tests for the events: a drop, a gone, an expiry, a
 relist, the 304 lower bound, the window edge, a type with sales but no order); Fable's browser check
 on the local data: the shared scale against the table's figures, the two line weights, triangles
@@ -752,6 +770,13 @@ where the logs show competitor fills, the default sort with the stored key clear
     Rocky: "default sort should be character as primary sort and verdict as sub sort (in fact lets
     make character always be the sub sort unless primary sort is character in which case it should
     be verdict that is used as the sub sort)"). Decision 19's default by verdict is reversed.
+28. A triangle's area is the profit we would have made had the other seller's sale been ours
+    (2026-11-26, Rocky: "triangle area should indicate estimated lost profits (what our profit would
+    be if we sold it instead)"), on the same scale as the sale dots: their price net of sales tax
+    less our landed cost, times their units capped at the units we had listed at that moment (we
+    could not have sold more; a fill while we had no sell order counts nothing). A negative figure
+    (their price under our cost) is a downward triangle in the loss colour; no landed cost (no lot
+    covers the type) keeps the floor size and says so. Rocky confirmed all five points as proposed.
 
 ### Still open
 

@@ -626,22 +626,38 @@
 		.sw.lineGap {
 			background: linear-gradient(to right, #9c9b94 0 6px, transparent 6px 12px, #9c9b94 12px) left bottom / 100% 2px no-repeat;
 		}
-		/* other sellers' fills (decision 26): an upward triangle, solid; hollow is a surface-coloured triangle
-		   layered inside it, leaving an outline */
+		/* other sellers' fills (decisions 26 and 28): a triangle, apex up in ink for a missed profit, apex down in the
+		   loss colour for a sale we were better off missing; hollow is a surface-coloured triangle layered inside it,
+		   leaving an outline. Legend swatches: .sw.tri, .sw.triDown, .sw.tri.triHollow; tooltip keys: .tk.tri,
+		   .tk.triHollow, .tk.triDown, .tk.triDownHollow */
 		.sw.tri,
-		#tip .tk.tri {
+		.sw.triDown,
+		#tip .tk.tri,
+		#tip .tk.triHollow,
+		#tip .tk.triDown,
+		#tip .tk.triDownHollow {
 			position: relative;
 			width: 12px;
 			height: 11px;
 			background: #52514e;
 			clip-path: polygon(50% 0, 100% 100%, 0 100%);
 		}
-		#tip .tk.tri {
+		#tip .tk.tri,
+		#tip .tk.triHollow,
+		#tip .tk.triDown,
+		#tip .tk.triDownHollow {
 			width: 10px;
 			height: 9px;
 		}
+		.sw.triDown,
+		#tip .tk.triDown,
+		#tip .tk.triDownHollow {
+			background: #e34948;
+			clip-path: polygon(0 0, 100% 0, 50% 100%);
+		}
 		.sw.triHollow::after,
-		#tip .tk.triHollow::after {
+		#tip .tk.triHollow::after,
+		#tip .tk.triDownHollow::after {
 			content: '';
 			position: absolute;
 			left: 24%;
@@ -650,6 +666,10 @@
 			height: 52%;
 			background: #fcfcfb;
 			clip-path: polygon(50% 0, 100% 100%, 0 100%);
+		}
+		#tip .tk.triDownHollow::after {
+			top: 18%;
+			clip-path: polygon(0 0, 100% 0, 50% 100%);
 		}
 		.chartBody {
 			position: relative;

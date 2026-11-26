@@ -1484,7 +1484,9 @@ test('row.lots: the type\'s lots with units left, newest first, as facts.lots gi
 
 //--- Phase 6: other sellers' fills (decision 26)
 
-const fill = (from, to, units, price, orderId, kind, locationId = D) => ({ from, to, units, price, orderId, locationId, kind });
+const fill = (from, to, units, price, orderId, kind, locationId = D, missed = {}) => ({ from, to, units, price, orderId, locationId, kind, ...missed });
+// an event's sighting fields (decision 26), without the missed profit (decision 28)
+const sighting = ({ from, to, units, price, orderId, locationId, kind }) => ({ from, to, units, price, orderId, locationId, kind });
 const hoursAgo = (h) => ago(h * HOUR);
 
 // Type T at D over a 2-day window (hours ago). Checks: stored at 20, 10, 8, 6, 4 and 2 h, 304s at 12 and 7 h.
@@ -1521,11 +1523,15 @@ test("other sellers' fills: drops bounded by the check before (a 304 too), gones
 	const at = hoursAgo;
 	const out = run(fillsFixture());
 	assert.deepEqual(Object.keys(out.otherFills).map(Number), [T]);
-	assert.deepEqual(out.otherFills[T], [
+	assert.deepEqual(out.otherFills[T].map(sighting), [
 		fill(at(12), at(10), 2, 90, 901, 'drop'), // the 304 at 12 h bounds it; the price before the re-price
 		fill(at(7), at(6), 4, 95, 902, 'gone'),   // last seen at 8 h; the 304 at 7 h still listed it
 		fill(at(7), at(6), 2, 96, 904, 'gone'),   // re-issued at 11 h: not expired
 		fill(at(6), at(4), 2, 88, 901, 'drop')
+	]);
+	// our 11 listed 5 throughout; no lot covers T
+	assert.deepEqual(out.otherFills[T].map(e => [e.ourUnitsThen, e.unitsCounted, e.landedCost, e.netPerUnit, e.lostProfit]), [
+		[5, 2, null, null, null], [5, 4, null, null, null], [5, 2, null, null, null], [5, 2, null, null, null]
 	]);
 
 	// region scope: the other station's order too
@@ -1558,10 +1564,12 @@ test("other sellers' fills: only `to` inside (now - window, now]; a check after 
 		} } } },
 		thresholds: { windowMs: DAY }
 	});
-	assert.deepEqual(out.otherFills[T], [
+	assert.deepEqual(out.otherFills[T].map(sighting), [
 		fill(ago(DAY), ago(DAY - MIN), 2, 51, 922, 'drop'),
 		fill(ago(DAY), ago(DAY - MIN), 2, 53, 924, 'gone')
 	]);
+	// our 11 has no order log: its feed row's one unit, never sighted, counts by its volumeTotal
+	assert.deepEqual(out.otherFills[T].map(e => [e.ourUnitsThen, e.unitsCounted]), [[1, 1], [1, 1]]);
 });
 
 test("other sellers' fills: a relist is a new competing order at the same station, first seen at the vanishing check, with the vanished units", () => {
@@ -1611,7 +1619,8 @@ test("other sellers' fills: a type we only sold in the window takes the sale's s
 	});
 	const ids = (out) => out.otherFills[T2].map(e => e.orderId);
 	const atD = run(input([sale({ locationId: D })]));
-	assert.deepEqual(atD.otherFills, { [T2]: [fill(at(6), at(4), 1, 40, 931, 'drop')] });
+	// no order of ours in the window: nothing of ours was listed, and no lot covers T2
+	assert.deepEqual(atD.otherFills, { [T2]: [fill(at(6), at(4), 1, 40, 931, 'drop', D, { ourUnitsThen: 0, unitsCounted: 0, landedCost: null, netPerUnit: null, lostProfit: null })] });
 	assert.deepEqual(ids(run(input([sale({ locationId: D })], { thresholds: { scope: 'region' } }))), [931, 932]);
 	assert.deepEqual(ids(run(input([sale({ locationId: D })], { stations: {} }))), [931]); // the type's only book-log region
 	assert.deepEqual(ids(run(input([sale()]))), [931, 932]);                               // a sale row without a station
@@ -1630,4 +1639,56 @@ test("other sellers' fills: [] for a type with no competitor change or no book l
 	});
 	assert.deepEqual(out.otherFills, { [T2]: [], [T3]: [] });
 	assert.deepEqual(compute({ now: NOW }).otherFills, {});
+});
+
+// Decision 28, type T over a 2-day window (hours ago), tax 3.37 %, landed cost 66 a unit (60 + 5 haul + 1 fee):
+// our 21 at D lists 5 from its issue at 21 h, 3 left by the 8 h check; our 22 at D, issued at 5 h with 7
+// units, is first sighted at 3 h with 6 left; our 23 lists 4 at another station from 21 h. Competitors at D:
+// 951 at 40 has 2 fewer by 25 h, before any order of ours; 952 at 98 has 300 fewer by 10 h; 953 at 50, under
+// our cost, has 2 fewer by 4 h.
+const missedFixture = () => {
+	const at = hoursAgo;
+	const seen = (rec) => ({ ...rec, lastSeen: at(2) });
+	return {
+		openOrders: { [GRANT]: { fetchedAt: ago(5 * MIN), orders: [
+			mine({ id: 21, price: 100, remain: 3, total: 5, issued: at(21) }),
+			mine({ id: 22, price: 100, remain: 6, total: 7, issued: at(5) }),
+			mine({ id: 23, price: 120, remain: 4, issued: at(21), loc: ELSEWHERE })
+		] } },
+		orderLogs: { [GRANT]: {
+			21: logEntry({ total: 5, path: [[at(20), 100, 5, at(21)], [at(8), 100, 3, at(21)]] }),
+			22: logEntry({ total: 7, path: [[at(3), 100, 6, at(5)]] }),
+			23: logEntry({ loc: ELSEWHERE, path: [[at(20), 120, 4, at(21)]] })
+		} },
+		bookLogs: { [T]: { [REGION]: { samples: [30, 25, 20, 10, 6, 4, 2].map(h => ({ at: at(h), stored: true })), orders: {
+			951: seen(bookLogOrder({ path: [[at(30), 40, 10, at(31)], [at(25), 40, 8, at(31)]] })),
+			952: seen(bookLogOrder({ path: [[at(20), 98, 400, at(31)], [at(10), 98, 100, at(31)]] })),
+			953: seen(bookLogOrder({ path: [[at(20), 50, 4, at(31)], [at(4), 50, 2, at(31)]] }))
+		} } } },
+		facts: { sells: [], lots: [lotFact({ qty: 10, unitPrice: 60, haul: 5, fee: 1 })], relists: [] },
+		thresholds: { windowMs: 2 * DAY }
+	};
+};
+const missedRow = (e) => [e.orderId, e.ourUnitsThen, e.unitsCounted, e.landedCost, e.netPerUnit, e.lostProfit];
+
+test("other sellers' fills, missed profit: their units capped at ours listed then, net of tax less our landed cost", () => {
+	const out = run(missedFixture());
+	const net = (price) => price * (1 - 0.0337) - 66;
+	assert.deepEqual(out.otherFills[T].map(missedRow), [
+		[951, 0, 0, 66, net(40), 0],             // before any order of ours: nothing listed, nothing counted (0, not -0)
+		[952, 5, 5, 66, net(98), 5 * net(98)],   // their 300 against our 5 listed: 5 count
+		[953, 10, 2, 66, net(50), 2 * net(50)]   // our 21's 3 left, and 22's 7 (open since 5 h, first sighted at 3 h)
+	]);
+	assert.ok(net(50) < 0 && out.otherFills[T][2].lostProfit < 0); // their price under our cost: a sale better missed
+	assert.deepEqual(Object.keys(out.otherFills[T][0]), [
+		'from', 'to', 'units', 'price', 'orderId', 'locationId', 'kind', 'ourUnitsThen', 'unitsCounted', 'landedCost', 'netPerUnit', 'lostProfit'
+	]);
+
+	// region scope: our 23 at the other station is listed in the event's scope too
+	const region = run({ ...missedFixture(), thresholds: { windowMs: 2 * DAY, scope: 'region' } });
+	assert.deepEqual(region.otherFills[T].map(e => [e.orderId, e.ourUnitsThen, e.unitsCounted]), [[951, 0, 0], [952, 9, 9], [953, 14, 2]]);
+
+	// no lot covers the type: no cost, so no net and no missed profit, while the units still count
+	const noLot = run({ ...missedFixture(), facts: { sells: [], lots: [], relists: [] } });
+	assert.deepEqual(noLot.otherFills[T].map(missedRow), [[951, 0, 0, null, null, null], [952, 5, 5, null, null, null], [953, 10, 2, null, null, null]]);
 });

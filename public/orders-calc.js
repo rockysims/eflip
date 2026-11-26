@@ -189,6 +189,15 @@
 //     unknown), and a cancel-and-relist (another competing sell order at the same station first seen
 //     at `to` with volumeTotal equal to the vanished units). Only events with `to` in (now - windowMs,
 //     now]. A first sighting below volumeTotal is no event: the units may have gone before the log.
+//     After kind, the profit we missed (decision 28): ourUnitsThen, the units of the type our orders
+//     listed in the event's scope at `to` (station scope: ours at the event's station; region scope:
+//     ours anywhere in its region), over those whose open span covers `to` (start <= to < end), each
+//     by its latest path entry seen at or before `to`, else (open but not yet sighted) its volumeTotal,
+//     else its first entry's volumeRemain; 0 for a type with no order of ours in the window.
+//     unitsCounted = min(units, ourUnitsThen); landedCost, the type's per-unit landed cost of rule 6
+//     (null when no lot covers it); netPerUnit = price × (1 - taxRate) - landedCost and lostProfit =
+//     unitsCounted × netPerUnit, both null without a cost; lostProfit is 0 when nothing of ours was
+//     listed and negative when their price is under our cost (a sale we were better off missing).
 //   totals: {count, units, gross, net, profit, relistFees, pendingUnits, share} for the window.
 //   feeRates (decision 15): {[characterId]: {[locationId]: {rate, rows, since, est, observations:
 //     [{date, rate, orderId, typeId}]}}} per pooled character with an observation: observations are
@@ -934,6 +943,20 @@
 		return { start, end: rec.end && rec.end.atMs !== null ? rec.end.atMs : null };
 	};
 
+	// Decision 28: the units an order of ours listed at `ms`: the volumeRemain of its latest path entry
+	// seen at or before `ms`; while open but not yet sighted, its volumeTotal, else its first entry's
+	// volumeRemain (the caller checks the order was open at `ms`).
+	const listedAt = (rec, ms) => {
+		let best = null;
+		for (const e of rec.path) {
+			if (e.atMs !== null && e.volumeRemain !== null && e.atMs <= ms && (best === null || e.atMs >= best.atMs)) best = e;
+		}
+		if (best !== null) return best.volumeRemain;
+		if (num(rec.volumeTotal) !== null) return rec.volumeTotal;
+		const first = rec.path.find(e => e.volumeRemain !== null);
+		return first ? first.volumeRemain : 0;
+	};
+
 	// Rule 8: the order of the same character and type (and location, when the sale row carries one)
 	// whose logged price at the sale's time equals the unit price ('unique'; 'ambiguous' and null when
 	// several). When no logged price matches, the one such order open at the sale's time ('byTime': a
@@ -1540,8 +1563,10 @@
 
 		// decision 26: other sellers' fills, per type with presence, a sale or a pending fill in the window,
 		// from the competitors presence would count (by our orders' stations); a type with no order of
-		// ours in the window by the stations of its sales and pending fills, else its whole book logs
+		// ours in the window by the stations of its sales and pending fills, else its whole book logs.
+		// Decision 28: each with the profit we missed, their units capped at ours listed in its scope then.
 		const otherFills = {};
+		const openAt = (own, ms) => own.span.start !== null && own.span.start <= ms && (own.span.end === null || ms < own.span.end);
 		const fillTypes = [...new Set([...ownsByType.keys(), ...salesClusters.map(c => c.typeId), ...pending.map(p => p.typeId)])]
 			.filter(typeId => typeId !== null).sort((a, b) => a - b);
 		for (const typeId of fillTypes) {
@@ -1569,11 +1594,21 @@
 				}
 				if (groups.size === 0) for (const rid of logRegions) groups.set(`${rid}`, { regionId: rid, locationId: null, scope: 'region' });
 			}
+			const { landedCost } = landedOf(typeId);
 			const events = [];
 			for (const g of groups.values()) {
 				const log = bookLogOf(typeId, g.regionId);
 				if (log === null) continue;
-				events.push(...otherFillsOf(log, competitorsIn(log, g.locationId, ownIds, g.scope), ownIds, presenceFrom, nowMs));
+				for (const e of otherFillsOf(log, competitorsIn(log, g.locationId, ownIds, g.scope), ownIds, presenceFrom, nowMs)) {
+					const atMs = toMs(e.to);
+					const ourUnitsThen = sum(owns.filter(own => (g.scope === 'region' ? own.regionId === g.regionId : own.rec.locationId === e.locationId) && openAt(own, atMs)),
+						own => listedAt(own.rec, atMs));
+					const unitsCounted = Math.min(e.units, ourUnitsThen);
+					const netPerUnit = landedCost === null || e.price === null ? null : e.price * (1 - taxRate) - landedCost;
+					// nothing listed counts 0 (never -0 from a negative netPerUnit)
+					const lostProfit = netPerUnit === null ? null : unitsCounted === 0 ? 0 : unitsCounted * netPerUnit;
+					events.push({ ...e, ourUnitsThen, unitsCounted, landedCost, netPerUnit, lostProfit });
+				}
 			}
 			otherFills[typeId] = events.sort((a, b) => toMs(a.to) - toMs(b.to) || a.orderId - b.orderId);
 		}

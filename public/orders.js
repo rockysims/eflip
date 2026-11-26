@@ -19,8 +19,9 @@
 //
 // Colour follows the dataviz skill: the documented blue and red pair for profit and loss, the status-like
 // verdict badges always with their word, and no mark or colour carries meaning alone (a loss is a square,
-// a profit a circle; pending is hollow; another seller's fill a triangle; the presence lines differ in weight as
-// well as colour; every mark has a tooltip, a legend entry and a row in the table).
+// a profit a circle; pending is hollow; another seller's fill a triangle, pointing down when missing it was a
+// gain; the presence lines differ in weight as well as colour; every mark has a tooltip, a legend entry and a
+// row in the table).
 // Light theme only, like the other pages.
 (() => {
 	if (typeof document === 'undefined') return;
@@ -1444,19 +1445,32 @@
 	const stretchText = (fromMs, toMs) => (Number.isFinite(fromMs) && fromMs < toMs
 		? `between ${clockOrDate(fromMs)} and ${clockOrDate(toMs)} (EVE ${eveTime(fromMs)} and ${eveTime(toMs)})`
 		: `by ${whenText(toMs)}`);
+	// An event with a figure of 0 because nothing of ours was listed then (decision 28: it counts no units).
+	const nothingListed = (e) => e.lostProfit === 0 && !(isNum(e.unitsCounted) && e.unitsCounted > 0);
+	// The tooltip of a triangle (decision 28): the missed profit of the cluster, then per fill the ISK missed, the
+	// units, their price, ours listed then, the stretch and their order.
 	const otherTip = (c) => {
 		const shown = c.events.slice().sort((a, b) => msOf(a.to) - msOf(b.to));
 		const rows = shown.slice(0, 8).map(e => ({
-			shape: e.kind === 'gone' ? 'triHollow' : 'tri',
-			value: `${plural(isNum(e.units) ? e.units : 0, 'unit')} at ${price(e.price)}`,
-			name: `${stretchText(e.from ? msOf(e.from) : NaN, msOf(e.to))} · their order ${e.orderId}; ${e.kind === 'gone' ? 'vanished: sold out, or pulled' : 'fewer left'}`
+			shape: `tri${isNum(e.lostProfit) && e.lostProfit < 0 ? 'Down' : ''}${e.kind === 'gone' ? 'Hollow' : ''}`,
+			value: isNum(e.lostProfit) ? fmtIsk(e.lostProfit, true) : DASH,
+			name: `${plural(isNum(e.units) ? e.units : 0, 'unit')} at ${price(e.price)}${isNum(e.ourUnitsThen) ? `, ${fmtQty(e.ourUnitsThen)} of ours listed then` : ''} · ${stretchText(e.from ? msOf(e.from) : NaN, msOf(e.to))} · their order ${e.orderId}; ${e.kind === 'gone' ? 'vanished: sold out, or pulled' : 'fewer left'}`
 		}));
 		if (shown.length > 8) rows.push({ value: `+${shown.length - 8}`, name: 'more fills in this triangle' });
-		return {
-			title: `${nameOf(c.typeId)}: ${plural(c.units, 'unit')} sold by other sellers`,
-			rows,
-			note: `The book log sees a fill only between two checks, so the triangle stands at the middle of that stretch.${c.hollow ? ' A vanished order may have been pulled rather than sold out.' : ''}`
-		};
+		const units = plural(c.units, 'unit');
+		const known = c.events.filter(e => isNum(e.lostProfit));
+		const allNothing = known.length > 0 && known.every(nothingListed);
+		const title = !c.costKnown ? `${nameOf(c.typeId)}: ${units} sold by other sellers, cost unknown`
+			: c.value === 0 && allNothing ? `${nameOf(c.typeId)}: ${units} sold by other sellers, nothing of ours listed then`
+			: `${nameOf(c.typeId)}: ${fmtIsk(c.value, true)} missed on ${units} sold by other sellers`;
+		const notes = ['The book log sees a fill only between two checks, so the triangle stands at the middle of that stretch.'];
+		if (c.costKnown) notes.push('The figure is their price net of sales tax less our landed cost, over at most the units we had listed then.');
+		if (isNum(c.value) && c.value < 0) notes.push('Their price was under our cost: a sale we were better off missing.');
+		if (known.length < c.events.length) notes.push('No lot covers this item, so its cost and the missed profit are unknown.');
+		if (allNothing) notes.push('Nothing of ours was listed then, so nothing was missed.');
+		else if (known.some(nothingListed)) notes.push('Where nothing of ours was listed, nothing was missed.');
+		if (c.hollow) notes.push('A vanished order may have been pulled rather than sold out.');
+		return { title, rows, note: notes.join(' ') };
 	};
 
 	// The total column's tooltip (decision 17): the item's sales, units, gross, net and profit over the window,
@@ -1534,8 +1548,9 @@
 	// Other sellers' fills (decision 26): the module's `otherFills` events of the chart's rows, clustered per item
 	// like the sale dots. An event's stretch runs from the last book check before the fill (`from`; `to` when
 	// there is none) to the check that saw it (`to`), cut to the window for drawing; an event joins the open
-	// cluster when its stretch's midpoint is within `gapMs` of the previous event's. Read defensively: the field
-	// may be absent, and anything malformed is skipped.
+	// cluster when its stretch's midpoint is within `gapMs` of the previous event's. Each cluster's `value` is the
+	// sum of its events' `lostProfit` where that is a number (decision 28), null when none is (`costKnown` false).
+	// Read defensively: the field may be absent, and anything malformed is skipped.
 	const otherFillMarks = (res, types, startMs, now, gapMs) => {
 		const all = res.otherFills && typeof res.otherFills === 'object' ? res.otherFills : null;
 		const out = [];
@@ -1566,7 +1581,12 @@
 				if (x.e.kind === 'gone') cur.hollow = true;
 			}
 		}
-		for (const c of out) c.atMs = (c.fromMs + c.toMs) / 2;
+		for (const c of out) {
+			c.atMs = (c.fromMs + c.toMs) / 2;
+			const known = c.events.filter(e => isNum(e.lostProfit));
+			c.costKnown = known.length > 0;
+			c.value = c.costKnown ? known.reduce((a, e) => a + e.lostProfit, 0) : null;
+		}
 		return out;
 	};
 
@@ -1632,7 +1652,6 @@
 	const ROW_H = 34;
 	const LINE_INSET = 5;     // px from a row's bottom edge to its presence line
 	const COL_GAP = RMAX + 4; // the total column's divider clears a sale dot at the right edge (now)
-	const TRI_R = 5;          // px: the fixed size of an other sellers' fill triangle (Plot's symbol radius)
 	const LISTED_GREY = '#9c9b94'; // the presence line while listed but undercut (decision 25)
 
 	const drawTimeline = (res, width) => {
@@ -1640,12 +1659,13 @@
 		const now = data.now;
 		const m = timelineModel(res, now, win.ms);
 		if (m === null) return null;
-		// one sqrt scale for the sale dots, the pending marks and the total column (decision 24): the largest
-		// absolute profit among all of them at RMAX, anything under RMIN drawn at RMIN
+		// one sqrt scale for the sale dots, the pending marks, the total column (decision 24) and the triangles'
+		// missed profit (decision 28): the largest absolute profit among all of them at RMAX, anything under RMIN
+		// drawn at RMIN
 		const wide = width >= 640; // the total's figure beside its mark
 		const totals = m.types.map(id => m.totals.get(id));
 		const magOf = (v) => (isNum(v) ? Math.abs(v) : 0);
-		const M = Math.max(1, ...m.marks.map(k => magOf(k.profit)), ...totals.map(t => magOf(t.value)));
+		const M = Math.max(1, ...m.marks.map(k => magOf(k.profit)), ...totals.map(t => magOf(t.value)), ...m.others.map(k => magOf(k.value)));
 		const floor = M * (RMIN / RMAX) ** 2;
 		for (const k of m.marks) k.mag = Math.max(magOf(k.profit), floor);
 		const radiusOf = (mag) => RMAX * Math.sqrt(Math.max(mag, floor) / M);
@@ -1663,13 +1683,6 @@
 			Plot.rect(m.types.filter((_, i) => i % 2 === 0), { x1: () => startDate, x2: () => endDate, y: (d) => d, fill: STRIPE }),
 			Plot.gridX({ stroke: GRID, strokeOpacity: 1, strokeWidth: 1 })
 		];
-		// other sellers' fills (decision 26): upward triangles of a fixed size (a constant r, outside the profit
-		// scale), before the sale dots so that they sit under them; hollow when an order vanished
-		const triangles = (list, paint) => {
-			if (list.length > 0) marks.push(Plot.dot(list, { x: (d) => new Date(d.atMs), y: 'typeId', r: TRI_R, symbol: 'triangle', ...paint }));
-		};
-		triangles(m.others.filter(k => !k.hollow), { fill: INK2, fillOpacity: 0.9, stroke: SURFACE, strokeWidth: 1 });
-		triangles(m.others.filter(k => k.hollow), { fill: SURFACE, fillOpacity: 1, stroke: INK2, strokeWidth: 2 });
 		const dots = (list, symbol, fill, stroke) => {
 			if (list.length > 0) marks.push(Plot.dot(list, { x: (d) => new Date(d.atMs), y: 'typeId', r: 'mag', symbol, fill, fillOpacity: fill === SURFACE ? 1 : 0.9, stroke, strokeWidth: 2 }));
 		};
@@ -1687,7 +1700,7 @@
 			marks
 		});
 		plot.setAttribute('role', 'group');
-		plot.setAttribute('aria-label', `Sales timeline of the last ${win.label}: one row per item, the highest profit over the window first; one mark per sale or burst of sales, area proportional to profit; after a dashed divider, each item's total on the same scale${m.others.length > 0 ? '; small triangles where the item sold through another seller\'s order, each at the middle of the stretch between the two book checks that bound the fill, hollow where their order vanished (sold out, or pulled)' : ''}${drawPresence ? '; and near the bottom of each row, a line while we had a sell order listed, thick and dark while it was the lowest at its station and thin and grey while someone was lower' : ''}. The table below has the same figures.`);
+		plot.setAttribute('aria-label', `Sales timeline of the last ${win.label}: one row per item, the highest profit over the window first; one mark per sale or burst of sales, area proportional to profit; after a dashed divider, each item's total on the same scale${m.others.length > 0 ? '; triangles where the item sold through another seller\'s order, area proportional to the profit we would have made selling those units at their price (at most the units we had listed then), on the same scale, pointing down in red where their price was under our cost, each at the middle of the stretch between the two book checks that bound the fill, at the smallest size where nothing of ours was listed or the cost is unknown, hollow where their order vanished (sold out, or pulled)' : ''}${drawPresence ? '; and near the bottom of each row, a line while we had a sell order listed, thick and dark while it was the lowest at its station and thin and grey while someone was lower' : ''}. The table below has the same figures.`);
 		for (const g of plot.querySelectorAll(':scope > g')) g.setAttribute('aria-hidden', 'true');
 		const sx = plot.scale('x');
 		const sy = plot.scale('y');
@@ -1737,6 +1750,28 @@
 			}
 			insert(g, firstDot);
 		}
+		// the triangles (decision 28), above the presence lines and whiskers and under the sale dots: an equilateral
+		// triangle with the area of a circle of radiusOf(|missed profit|), its bounding box centred on the row's
+		// centre line so the largest still fits the row; apex up in ink, apex down in the loss colour when their price
+		// was under our cost; the floor size when nothing was listed or the cost is unknown; hollow when an order vanished
+		const triR = (k) => radiusOf(magOf(k.value));
+		if (m.others.length > 0) {
+			const g = svgNode('g', { 'aria-hidden': 'true' });
+			for (const k of m.others) {
+				const r = triR(k);
+				const side = Math.sqrt(4 * Math.PI * r * r / Math.sqrt(3));
+				const h = side * Math.sqrt(3) / 2;
+				const down = isNum(k.value) && k.value < 0;
+				const cx = sx.apply(new Date(k.atMs));
+				const cy = rowCentre(k.typeId);
+				const apex = down ? cy + h / 2 : cy - h / 2;
+				const base = down ? cy - h / 2 : cy + h / 2;
+				const tone = down ? LOSS : INK2;
+				const paint = k.hollow ? { fill: SURFACE, stroke: tone, 'stroke-width': 2 } : { fill: tone, 'fill-opacity': 0.9, stroke: SURFACE, 'stroke-width': 1 };
+				g.append(svgNode('polygon', { points: `${cx},${apex} ${cx + side / 2},${base} ${cx - side / 2},${base}`, 'stroke-linejoin': 'round', ...paint }));
+			}
+			insert(g, firstDot);
+		}
 		// the total column: a dashed divider, a mark per item, its figure on wide charts, "total" in the axis row
 		const col = svgNode('g', { 'aria-hidden': 'true' });
 		col.append(svgNode('line', { x1: divX, x2: divX, y1: marginTop, y2: bottom, stroke: AXIS, 'stroke-width': 1, 'stroke-dasharray': '3 3' }));
@@ -1764,7 +1799,7 @@
 		// then the sales, pending fills and totals, row by row; each group is one tab stop
 		attachTargets(plot, presenceTargets, 'When we were listed and on top, arrow keys move between the stretches');
 		const otherTargets = m.others.map(k => ({
-			row: m.types.indexOf(k.typeId), x: sx.apply(new Date(k.atMs)), y: rowCentre(k.typeId), r: Math.max(11, TRI_R + 3), tip: otherTip(k)
+			row: m.types.indexOf(k.typeId), x: sx.apply(new Date(k.atMs)), y: rowCentre(k.typeId), r: Math.max(11, triR(k) + 3), tip: otherTip(k)
 		}));
 		attachTargets(plot, otherTargets.sort((a, b) => a.row - b.row || a.x - b.x), 'Units sold through other sellers\' orders, arrow keys move between them');
 		const markTargets = m.marks.map(k => ({
@@ -1786,8 +1821,9 @@
 		];
 		if (drawn && drawn.othersDrawn > 0) {
 			keys.push(
-				['<span class="sw tri"></span>', 'sold by another seller (fewer units left in their order)'],
-				['<span class="sw tri triHollow"></span>', 'their order vanished (sold out, or pulled)']);
+				['<span class="sw tri"></span>', 'missed profit: units sold through another seller\'s order, area = what we would have made at their price'],
+				['<span class="sw triDown"></span>', 'a sale we were better off missing: their price under our cost'],
+				['<span class="sw tri triHollow"></span>', 'hollow: their order vanished (sold out, or pulled)']);
 		}
 		if (showPresence) {
 			keys.push(
@@ -1795,7 +1831,7 @@
 				['<span class="sw line lineListed"></span>', 'thin grey line: listed, someone lower'],
 				['<span class="sw line lineGap"></span>', 'a gap: no sell order of ours']);
 		}
-		keys.push(['', 'dot area = profit, one scale for the sales and the totals']);
+		keys.push(['', 'dot and triangle area = profit, one scale for the sales, the totals and the missed sales']);
 		return keys.map(([sw, label]) => `<span class="key" role="listitem">${sw}${esc(label)}</span>`).join('');
 	};
 
@@ -1852,7 +1888,7 @@
 		const foot = [
 			`Each row is an item, the highest profit over the window on top; items with only pending fills follow. Sales of one item within ${dur(clusterGap(win.ms))} of each other are one dot. Dots under ${RMIN} px radius are drawn at ${RMIN} px, so the smallest profits read as larger than they are. Times are local; EVE time is in parentheses.`,
 			drawn ? `The total column after the dashed line is on the same scale as the sale dots: its mark's area is the item's profit over the window${drawn.wide ? ' (the figure beside it)' : ''}, so a total compares by eye with the sales that make it up.` : '',
-			drawn && drawn.othersDrawn > 0 ? 'A triangle marks units sold through another seller\'s order. The book log sees such a fill only between two checks, so the triangle stands at the middle of the stretch between the two checks that bound it, with a faint whisker across that stretch when it is long; one triangle stands for the fills of an item close together. It is hollow when their order vanished, which may be a pull rather than a sale; orders that expired or were cancelled and relisted are left out.' : '',
+			drawn && drawn.othersDrawn > 0 ? 'A triangle marks units sold through another seller\'s order; its area is the profit we would have made selling them at their price (their price net of sales tax, less our landed cost), counting at most the units we had listed at the time. It points down, in red, when their price was under our cost. The book log sees such a fill only between two checks, so the triangle stands at the middle of that stretch, with a faint whisker across it when it is long; one triangle stands for the fills of an item close together. A triangle at the smallest size had nothing of ours listed then, or no known cost. It is hollow when their order vanished, which may be a pull rather than a sale; orders that expired or were cancelled and relisted are left out.' : '',
 			res.pending.length > 0 ? `${plural(res.pending.length, 'hollow mark')}: units the order log saw fill that the wallet has not caught up with (ESI holds transactions back up to an hour).` : '',
 			showPresence && drawn
 				? (drawn.presenceDrawn > 0
