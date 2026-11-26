@@ -301,18 +301,17 @@ Fixtures are small hand-written order/history arrays.
       window. Shown like `days idle`, as "≥ n" when nobody moved in the
       observed time (`avgDaysIdleCensored`: a lower bound), blank without
       observation. It sorts and filters by the number. Its help says all of
-      this; its tooltip says what the figure stands on ("observed 2.6 of 3
-      days (events gap 3 h, 61 samples, median gap 1 h)") or "no
-      observation". It is observed only, so it carries no mark. `days idle`
+      this; its tooltip says what the figure stands on ("2% observed (6
+      samples)", the events coverage) or "no observation". It is observed only, so it carries no mark. `days idle`
       is unchanged and stays beside it.
     - `rivals` and `daily profit` cells get the class `observed` (a dotted
       underline, `td.observed` in `export.html`) when the fraction behind them
       is above 0: the events fraction for rivals, the volume fraction for daily
-      profit (through demand). Their tooltips end with both figures and the
-      covered share: "observed f=0.62 (events gap 3 h): 1.9 observed · 2.4
-      model" for rivals, "demand observed f=0.40 (volume gap 24 h): 2.01/day
-      observed · 0.51/day model" for daily profit. A row without coverage has
-      neither the mark nor the sentence. The mark is never the only carrier of
+      profit (through demand). Their tooltips end with the observed share only:
+      "40% observed" for rivals, "demand 40% observed" for daily profit (Rocky,
+      2026-11-25: "make them more concise"; the figures behind the blend stay in
+      the report and the saved run). A row without coverage has neither the
+      mark nor the sentence. The mark is never the only carrier of
       the meaning: the column helps and the tooltips say it in words, and red
       (item 10) stays reserved for limits, so one cell can be both red and
       dotted.

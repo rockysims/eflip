@@ -465,6 +465,86 @@ test('POST /api/market-stats rejects malformed bodies with 400', async (t) => {
 	assert.equal(huge.status, 413);
 });
 
+// ---- the regional book: POST /api/sync regionBook, /api/config regionBook
+
+const regionRows = [
+	{ order_id: 1, type_id: 35, price: 100, is_buy_order: false, volume_remain: 5, volume_total: 10, issued: '2026-11-20T10:00:00Z', duration: 90, range: 'region', location_id: 60008494, system_id: 30002187, min_volume: 1 },
+	{ order_id: 2, type_id: 36, price: 90, is_buy_order: true, volume_remain: 5, volume_total: 10, issued: '2026-11-20T10:00:00Z', duration: 90, range: 'region', location_id: 60008494, system_id: 30002187, min_volume: 1 },
+];
+
+test('GET /api/config says whether the hourly regional book job is on, and GET /api/sync how the last run ended', async (t) => {
+	const off = await startApp(t);
+	assert.deepEqual((await off.get('/api/config')).json.regionBook, { enabled: false });
+	assert.equal((await off.get('/api/sync')).json.regionBook.enabled, false);
+	assert.equal((await off.get('/api/sync')).json.regionBook.status, null);
+	const on = await startApp(t, { env: { EFLIP_REGION_BOOK: '1' } });
+	assert.deepEqual((await on.get('/api/config')).json.regionBook, { enabled: true });
+	assert.equal((await on.get('/api/sync')).json.regionBook.enabled, true);
+	const odd = await startApp(t, { env: { EFLIP_REGION_BOOK: 'yes' } });
+	assert.deepEqual((await odd.get('/api/config')).json.regionBook, { enabled: false }, 'only 1 turns it on');
+	const bare = await startApp(t, { configured: false, env: { EFLIP_REGION_BOOK: '1' } });
+	assert.deepEqual((await bare.get('/api/config')).json.regionBook, { enabled: true }, 'beside the other flags, without credentials');
+});
+
+test('POST /api/sync regionBook: true takes the destination region now, false never does, absent follows EFLIP_REGION_BOOK; anything else is a 400', async (t) => {
+	const ctx = await startApp(t);
+	fillIvan(ctx.fake);
+	ctx.fake.market.regionOrders.set('10000043', regionRows);
+	for (const body of [{ regionBook: 'yes' }, { regionBook: 1 }, { regionBook: null }]) {
+		assert.equal((await ctx.post('/api/sync', body)).status, 400, JSON.stringify(body));
+	}
+	const regionCalls = () => ctx.fake.callsTo(/^\/markets\/\d+\/orders$/).filter(call => call.query.order_type !== undefined);
+
+	const plain = await ctx.post('/api/sync', { market: false });
+	assert.equal(plain.json.regionBook, null, 'off unless asked for');
+	assert.equal(regionCalls().length, 0);
+
+	// on request, with the market deferred: the region is where Ivan lists, once his orders are synced
+	ctx.clock.advance(10 * 60 * 1000);
+	const asked = await ctx.post('/api/sync', { market: false, regionBook: true });
+	assert.equal(asked.status, 200);
+	assert.equal(asked.json.market, null);
+	assert.equal(asked.json.regionBook.status, 'ok', JSON.stringify(asked.json.regionBook));
+	assert.equal(asked.json.regionBook.regionId, 10000043);
+	assert.equal(asked.json.regionBook.pages, 1);
+	assert.equal(asked.json.regionBook.typesFolded, 2);
+	assert.equal(asked.json.regionBook.tokensUsed, 2);
+	assert.equal(regionCalls().length, 1);
+	assert.ok(fs.existsSync(path.join(ctx.dataDir, 'ledger', 'market', '10000043', '36.json')), 'the buy order counts: every type, both sides');
+	const status = (await ctx.get('/api/sync')).json.regionBook;
+	assert.equal(status.status, 'ok');
+	assert.equal(status.syncedAt, asked.json.regionBook.syncedAt);
+	assert.equal(status.regionId, 10000043);
+
+	// a named region goes through regionIds
+	ctx.fake.market.regionOrders.set('10000002', regionRows.slice(0, 1));
+	ctx.clock.advance(10 * 60 * 1000);
+	const named = await ctx.post('/api/sync', { market: false, regionBook: true, regionIds: [10000002] });
+	assert.equal(named.json.regionBook.regionId, 10000002);
+});
+
+test('with EFLIP_REGION_BOOK=1 a sync takes the region book after the market, a deferred market defers it, and regionBook: false skips it', async (t) => {
+	const ctx = await startApp(t, { env: { EFLIP_REGION_BOOK: '1' } });
+	fillIvan(ctx.fake);
+	ctx.fake.market.regionOrders.set('10000043', regionRows);
+	const regionCalls = () => ctx.fake.callsTo(/^\/markets\/\d+\/orders$/).filter(call => call.query.order_type !== undefined);
+
+	const deferred = await ctx.post('/api/sync', { market: false });
+	assert.equal(deferred.json.regionBook.status, 'deferred');
+	assert.equal(regionCalls().length, 0);
+
+	const skipped = await ctx.post('/api/sync', { regionBook: false });
+	assert.equal(skipped.json.regionBook, null);
+	assert.equal(skipped.json.market.status, 'ok');
+	assert.equal(regionCalls().length, 0);
+
+	ctx.clock.advance(10 * 60 * 1000);
+	const full = await ctx.post('/api/sync', { force: true });
+	assert.equal(full.json.market.status, 'ok');
+	assert.equal(full.json.regionBook.status, 'ok', JSON.stringify(full.json.regionBook));
+	assert.equal(regionCalls().length, 1);
+});
+
 test('GET /api/config says where the data is and whether EFLIP_DATA_DIR and ESI_USER_AGENT are set, and nothing secret', async (t) => {
 	const bare = await startApp(t);
 	const res = await bare.get('/api/config');

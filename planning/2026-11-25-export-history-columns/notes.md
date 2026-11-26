@@ -209,3 +209,68 @@ See the chat message of 2026-11-25 (batched, with suggested answers). Answers ge
   and the days-of-supply tooltip shows the blended 1.11/day and "stock trend +23.3/day"; rivals
   marked, "observed f=0.02 (events gap 12 h): 0 observed · 1.21 model" → 1.18. Mark I Compact
   Reactor Control Unit (8263, no log): no marks, "no observation", every figure as before.
+
+## Answers at the M1 review gate (Rocky, 2026-11-25)
+
+1. Dotted underline as the mark: "agreed".
+2. Window max(days to clear, 3), capped at 60: "sounds good".
+3. Tooltips: "could be more concise. lets show 20% observed instead of '2/day observed · 0.50/day
+   model' and just remove the volume gap part. basically make them more concise". Done the same
+   day: rivals "40% observed", daily profit "demand 40% observed", avg days idle "2% observed (6
+   samples)"; the figures behind the blend stay in the report and the saved run.
+4. M2: "start when ready (not sure I understand about 'retention')". Retention = how long the raw
+   hourly pages stay on disk before deletion (about 46 MB an hour, so not forever) and how far back
+   each type's folded log keeps its history; the 24-hour measurement sets both from real growth.
+   Two amendments made when briefing P2.1: fetch all orders (not sell-only) so buy orders never look
+   vanished in the shared logs; measure against a 24-hour raw window rather than 48.
+
+## Storage budget with shares (Rocky, 2026-11-25) and its rough edges
+
+Rocky: "perhaps we should assign things shares in a total amount of space allotted so for example I
+could allocate 1GB and then it would save history until 1GB then trim old data ... the 1GB can be
+shared among all the data we want to save while allowing different things to have different
+percentages of the allotted storage space." Written into M2 P2.2 and plan decision 8.
+
+Measured here (a week, two characters): raw/public 63 MB (358 per-type books, 339 histories),
+ledger/market 5.6 MB, character raw about 2 MB, esi-cache 2.9 MB. gzip: a book log 24,193 → 2,297
+bytes (10.5x), a raw page 11,251 → 1,868 (6x).
+
+Rough edges:
+1. Replaceable vs irreplaceable: regional pages, per-type raw books and the logs can be refetched or
+   regrow; character wallet/order raw cannot (ESI keeps only recent history). Only the first group
+   is budgeted.
+2. Trimming a log is a real loss: the raw behind it is gone first, so the oldest history past the
+   budget cannot be rebuilt. That is the budget's purpose; the README says so.
+3. Strict shares waste room (a quiet kind leaves its share empty); soft shares (enforce the total,
+   trim the kind furthest over its share) use it. Proposed: soft.
+4. Floors keep the system working under any budget: the newest snapshot, the newest file per slug,
+   the last 3 days of every log (M1's window floor), the newest run context.
+5. Book-log trimming must hold the market lock (the watch refresh appends every five minutes).
+6. Gzip touches every reader of raw pages and logs; both forms must read, so nothing migrates.
+7. Sizes are file bytes, not disk blocks; close enough. A lowered budget trims at the next run.
+8. Without the budget set, the region job would grow unbounded: the env notice must say so.
+
+## P2.1 as built (agent, 2026-11-25; accepted at review)
+
+- `doSyncRegionBook` under the market lock; `order_type=all`, page 1's X-Pages (cap 400), raw slugs
+  `markets-<region>-orders-order-type-all[-page-n]`; folds only a complete snapshot, one stored
+  sample per type present (all stations, buy and sell), an empty stored sample for a type with a
+  log but no orders; a type with per-type raw but no log is built first (`ensureBookLog`); yields to
+  the event loop every 100 types. Statuses ok | partial | busy | deferred | paused | skipped |
+  failed. An unforced run skips within 55 minutes of the last fold. State in
+  `esi-cache/public/_region-book.json`; measurement as a `kind: 'regionBook'` public sync-log
+  entry with `pageStamps` (the raw page files of the snapshot) for P2.2's replay and trimming.
+- `updateBookLog` reads per-type raw, so `updateBookLogWithRows` folds given rows (byte-equal to
+  foldBook + writeBookLog, tested). `readMarket` skips regionBook entries when choosing regions.
+- Scale check: 194 pages, 193,500 orders, 12,000 types fold in about 3 s, ~450 MB RSS; the first
+  fold made 63 MB of plain-JSON logs; a later hour grew them ~1 MB at 2.5 % of orders re-priced
+  (so ~25 MB a day plain, ~2.5 MB gzipped: the budget defaults can be generous to the logs).
+- Rebuild hazard until P2.2: `scripts/sync.js --rebuild` rebuilds a type's log from per-type raw
+  only, so regional samples are lost for types that also have per-type raw (raw is kept, so
+  recoverable once the replay exists). README warns not to run `--rebuild` while the job is on.
+  P2.2 TODO: "`rebuildBookLogs` must learn to replay regional snapshots (the regionBook entries'
+  `pageStamps` group the raw pages per snapshot) in time order with the per-type checks."
+- Gzip in P2.2 must update `rawFileBytes`, `ledger.bookLogBytes`, `ledger.listBookLogs` (they
+  assume `.json`).
+- `EFLIP_REGION_BOOK=1` makes a full sync take the region book too, but nothing schedules hourly
+  runs; the 24-hour measurement runs as a shell loop of `node scripts/sync.js --region-book`.

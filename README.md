@@ -43,7 +43,7 @@ Each character's chip shows its status (last sync, missing scope, or re-link nee
 
 ## Export page
 
-`export.html` ranks what to buy at the start station and sell at the end station, from the order books and daily history ESI reports. Where the server has watched a type's book at the end station (its book log, see Data), the page also uses what the log observed: daily demand from the units that sold, rivals from the undercuts that happened, and the "avg days idle" column, the mean days between price moves of the sellers near the best price (shown "≥ n" when nobody moved, blank when nothing was observed). Observed and modelled figures are blended by how much of the last max(days to clear, 3) days the log covers, and a blended figure (rivals, daily profit) has a dotted underline; its tooltip gives the covered share, the observed figure and the model figure. A type the server has not watched shows the model alone. Only types in play (listed, in transit, held or sold in the last 90 days) have a log so far. The page asks `POST /api/market-stats` for these figures; `public/market-stats.js` computes them from the book logs on each request.
+`export.html` ranks what to buy at the start station and sell at the end station, from the order books and daily history ESI reports. Where the server has watched a type's book at the end station (its book log, see Data), the page also uses what the log observed: daily demand from the units that sold, rivals from the undercuts that happened, and the "avg days idle" column, the mean days between price moves of the sellers near the best price (shown "≥ n" when nobody moved, blank when nothing was observed). Observed and modelled figures are blended by how much of the last max(days to clear, 3) days the log covers, and a blended figure (rivals, daily profit) has a dotted underline; its tooltip gives the observed share. A type the server has not watched shows the model alone. Only types in play (listed, in transit, held or sold in the last 90 days) have a log so far. The page asks `POST /api/market-stats` for these figures; `public/market-stats.js` computes them from the book logs on each request.
 
 ## Order monitor
 
@@ -76,6 +76,8 @@ To sync from the command line without the server, run `node scripts/sync.js`. Wi
 - `--watch`: one watch refresh, the orders page's five-minute tick: your open orders, then the books and history of the types you have listed. No wallet, assets or contracts. It takes `--character` and `--region`, and cannot be combined with `--rebuild`, `--market-only`, `--no-market` or `--max-types`
 
 `--watch` is optional. A launchd job for it can run every five minutes while the game is open, on a machine where the orders page is not; use `StartInterval` 300 in place of the daily calendar interval below.
+
+The destination book job is off by default. With `EFLIP_REGION_BOOK=1` in `.env`, every full sync (the one that includes the market snapshot) ends with one snapshot of the destination region's whole order book, every type and both sides: `GET /markets/<region>/orders?order_type=all`, page by page, stored raw under `data/raw/public/` and folded into the per-type book logs as one sample per type (a type whose orders have all ended gets an empty sample). That gives types you do not trade a book log too. `node scripts/sync.js --region-book` takes one snapshot now and prints what it cost; `node scripts/sync.js --region-book-report` prints the last 24 hours of snapshots as a table, with totals and per-hour averages. For Domain a snapshot is about 194 pages, 388 `market-order` tokens (the bucket holds 12,000 per 15 minutes) and 46 MB of raw. The job waits while an export run is going, stops under 20 % of the bucket, takes the market lock (a watch tick that overlaps it reports its market step busy), and folds nothing from a snapshot with a page missing. Until the retention rule is set from the measurement, it keeps every raw page and every log sample indefinitely, so unset the variable if disk is tight. Do not run `--rebuild` while it is on: the book log rebuild does not replay regional snapshots yet, and it rewrites the log of any type that also has per-type raw from that alone.
 
 ### Optional daily job (launchd)
 
@@ -132,6 +134,7 @@ Everything eflip stores is in `data/` in the checkout (`EFLIP_DATA_DIR` moves it
 - `runs/`: export runs saved by "Copy orders" on `export.html`.
 - `esi-cache/`: per-route ETag and expiry bookkeeping, sync state and rate-limit state.
 - `esi-cache/public/_watch.json`: the last watch refresh, when it ran and what each character and type answered.
+- `esi-cache/public/_region-book.json`: the last destination book snapshot and how it ended. Each run also adds a `kind: "regionBook"` entry, with what it cost, to the public sync log under `raw/public/_sync-log/`.
 - `locks/`: one lock per character and one for the market, so the server and the script never sync the same owner at once.
 - `samples/`: captured ESI responses used to write the test fixtures. The server does not read them.
 

@@ -80,7 +80,9 @@ const ROUTES = [
 const createFakeEsi = ({ now, pageSize = 1000, transactionsPageSize = 2500, errorLimitRemain = 100 }) => {
 	const characters = new Map();
 	const structures = new Map(); // id -> object | 'forbidden' | 'missing'
-	const market = { orders: new Map(), history: new Map() }; // `${region}:${type}` -> rows
+	// orders and history: `${region}:${type}` -> rows; regionOrders: `${region}` -> every order of the
+	// region (what /markets/<region>/orders answers without a type_id, filtered by order_type)
+	const market = { orders: new Map(), history: new Map(), regionOrders: new Map() };
 	const calls = [];
 	const used = new Map(); // `${owner}|${group}` -> tokens used
 	const fake = { calls, structures, market, pageSize, transactionsPageSize, errorLimitRemain, respondWith: null, rateRemaining: null };
@@ -183,7 +185,16 @@ const createFakeEsi = ({ now, pageSize = 1000, transactionsPageSize = 2500, erro
 				break;
 			}
 			case 'marketOrders': {
-				const slice = pageOf(market.orders.get(`${match[1]}:${call.query.type_id}`) || [], page, fake.pageSize);
+				let rows;
+				if (call.query.type_id === undefined) {
+					rows = market.regionOrders.get(match[1]) || [];
+					const side = call.query.order_type || 'all';
+					if (side === 'sell') rows = rows.filter(row => !row.is_buy_order);
+					else if (side === 'buy') rows = rows.filter(row => row.is_buy_order);
+				} else {
+					rows = market.orders.get(`${match[1]}:${call.query.type_id}`) || [];
+				}
+				const slice = pageOf(rows, page, fake.pageSize);
 				body = slice.rows;
 				pages = slice.pages;
 				break;
