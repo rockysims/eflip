@@ -323,11 +323,16 @@
 	});
 
 	// A book-log order is present (decision 18; rule 5's startedBehind) from the earlier of its first
-	// logged `issued` and its firstSeen until the first sample after its lastSeen, the first that no
-	// longer listed it (goneMs; null while no sample has come since: present to now).
+	// logged `issued` and its firstSeen until the first stored sample after its lastSeen, the first that
+	// no longer listed it (goneMs; null while no stored sample has come since: present to now). A
+	// `stored: false` sample (a 304) saw the book unchanged, so it still listed every order of the last
+	// stored one, and lastSeen moves only on a stored sample: a 304 never ends an order. It is still a
+	// check, so `samples` (and sinceMs) keep it.
 	const parseBookLog = (log) => {
 		if (!isObj(log)) return null;
-		const samples = (Array.isArray(log.samples) ? log.samples : []).map(s => toMs(isObj(s) ? s.at : s)).filter(ms => ms !== null).sort((a, b) => a - b);
+		const sampleList = Array.isArray(log.samples) ? log.samples : [];
+		const samples = sampleList.map(s => toMs(isObj(s) ? s.at : s)).filter(ms => ms !== null).sort((a, b) => a - b);
+		const storedSamples = sampleList.filter(s => !(isObj(s) && s.stored === false)).map(s => toMs(isObj(s) ? s.at : s)).filter(ms => ms !== null).sort((a, b) => a - b);
 		const orders = [];
 		for (const [id, rec] of entriesOf(log.orders)) {
 			if (!isObj(rec)) continue;
@@ -339,7 +344,7 @@
 			for (const e of path) if (e.issuedMs !== null && (appearMs === null || e.issuedMs < appearMs)) appearMs = e.issuedMs;
 			orders.push({
 				orderId: idNum(id), isBuy: rec.isBuy === true, locationId: idNum(rec.locationId), path,
-				firstSeenMs, lastSeenMs, appearMs, goneMs: lastSeenMs === null ? null : firstAfter(samples, lastSeenMs)
+				firstSeenMs, lastSeenMs, appearMs, goneMs: lastSeenMs === null ? null : firstAfter(storedSamples, lastSeenMs)
 			});
 		}
 		// what the log covers from: its first sample, else (a log without samples) its first sighting

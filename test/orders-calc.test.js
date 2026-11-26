@@ -1352,6 +1352,24 @@ test('presence: region scope counts the cheaper order at another station; a wide
 	]);
 });
 
+test('presence: a 304 after a competitor\'s last stored sighting still lists it; only a stored sample can end it', () => {
+	// 9 at 90 listed since 3 days ago, last seen by the stored check 2 days ago and still in the book; the
+	// two checks since were 304s (the book had not changed). Our 1 at 100 came in 30 minutes ago, behind it.
+	const samples = [{ at: ago(3 * DAY), stored: true }, { at: ago(2 * DAY), stored: true }, { at: ago(1 * DAY), stored: false }, { at: ago(1 * HOUR), stored: false }];
+	const comp = { ...bookLogOrder({ path: [[ago(3 * DAY), 90, 4, ago(3 * DAY + HOUR)]] }), lastSeen: ago(2 * DAY) };
+	const out = run({
+		openOrders: { [GRANT]: { fetchedAt: ago(5 * MIN), orders: [mine({ id: 1, price: 100, remain: 5, issued: ago(30 * MIN) })] } },
+		orderLogs: { [GRANT]: { 1: logEntry({ path: [[ago(10 * MIN), 100, 5, ago(30 * MIN)]] }) } },
+		books: { [T]: { [REGION]: bookOf([theirs({ id: 9, price: 90, remain: 4, issued: ago(3 * DAY + HOUR) })]) } },
+		bookLogs: { [T]: { [REGION]: { samples, orders: { 9: comp } } } },
+		history: { [T]: flatHistory(1) }
+	});
+	const last = out.presence[T].segments.slice(-1)[0];
+	assert.deepEqual([last.state, last.below], ['listed', 1]);
+	assert.equal(out.timeOnTop.byType[T].list.slice(-1)[0].startedBehind, true);
+	assert.equal(out.timeOnTop.byType[T].episodes, 0);
+});
+
 //--- Phase 5: reason tokens (decision 21)
 
 test('fmtCompactDuration: minutes, hours and days, one decimal under 10, no space', () => {
