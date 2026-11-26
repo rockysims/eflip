@@ -749,6 +749,15 @@ test('/sso/callback passes CCP errors on as a short code', async (t) => {
 	assert.equal(odd.headers.location, '/results.html?ssoError=scriptxscript');
 });
 
+test('/sso/callback: a cancelled sign-in returns to the page that started it', async (t) => {
+	const ctx = await startApp(t);
+	const state = await login(ctx, '/orders.html');
+	const res = await ctx.get(`/sso/callback?error=access_denied&state=${state}`, { Cookie: `eflip_sso=${state}` });
+	assert.equal(res.status, 302);
+	assert.equal(res.headers.location, '/orders.html?ssoError=access_denied');
+	assert.equal(cookieFrom(res), '', 'the login is consumed and its cookie cleared');
+});
+
 test('/sso/callback stores the character, primes its access token and clears the cookie', async (t) => {
 	const accessToken = signJwt(claimsFor());
 	const ctx = await startApp(t, { handlers: { [TOKEN_URL]: () => jsonResponse(200, tokenBody(accessToken, 'refresh-token-1')) } });
