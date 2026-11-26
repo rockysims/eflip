@@ -1,9 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const zlib = require('node:zlib');
-const { createRawStore, stampToFileName, fileNameToStamp, gzipsRaw } = require('../lib/dataFiles');
+const { createRawStore, stampToFileName, fileNameToStamp, gzipsRaw, acquireLock } = require('../lib/dataFiles');
 const { tmpDataDir } = require('../test-support/esi-fake');
 
 // The raw store's two forms: the public market records (`public/markets-...`) are written gzipped,
@@ -135,4 +136,71 @@ test('files lists a route\'s files with their sizes, both forms of a stamp apart
 	assert.throws(() => raw.remove(CHAR, 'wallet', '2026-11-20T01:00:00.000Z'), /only public market records/);
 	assert.throws(() => raw.remove('public', 'universe-structures-1', '2026-11-20T01:00:00.000Z'), /only public market records/);
 	assert.ok(raw.fileFor(CHAR, 'wallet', '2026-11-20T01:00:00.000Z'));
+});
+
+// The cross-process lock: data/locks/<name>.lock holding {pid, at, boot, token}.
+
+const lockFile = (dataDir, name) => path.join(dataDir, 'locks', `${name}.lock`);
+const backdate = (file, ms) => {
+	const then = (Date.now() - ms) / 1000;
+	fs.utimesSync(file, then, then);
+};
+const thisBoot = () => Math.round(Date.now() - os.uptime() * 1000);
+
+test('a holder whose lock was taken over does not remove the new holder\'s lock when it releases', (t) => {
+	const dataDir = tmpDataDir(t);
+	const file = lockFile(dataDir, 'market');
+	const first = acquireLock(dataDir, 'market');
+	assert.equal(typeof first, 'function');
+	assert.equal(acquireLock(dataDir, 'market'), null, 'held');
+	// 31 minutes with no refresh: the first holder looks frozen
+	backdate(file, 31 * 60 * 1000);
+	const second = acquireLock(dataDir, 'market');
+	assert.equal(typeof second, 'function', 'taken over');
+	const { token } = JSON.parse(fs.readFileSync(file, 'utf8'));
+
+	first();
+	assert.ok(fs.existsSync(file), 'the second holder still holds it');
+	assert.match(token, /^[0-9a-f]{16,}$/);
+	assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).token, token);
+	assert.equal(acquireLock(dataDir, 'market'), null, 'a third caller is kept out');
+	second();
+	assert.ok(!fs.existsSync(file), 'released');
+});
+
+test('an empty lock file counts as held for a short grace, then is taken over', (t) => {
+	const dataDir = tmpDataDir(t);
+	const file = lockFile(dataDir, 'market');
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	for (const content of ['', '{"pid":12']) {
+		fs.writeFileSync(file, content); // just created, not yet (fully) written
+		assert.equal(acquireLock(dataDir, 'market'), null, JSON.stringify(content));
+		backdate(file, 60 * 1000);
+		const release = acquireLock(dataDir, 'market');
+		assert.equal(typeof release, 'function', JSON.stringify(content));
+		release();
+	}
+});
+
+test('a held lock is kept young while held, so a long run is not taken over', async (t) => {
+	const dataDir = tmpDataDir(t);
+	const release = acquireLock(dataDir, 'market', { staleMs: 60, refreshMs: 10 });
+	assert.equal(typeof release, 'function');
+	await new Promise(resolve => setTimeout(resolve, 120));
+	assert.equal(acquireLock(dataDir, 'market', { staleMs: 60, refreshMs: 10 }), null);
+	release();
+	assert.ok(!fs.existsSync(lockFile(dataDir, 'market')));
+});
+
+test('a live pid recorded under another boot is a reused pid: its lock is taken over', (t) => {
+	const dataDir = tmpDataDir(t);
+	const file = lockFile(dataDir, 'market');
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, JSON.stringify({ pid: process.pid, at: Date.now(), boot: thisBoot(), token: 'a1' }));
+	assert.equal(acquireLock(dataDir, 'market'), null, 'this boot: held');
+	fs.writeFileSync(file, JSON.stringify({ pid: process.pid, at: Date.now(), boot: thisBoot() - 60 * 60 * 1000, token: 'a1' }));
+	const release = acquireLock(dataDir, 'market');
+	assert.equal(typeof release, 'function', 'another boot: taken over');
+	assert.notEqual(JSON.parse(fs.readFileSync(file, 'utf8')).token, 'a1');
+	release();
 });
