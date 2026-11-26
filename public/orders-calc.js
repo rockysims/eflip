@@ -307,10 +307,13 @@
 
 	//--- logs
 
+	// Oldest first. An entry without `at` goes last, in the order given (a stable sort): results-calc
+	// writes a relist pricePath's open and final states with `at: null` after its snapshot entries, in
+	// time order. Order and book logs always carry `at`.
 	const parsePath = (path) => (Array.isArray(path) ? path : [])
 		.filter(isObj)
 		.map(e => ({ atMs: toMs(e.at), price: num(e.price), volumeRemain: num(e.volumeRemain), issuedMs: toMs(e.issued) }))
-		.sort((a, b) => (a.atMs === null ? 0 : a.atMs) - (b.atMs === null ? 0 : b.atMs));
+		.sort((a, b) => (a.atMs === null ? (b.atMs === null ? 0 : 1) : b.atMs === null ? -1 : a.atMs - b.atMs));
 
 	const parseOrderLog = (characterId, orderId, rec) => ({
 		orderId, characterId,

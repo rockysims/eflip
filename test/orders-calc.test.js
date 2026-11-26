@@ -5,6 +5,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const ordersCalc = require('../public/orders-calc.js');
 const estimate = require('../public/estimate.js');
+const resultsCalc = require('../public/results-calc.js');
 
 const { compute, defaultThresholds } = ordersCalc;
 const { median, recencyWeight, priceAt, episodesOf, compareRows, windowDays } = ordersCalc._internal;
@@ -555,6 +556,30 @@ test('fee rate: a price rise, a fee more than 2.5 s off and a rate over 5 % are 
 	const out = run(feeInput(cuts));
 	assert.deepEqual(out.feeRates[GRANT][D].observations.map(o => o.orderId), [601, 605]);
 	assert.equal(out.feeRates[GRANT][D].rate, (0.006 + 0.00525) / 2);
+});
+
+test('fee rate: a relist\'s pricePath keeps results-calc\'s at-null states last: a raise after the last snapshot is no cut, a cut is one', () => {
+	// Built through results-calc compute so the pricePath has its real shape: the open and final states
+	// carry `at: null` and come after the snapshot entries. Our 77, no order log: listed at 1,000,000 x 10
+	// 32 h ago (a 2 % listing fee), seen by the 30 h snapshot, re-priced 20 h ago (its fee row a second
+	// later) and expired at that price.
+	const factsOf = (laterPrice, laterFee) => resultsCalc.compute({
+		characterIds: [GRANT], route: { endStationId: D, endRegionId: REGION }, m3: {}, now: NOW,
+		ledgers: { [GRANT]: {
+			transactions: [], contracts: [], contractItems: {},
+			journal: [[26000000001, ago(32 * HOUR), 200000], [26000000002, iso(NOW_MS - 20 * HOUR + 1000), laterFee]].map(([id, date, fee]) => ({
+				id, amount: -fee, balance: 0, date, description: 'Market order commission', first_party_id: GRANT, second_party_id: 1000035, reason: '', ref_type: 'brokers_fee'
+			})),
+			ordersHistory: [{ ...mine({ id: 77, price: laterPrice, remain: 10, issued: ago(20 * HOUR) }), state: 'expired' }],
+			snapshots: [{ syncedAt: ago(30 * HOUR), orders: [mine({ id: 77, price: 1e6, remain: 10, issued: ago(32 * HOUR) })], assets: [], balance: 0 }]
+		} }
+	}).facts;
+	const raised = factsOf(1.2e6, 60000);
+	assert.deepEqual(raised.relists.find(r => r.orderId === 77).pricePath.map(p => [p.at, p.price, p.source]), [[ago(30 * HOUR), 1e6, 'snapshot'], [null, 1.2e6, 'history']]);
+	assert.deepEqual(run({ facts: raised }).feeRates, {}); // not the 2 % listing fee as a relist rate
+
+	const cut = run({ facts: factsOf(0.9e6, 45000) }).feeRates[GRANT][D].observations;
+	assert.deepEqual(cut.map(o => [o.date, o.rate, o.orderId]), [[iso(NOW_MS - 20 * HOUR + 1000), 0.005, 77]]);
 });
 
 test('fee rate: a station without observations borrows the character\'s; fee scales with what is left; medians only without a rate', () => {
