@@ -449,8 +449,9 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	// otherwise the estimate is re-run with ceil(recommended × factor) as the target, bought for real up the
 	// source book (past the ROI floor; the spend cap still applies), from the same orders, history and clock as
 	// the recommendation, so only the quantity differs. The filtered state stays the recommendation's, so a
-	// factor never hides a row. No request is made: the inputs are kept on the row. A recommendation of 0 stays 0 at
-	// any factor, so it keeps the recommendation (and its real stop reason).
+	// factor never hides a row. No request is made: the inputs are kept on the row. A recommendation of 0 (no unit to
+	// floor to: an empty source book, no sell price) stays 0 at any factor, so it keeps the recommendation (and its
+	// real stop reason); a floored recommendation of 1 unit scales from that 1.
 	const reportForFactor = (row) => {
 		if (row.factor === 1 || !row.inputs || row.base.volume === 0) return row.base;
 		const target = Math.ceil(row.base.volume * row.factor);
@@ -482,6 +483,13 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	// What bound the recommended quantity (the factor-1 report `base`): the demand cap and the limit that cut it.
 	const recommendedClause = (base) => {
 		const head = `Demand cap ${nf.format(base.horizonVolume)} (${base.dailyDemand}/day × ${runDaysToComplete} days − ${nf.format(base.competingVolume)} competing)`;
+		// a floored base recommends nothing: its 1 unit is there so the figures are real
+		if (base.floored) {
+			const shown = 'shown for 1 unit so the figures are real';
+			return base.stopReason === 'roi'
+				? `${head}; cut to 0 by the ROI floor: the cheapest source order (${mil(base.stopPriceMil)}) returns ${base.stopRoi}x, below ${cfg.MIN_ROI}x; ${shown}`
+				: `${head}: nothing to buy; ${shown}`;
+		}
 		switch (base.stopReason) {
 			case 'horizon': return `${head} sets the recommended quantity`;
 			case 'roi': return `${head}; cut to ${nf.format(base.volume)} by the ROI floor: the next source order (${mil(base.stopPriceMil)}) returns ${base.stopRoi}x, below ${cfg.MIN_ROI}x`;
@@ -490,22 +498,32 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			default: return head;
 		}
 	};
+	// Why a cell is red (limitBreaches names the columns): appended to the cell's tooltip. A function takes the row.
+	const BREACH_TEXT = {
+		dailyProfitMil: 'below 1M/day',
+		roi: () => `below the ${cfg.MIN_ROI}x floor`,
+		activeDaysFraction: 'below 0.2',
+		daysSinceSellerUpdate: 'seller updated too recently',
+		rivals: 'too much competition',
+		daysToClear: (row) => `beyond the ${row.daysToComplete}-day horizon`
+	};
 	// `help` is a string, or a function for text that depends on the run (read on every header render).
 	const COLUMNS = [
 		{ key: 'select', label: '', sort: (r) => selected.has(r.typeId) ? 1 : 0, help: 'checked rows are always shown, summed in the totals and included in Copy orders. Greyed rows are stocked items.' },
 		{ key: 'name', label: 'name', sort: (r) => r.name.toLowerCase(), text: true, help: 'dim rows were filtered out; hover the name for the reason' },
 		{ key: 'dailyProfitMil', label: 'daily profit', val: (r) => num(r.report.dailyProfitMil), fmt: fmtMil,
-			help: 'profit on the quantity ÷ max(days to clear, 1), in millions',
+			help: 'profit on the quantity ÷ max(days to clear, 1), in millions. Red when below 1M/day',
 			tip: (r) => `${mil(r.report.profitPerItemMil)} profit/item × ${nf.format(orderQty(r))} = ${mil(Math.round(r.report.profitPerItemMil * r.report.volume * 100) / 100)}, over max(${r.report.daysToClear ?? '?'} days to clear, 1)` },
 		{ key: 'roi', label: 'ROI', val: (r) => num(r.report.roi), fmt: fmtRoi,
-			help: `revenue/item ÷ cost/item for the quantity (recommendations below ${cfg.MIN_ROI}x are filtered; a factor above 1 buys past that floor, so the row's ROI can be lower)`,
+			help: `revenue/item ÷ cost/item for the quantity (recommendations below ${cfg.MIN_ROI}x are filtered; a factor above 1 buys past that floor, so the row's ROI can be lower). Red when below the ${cfg.MIN_ROI}x floor`,
 			tip: (r) => `${mil(r.report.revenuePerItemMil)} ÷ ${mil(r.report.costPerItemMil)}` },
-		{ key: 'factor', label: 'factor', val: (r) => r.factor, help: 'multiplier on the recommended quantity. The row is re-estimated for ceil(recommended × factor), bought for real up the source book' },
+		{ key: 'factor', label: 'factor', val: (r) => r.factor, help: 'multiplier on the recommended quantity. The row is re-estimated for ceil(recommended × factor), bought for real up the source book. Clear a row\'s factor to follow the global factor again' },
 		{ key: 'qty', label: 'quantity', val: orderQty, fmt: fmtNum,
-			help: () => `recommended × factor, bought for real up the source book, so cost/item, ROI, the order totals, days to clear and daily profit are for this quantity. Recommended = ${runDaysToComplete} days of demand minus competing stock (within ${pct(cfg.COMPETE_BAND)} above the sell price in full, dearer stock by its seller's rival weight), bought while each order still clears ${cfg.MIN_ROI}x ROI; a factor above 1 buys past that floor. The cell tooltip names the limit that bound`,
+			help: () => `recommended × factor, bought for real up the source book, so cost/item, ROI, the order totals, days to clear and daily profit are for this quantity. Recommended = ${runDaysToComplete} days of demand minus competing stock (within ${pct(cfg.COMPETE_BAND)} above the sell price in full, dearer stock by its seller's rival weight), bought while each order still clears ${cfg.MIN_ROI}x ROI; a factor above 1 buys past that floor. The cell tooltip names the limit that bound. When nothing is worth buying the row shows 1 unit so its figures are real, filtered as 'nothing to buy'`,
 			tip: (r) => {
 				const base = r.base || r.report;
-				if (r.report === base) return `${nf.format(base.volume)} recommended × factor ${r.factor}. ${recommendedClause(base)}`;
+				const baseWord = base.floored ? 'shown' : 'recommended'; // a floored base recommends nothing
+				if (r.report === base) return `${nf.format(base.volume)} ${baseWord} × factor ${r.factor}. ${recommendedClause(base)}`;
 				const target = Math.ceil(base.volume * r.factor);
 				const bought = r.report.volume;
 				const outcome = bought >= target
@@ -513,7 +531,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 					: r.report.stopReason === 'cost'
 						? `; only ${nf.format(bought)} bought: the ${COST_LIMIT / 1e9}B spend cap`
 						: `; only ${nf.format(bought)} bought: the source station lists no more units`;
-				return `${nf.format(target)} = ${nf.format(base.volume)} recommended × factor ${r.factor}${outcome}. Recommended: ${recommendedClause(base)}`;
+				return `${nf.format(target)} = ${nf.format(base.volume)} ${baseWord} × factor ${r.factor}${outcome}. Recommended: ${recommendedClause(base)}`;
 			} },
 		{ key: 'daysOfSupply', label: 'days of supply left', val: (r) => num(r.report.daysOfSupply), fmt: fmtRoi,
 			help: `units listed at the destination ${SUPPLY_BAND_TXT} ÷ demand per day: how long until the cheap stock is gone and the price steps up`,
@@ -522,10 +540,10 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			help: 'destination sell orders at any price that were placed or changed within 24h of the newest one; empty when the station has no sell orders. Rivals weights these by price and recency',
 			tip: (r) => `${nf.format(r.report.destSellOrderCount)} sell orders at the station, cheapest ${mil(r.report.destBestSellPriceMil)}; ${r.report.activeSellers ?? 0} active; best buy order ${mil(r.report.destBestBuyPriceMil)}` },
 		{ key: 'rivals', label: 'rivals', val: (r) => num(r.report.rivals), fmt: fmtRoi,
-			help: `expected number of sellers who will undercut you: every sell order at the station counts its chance = ${cfg.RIVAL_RECENCY_DECAY} per idle day since it was touched × 1 within ${pct(cfg.SUPPLY_BAND)} above the sell price, falling as 1/multiple² beyond that. Drives the "too much competition" filter and weights out-of-band stock in competing volume`,
+			help: `expected number of sellers who will undercut you: every sell order at the station counts its chance = ${cfg.RIVAL_RECENCY_DECAY} per idle day since it was touched × 1 within ${pct(cfg.SUPPLY_BAND)} above the sell price, falling as 1/multiple² beyond that. Drives the "too much competition" filter and weights out-of-band stock in competing volume. Red when there is too much competition`,
 			tip: (r) => `${r.report.rivals ?? '?'} expected rivals among ${nf.format(r.report.destSellOrderCount)} sell orders (sell price ${mil(r.report.sellPriceMil)})` },
 		{ key: 'daysSinceSellerUpdate', label: 'days idle', val: (r) => num(r.report.daysSinceSellerUpdate), fmt: fmtRoi,
-			help: `days since the newest destination sell order at any price was placed or changed. The 'seller updated too recently' filter looks only at orders ${SUPPLY_BAND_TXT} (see the cell tooltip)`,
+			help: `days since the newest destination sell order at any price was placed or changed. The 'seller updated too recently' filter looks only at orders ${SUPPLY_BAND_TXT} (see the cell tooltip). Red when a seller updated too recently`,
 			tip: (r) => {
 				const idle = r.report.daysSinceInBandSellerUpdate;
 				return `${SUPPLY_BAND_TXT}: ${idle === null || idle === undefined ? 'no orders' : `${idle} days idle`}`;
@@ -533,7 +551,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		{ key: 'km3', label: 'km3', val: km3Of, fmt: fmtNum, help: 'packaged volume of the order quantity, in thousands of m3',
 			tip: (r) => `${nf.format(r.m3 || 0)} m3 packaged per unit × ${nf.format(orderQty(r))}` },
 		{ key: 'activeDaysFraction', label: 'active days', val: (r) => num(r.report.activeDaysFraction), fmt: fmtRoi,
-			help: `fraction of the last ${DAYS_CONSIDERED} days with sell-side trades at the destination that would have been profitable (below 0.2 is filtered)`,
+			help: `fraction of the last ${DAYS_CONSIDERED} days with sell-side trades at the destination that would have been profitable (below 0.2 is filtered). Red when below 0.2`,
 			tip: (r) => `${r.report.activeDays} of ${DAYS_CONSIDERED} days` },
 		{ key: 'costPerItemMil', label: 'cost/item', val: (r) => num(r.report.costPerItemMil), fmt: fmtMil,
 			help: `average source price over the orders bought, plus ${pct(HAULING_REWARD_FRACTION)} hauling reward`,
@@ -551,7 +569,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			help: 'order revenue − order cost, in millions',
 			tip: (r) => `${fmtTotal(orderRevenue(r))} − ${fmtTotal(orderCost(r))}` },
 		{ key: 'daysToClear', label: 'days to clear', val: (r) => num(r.report.daysToClear), fmt: fmtRoi,
-			help: `(quantity + competing stock: within ${pct(cfg.COMPETE_BAND)} above the sell price in full, dearer stock by its seller's rival weight) ÷ demand per day`,
+			help: `(quantity + competing stock: within ${pct(cfg.COMPETE_BAND)} above the sell price in full, dearer stock by its seller's rival weight) ÷ demand per day. Red when beyond the days-to-clear horizon`,
 			tip: (r) => `(${nf.format(r.report.volume)} + ${nf.format(r.report.competingVolume)} competing) ÷ ${r.report.dailyDemand}/day` }
 	];
 	const sortValue = (col, row) => col.sort ? col.sort(row) : col.val(row);
@@ -687,13 +705,24 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		tr.classList.toggle('alwaysShowItem', !!row.isAlwaysShow);
 		const nameCell = tr.querySelector('td.nameCell');
 		nameCell.title = row.report.filteredReason || '';
+		// the figures that break a limit (a filter's, or the days-to-clear horizon) turn red, the tooltip says which
+		const breaches = new Set(estimate.limitBreaches(row.report, reportConfig({ typeId: row.typeId, isAlwaysShow: row.isAlwaysShow, daysToComplete: row.daysToComplete })));
 		for (const cell of tr.querySelectorAll('td[data-col]')) {
 			const col = COLUMNS.find(c => c.key === cell.dataset.col);
 			cell.textContent = col.fmt(col.val(row));
-			if (col.tip) cell.title = col.tip(row);
+			const tip = col.tip ? col.tip(row) : '';
+			const breach = breaches.has(col.key);
+			cell.classList.toggle('breach', breach);
+			const text = breach ? BREACH_TEXT[col.key] : null;
+			const why = typeof text === 'function' ? text(row) : text;
+			cell.title = why ? (tip ? `${tip}; ${why}` : why) : tip;
 		}
 		const factorInput = tr.querySelector('input.factor');
 		if (document.activeElement !== factorInput && factorInput.value !== String(row.factor)) factorInput.value = row.factor;
+		factorInput.classList.toggle('own', !!row.hasOverride);
+		factorInput.title = row.hasOverride
+			? "this row's own factor; clear it to follow the global factor"
+			: 'follows the global factor; type a number to give this row its own';
 	};
 
 	const createRowEl = (row) => {
@@ -861,7 +890,20 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		const hit = rowFromEvent(e);
 		if (!hit || !hit.row) return;
 		const { tr, row } = hit;
-		const f = parseFloat(e.target.value);
+		const raw = e.target.value.trim();
+		if (raw === '') {
+			// a cleared factor goes back to following the global one (the input snaps to it on commit, below)
+			if (!row.hasOverride) return;
+			delete factorOverrides[row.typeId];
+			row.hasOverride = false;
+			row.factor = globalFactor;
+			saveFactors();
+			row.report = reportForFactor(row);
+			updateRowEl(tr, row);
+			updateSums();
+			return;
+		}
+		const f = parseFloat(raw);
 		if (!(f >= 0)) return;
 		row.factor = f;
 		row.hasOverride = true;
@@ -870,6 +912,14 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		row.report = reportForFactor(row);
 		updateRowEl(tr, row);
 		updateSums();
+	});
+
+	// on commit, a blank or invalid factor snaps back to the value in force (like the days-to-clear input)
+	tbodyElem.addEventListener('change', (e) => {
+		if (!e.target.classList.contains('factor')) return;
+		const hit = rowFromEvent(e);
+		if (!hit || !hit.row) return;
+		if (!(parseFloat(e.target.value) >= 0)) e.target.value = hit.row.factor;
 	});
 
 	tbodyElem.addEventListener('change', (e) => {
@@ -1133,7 +1183,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			horizonDays: runDaysToComplete,
 			config: { SELL_TAX, SALES_TAX, BROKER_FEE, HAULING_REWARD_FRACTION, MIN_ROI },
 			rows: copiedRows().map(r => ({
-				typeId: r.typeId, name: r.name, m3: r.m3, qty: orderQty(r), factor: r.factor, report: r.report, context: r.context,
+				typeId: r.typeId, name: r.name, m3: r.m3, qty: orderQty(r), factor: r.factor, base: r.base, report: r.report, context: r.context,
 				orderCostMil: orderCost(r), orderRevenueMil: orderRevenue(r), km3: km3Of(r)
 			}))
 		});

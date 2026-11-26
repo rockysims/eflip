@@ -81,10 +81,31 @@ orders, destination region history. Changes:
     `'roi'` and `'cost'`, else null), `stopRoi` (that order's ROI, for
     `'roi'`, else null), `horizonVolume` (the demand cap as whole units),
     `targetVolume` (the quantity asked for; null for a recommendation),
-    `filteredReason` (null when the item passes).
+    `floored` (see 12), `filteredReason` (null when the item passes).
 11. Page-level filters move into `estimate.js` as `applyFilters(report,
     config)` returning a reason string or null, so filtered items can be shown
-    with their reason.
+    with their reason. Reasons, in the order they are checked: `no report`,
+    `nothing to buy`, `not profitable`, `margin too slim`, `too slow`,
+    `seller updated too recently`, `too much competition`.
+12. **Floor of 1**: a recommendation of 0 units (a demand cap of 0, or the
+    ROI floor on the cheapest order) shows 1 unit from the cheapest source
+    order, so the row still has a real cost, ROI, days to clear and daily
+    profit. The report has `floored: true`; `stopReason` stays what the walk
+    recorded (`'horizon'` or `'roi'`). The floor changes the figures, not
+    which rows pass: `applyFilters` returns `nothing to buy` for a floored
+    report (always-show rows still pass). Only a recommendation is floored
+    (a targeted walk buys what it was asked for, 0 included), and only when
+    there is a sell price to value the unit at and the cheapest order is
+    within `COST_LIMIT`; otherwise (an empty source book, no sell price) the
+    volume-0 raw-prices fallback stays and the filter says `not profitable`.
+13. `limitBreaches(report, config)` returns the report fields whose value
+    breaks a limit, in column order: `dailyProfitMil` (below 1M/day, volume
+    above 0), `roi` (below `MIN_ROI`), `activeDaysFraction` (below 0.2),
+    `daysSinceSellerUpdate` (seller updated too recently), `rivals` (too much
+    competition) and `daysToClear` (beyond `DAYS_TO_COMPLETE`, the horizon:
+    not a filter, a limit the user set). It shares its predicates with
+    `applyFilters` so the two cannot drift, and ignores `isAlwaysShow` and
+    `floored`: it describes the figures, not the row's filtered state.
 
 Tests cover: ordinary price window, recency weights, competing volume band,
 buy cap with and without overhang, marginal stop, days to clear, filters.
@@ -115,7 +136,11 @@ Fixtures are small hand-written order/history arrays.
    book had; cost/item, ROI, order cost and revenue, days to clear and daily
    profit are those of that quantity, km3 scales with it. The filtered state
    stays the recommendation's, so a factor never hides a row; sorting uses
-   the re-estimated figures.
+   the re-estimated figures. A blank row factor (cleared by the user) removes
+   the row's own factor: the row follows the global factor again and is
+   re-estimated; on commit a blank or invalid entry snaps back to the factor
+   in force. The input is bold, with a tooltip, while the row has its own
+   factor.
 5. Footer over selected rows: total cost, revenue, profit, km3 — same figures
    the paste box produced.
 6. Copy: one line per selected row, `name + '\t' + orderQty`, no trailing
@@ -125,6 +150,20 @@ Fixtures are small hand-written order/history arrays.
 8. Remove the mark textarea and its script; remove the duplicate moment.js
    tag.
 9. The always-show and ignore-one-seller lists remain in `export.js`.
+10. A cell whose value `limitBreaches` names turns dark red (`td.breach`) and
+    its tooltip gains why (below 1M/day, below the ROI floor, below 0.2, seller
+    updated too recently, too much competition, beyond the N-day horizon). The
+    colour marks the value, not the row's filtered state (filtered rows keep
+    their dimming); the column helps say when a column goes red. A floored
+    row's quantity tooltip says nothing was worth buying and the 1 unit is
+    shown so the figures are real.
+11. Saved run (Copy orders, `docs/trade-results-plan.md`): `recommended` is the
+    factor-1 volume (`row.base.volume`), not the factored re-estimate's, and
+    `recommendation` is the whole factor-1 estimate (`volume`, `floored`,
+    `stopReason`, `horizonVolume` and the prediction fields), kept in case it
+    is useful later. The row's own prediction fields are those of the copied
+    quantity. `/api/runs` accepts a row without `recommendation` and saves it
+    as `null`.
 
 ## Gates
 

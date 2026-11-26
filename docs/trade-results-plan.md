@@ -413,8 +413,10 @@ destination station D), the runs, packaged m3 per type, the window, and the bonu
    `{id, copiedAt, reportGeneratedAt (ISO), route: {start, end, startStationId, endStationId,
    startRegionId, endRegionId}, horizonDays (runDaysToComplete), config: {SELL_TAX, SALES_TAX,
    BROKER_FEE, HAULING_REWARD_FRACTION, MIN_ROI}, rows: [{typeId, name, m3, qty, factor,
-   recommended (report.volume), costPerItemMil, revenuePerItemMil, sellPriceMil, profitPerItemMil,
-   dailyProfitMil, daysToClear, dailyDemand, competingVolume}], totals: {costMil, revenueMil,
+   recommended (the factor-1 volume), recommendation (the factor-1 estimate: volume, floored,
+   stopReason, horizonVolume and the prediction fields below; null in an older run), then the
+   prediction fields of the copied quantity: costPerItemMil, revenuePerItemMil, sellPriceMil,
+   profitPerItemMil, dailyProfitMil, daysToClear, dailyDemand, competingVolume}], totals: {costMil, revenueMil,
    profitMil, km3}, lastCopiedAt, copyCount, context}`.
    - `id = <route>-<reportGeneratedAt ISO>-<contentHash>`, where the content hash covers the
      copied rows' `typeId` and `qty` only. A later click with identical content updates

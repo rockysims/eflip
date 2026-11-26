@@ -34,6 +34,8 @@
 		'costPerItemMil', 'revenuePerItemMil', 'sellPriceMil', 'profitPerItemMil', 'dailyProfitMil',
 		'daysToClear', 'dailyDemand', 'competingVolume'
 	]);
+	// Which limit bound the volume of a saved recommendation (estimate.js stopReason).
+	const STOP_REASONS = Object.freeze(['horizon', 'roi', 'book', 'cost', 'target']);
 	const CONFIG_FIELDS = Object.freeze(['SELL_TAX', 'SALES_TAX', 'BROKER_FEE', 'HAULING_REWARD_FRACTION', 'MIN_ROI']);
 	const ROUTE_ID_FIELDS = Object.freeze(['startStationId', 'endStationId', 'startRegionId', 'endRegionId']);
 
@@ -98,13 +100,26 @@
 		};
 	};
 
+	// The factor-1 estimate of a row, kept beside the figures of the quantity actually copied (which are the
+	// re-estimate for the factored quantity): the recommended volume, whether it was floored to 1 unit,
+	// the limit that bound it, the demand cap, and the same prediction fields.
+	const recommendationOf = (base) => ({
+		volume: base.volume,
+		floored: !!base.floored,
+		stopReason: base.stopReason ?? null,
+		horizonVolume: numOrNull(base.horizonVolume),
+		...Object.fromEntries(PREDICTION_FIELDS.map(key => [key, numOrNull(base[key])]))
+	});
+
 	// The run to save, without its id (add it with `withId`). Synchronous, so it reads the page's
 	// state at the moment of the click. Input:
 	//   copiedAt, reportGeneratedAt: ISO strings (toISOString)
 	//   route: {start, end, startStationId, endStationId, startRegionId, endRegionId}
 	//   horizonDays, config: {SELL_TAX, SALES_TAX, BROKER_FEE, HAULING_REWARD_FRACTION, MIN_ROI}
-	//   rows: the copied rows, {typeId, name, m3, qty, factor, report, context, orderCostMil,
+	//   rows: the copied rows, {typeId, name, m3, qty, factor, base, report, context, orderCostMil,
 	//     orderRevenueMil, km3}; the page works out qty and the order figures (it owns those formulas).
+	//     base is the factor-1 estimate (the recommendation), report the estimate for the quantity (the
+	//     same object at factor 1); a row without base falls back to report.
 	// Rows of quantity 0 are no order and are left out; null when nothing is left to save.
 	const buildRun = ({ copiedAt, reportGeneratedAt, route, horizonDays, config, rows }) => {
 		const kept = rows.filter(row => row.qty >= 1);
@@ -119,15 +134,19 @@
 			route: { start: route.start, end: route.end, ...Object.fromEntries(ROUTE_ID_FIELDS.map(key => [key, route[key]])) },
 			horizonDays,
 			config: Object.fromEntries(CONFIG_FIELDS.map(key => [key, config[key]])),
-			rows: kept.map(row => ({
-				typeId: row.typeId,
-				name: row.name,
-				m3: numOrNull(row.m3),
-				qty: row.qty,
-				factor: row.factor,
-				recommended: row.report.volume,
-				...Object.fromEntries(PREDICTION_FIELDS.map(key => [key, numOrNull(row.report[key])]))
-			})),
+			rows: kept.map(row => {
+				const base = row.base || row.report;
+				return {
+					typeId: row.typeId,
+					name: row.name,
+					m3: numOrNull(row.m3),
+					qty: row.qty,
+					factor: row.factor,
+					recommended: base.volume,
+					recommendation: recommendationOf(base),
+					...Object.fromEntries(PREDICTION_FIELDS.map(key => [key, numOrNull(row.report[key])]))
+				};
+			}),
 			totals: {
 				costMil: round6(cost),
 				revenueMil: round6(revenue),
@@ -162,6 +181,7 @@
 		ORDER_FIELDS,
 		HISTORY_FIELDS,
 		PREDICTION_FIELDS,
+		STOP_REASONS,
 		CONFIG_FIELDS,
 		ROUTE_ID_FIELDS,
 		SYNC_MAX_AGE_MS,

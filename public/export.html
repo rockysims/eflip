@@ -126,6 +126,10 @@
 		.numeric {
 			text-align: right;
 		}
+		/* a figure that breaks a filter limit (or the days-to-clear horizon); the cell tooltip says which */
+		td.breach {
+			color: #b42318;
+		}
 		.text {
 			text-align: left;
 		}
@@ -145,6 +149,9 @@
 		}
 		td input.factor {
 			width: 3em;
+		}
+		td input.factor.own {
+			font-weight: 600; /* this row's own factor, not the global one */
 		}
 		#totals {
 			/* sticky on both axes: stays at the top, and spans the viewport even when the wide table

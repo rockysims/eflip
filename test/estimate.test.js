@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const estimate = require('../public/estimate.js');
 
-const { computeItemReport, applyFilters, getOrdinaryPrice, defaultConfig } = estimate;
+const { computeItemReport, applyFilters, limitBreaches, getOrdinaryPrice, defaultConfig } = estimate;
 const { roundMils, recencyWeight } = estimate._internal;
 
 const NOW = new Date('2026-06-01T12:00:00Z');
@@ -120,25 +120,72 @@ test('buy cap without overhang = demand * horizon - competing volume', () => {
 	assert.equal(report.horizonVolume, 43);
 	assert.equal(report.stopPriceMil, null);
 	assert.equal(report.stopRoi, null);
+	assert.equal(report.floored, false);
 });
 
-test('buy cap with overhang >= horizon demand => volume 0 and fallback figures', () => {
+test('buy cap with overhang >= horizon demand => 1 unit shown, filtered as nothing to buy', () => {
 	const report = computeItemReport({
 		srcOrders: [sellOrder(1 * M, 1000)],
 		destOrders: [sellOrder(9 * M, 60)],
 		destDays: baseDays(),
 		now: NOW
 	});
-	assert.equal(report.volume, 0);
-	assert.equal(report.dailyProfitMil, 0);
-	assert.equal(report.dailyProfitOldMil, 0);
-	assert.equal(report.costPerItemMil, 1);
-	assert.equal(report.revenuePerItemMil, 9);
-	assert.equal(report.competingVolume, 60);
-	assert.equal(report.daysToClear, 6);
-	assert.equal(report.filteredReason, 'not profitable');
+	// the walk buys 0 (cap 0), so the figures are for 1 unit from the cheapest source order
+	assert.equal(report.volume, 1);
+	assert.equal(report.floored, true);
 	assert.equal(report.stopReason, 'horizon');
 	assert.equal(report.horizonVolume, 0);
+	assert.equal(report.competingVolume, 60);
+	assert.equal(report.costPerItemMil, 1.1);
+	assert.equal(report.revenuePerItemMil, 8.06);
+	assert.equal(report.roi, 7.33);
+	assert.equal(report.daysToClear, 6.1); // (1 + 60) / 10
+	assert.equal(report.dailyProfitMil, Number(roundMils((REVENUE_PER_ITEM - 1.1 * M) / 6.1)));
+	assert.equal(report.dailyProfitOldMil, Number(roundMils((REVENUE_PER_ITEM - 1.1 * M) / 5)));
+	assert.equal(report.filteredReason, 'nothing to buy');
+});
+
+test('ROI floor on the cheapest order: 1 unit shown, filtered as nothing to buy', () => {
+	// 8M returns REVENUE_PER_ITEM / 8.8M = 0.916x, below MIN_ROI, so the walk buys nothing
+	const report = computeItemReport({ srcOrders: [sellOrder(8 * M, 1000)], destOrders: baseDest(), destDays: baseDays(), now: NOW });
+	assert.equal(report.volume, 1);
+	assert.equal(report.floored, true);
+	assert.equal(report.stopReason, 'roi');
+	assert.equal(report.stopPriceMil, 8);
+	assert.equal(report.stopRoi, 0.92);
+	assert.equal(report.horizonVolume, 43);
+	assert.equal(report.costPerItemMil, 8.8);
+	assert.equal(report.roi, 0.92);
+	assert.equal(report.daysToClear, 0.8); // (1 + 7) / 10
+	assert.equal(report.filteredReason, 'nothing to buy');
+	// the figures break the ROI floor, and the report says so
+	assert.ok(limitBreaches(report, {}).includes('roi'));
+});
+
+test('an empty book keeps the volume-0 fallback', () => {
+	// a sell order with nothing left: no unit to show
+	const report = computeItemReport({ srcOrders: [sellOrder(1 * M, 0)], destOrders: baseDest(), destDays: baseDays(), now: NOW });
+	assert.equal(report.volume, 0);
+	assert.equal(report.floored, false);
+	assert.equal(report.stopReason, 'book');
+	assert.equal(report.costPerItemMil, 1); // no hauling in the fallback
+	assert.equal(report.dailyProfitMil, 0);
+	assert.equal(report.filteredReason, 'not profitable');
+});
+
+test('nothing is floored without a sell price to value the unit at, or when the cheapest order is over the spend cap', () => {
+	// no dest orders and no profitable day: no sell price, so the raw-prices fallback stays
+	const noPrice = computeItemReport({ srcOrders: [sellOrder(100 * M, 10)], destOrders: [], destDays: flatHistory(1, 30, 10 * M, 10), now: NOW });
+	assert.equal(noPrice.volume, 0);
+	assert.equal(noPrice.floored, false);
+	assert.equal(noPrice.sellPriceMil, null);
+	assert.equal(noPrice.filteredReason, 'not profitable');
+
+	// the cheapest order alone is over COST_LIMIT: the walk stops on the spend cap and nothing is floored
+	const dear = computeItemReport({ srcOrders: [sellOrder(2 * M, 10)], destOrders: baseDest(), destDays: baseDays(), now: NOW, config: { COST_LIMIT: 1 * M } });
+	assert.equal(dear.volume, 0);
+	assert.equal(dear.floored, false);
+	assert.equal(dear.stopReason, 'cost');
 });
 
 test('marginal ROI stop walks only the cheap orders; caller orders are not mutated', () => {
@@ -274,6 +321,7 @@ test('a target under the spend cap reports the cap', () => {
 test('target 0 buys nothing', () => {
 	const report = computeItemReport({ srcOrders: [sellOrder(1 * M, 1000)], destOrders: baseDest(), destDays: baseDays(), now: NOW, targetVolume: 0 });
 	assert.equal(report.volume, 0);
+	assert.equal(report.floored, false); // a targeted walk is never floored
 	assert.equal(report.stopReason, 'target');
 	assert.equal(report.dailyProfitMil, 0);
 	assert.equal(report.filteredReason, 'not profitable');
@@ -346,6 +394,44 @@ test('applyFilters reasons', () => {
 	assert.equal(applyFilters({ ...ok, activeDaysFraction: 0 }, { isAlwaysShow: true }), null);
 });
 
+test('applyFilters: a floored report is filtered as nothing to buy, unless always-show', () => {
+	assert.equal(applyFilters({ floored: true, volume: 1, dailyProfitMil: 50 }, {}), 'nothing to buy');
+	assert.equal(applyFilters({ floored: true, volume: 1, dailyProfitMil: 50 }, { isAlwaysShow: true }), null);
+	assert.equal(applyFilters({ floored: false, volume: 1, costPerItemMil: 1, revenuePerItemMil: 5, dailyProfitMil: 50, activeDaysFraction: 0.5 }, {}), null);
+});
+
+test('limitBreaches names the fields that break a limit', () => {
+	const broken = { volume: 10, dailyProfitMil: 0.5, revenuePerItemMil: 1, costPerItemMil: 1, activeDaysFraction: 0.1, daysSinceInBandSellerUpdate: 10, rivals: 0, daysToClear: 9 };
+	assert.deepEqual(limitBreaches(broken, { DAYS_TO_COMPLETE: 5 }), ['dailyProfitMil', 'roi', 'activeDaysFraction', 'daysToClear']);
+
+	const healthy = { volume: 10, dailyProfitMil: 20, revenuePerItemMil: 5, costPerItemMil: 1, activeDaysFraction: 0.5, daysSinceInBandSellerUpdate: 3, rivals: 0, daysToClear: 4 };
+	assert.deepEqual(limitBreaches(healthy, { DAYS_TO_COMPLETE: 5 }), []);
+	assert.deepEqual(limitBreaches(healthy), [], 'the default config has the 5-day horizon and the 1.5x floor');
+
+	// only the in-band idle figure is tiny (the all-orders figure is ignored when the in-band one exists)
+	assert.deepEqual(limitBreaches({ ...healthy, daysSinceInBandSellerUpdate: 0.01, daysSinceSellerUpdate: 9 }, {}), ['daysSinceSellerUpdate']);
+	const { daysSinceInBandSellerUpdate, ...noInBand } = healthy;
+	assert.deepEqual(limitBreaches({ ...noInBand, daysSinceSellerUpdate: 0.01 }, {}), ['daysSinceSellerUpdate'], 'falls back to the all-orders figure on a hand-built report');
+
+	// too much competition: 5 rivals, ROI 3, daily profit 10 (the case applyFilters names above)
+	assert.deepEqual(limitBreaches({ ...healthy, revenuePerItemMil: 3, costPerItemMil: 1, dailyProfitMil: 10, rivals: 5 }, {}), ['rivals']);
+
+	// the horizon is the config's: the same days to clear is fine against a longer one
+	assert.deepEqual(limitBreaches({ ...healthy, daysToClear: 9 }, { DAYS_TO_COMPLETE: 10 }), []);
+	assert.deepEqual(limitBreaches({ ...healthy, daysToClear: null }, {}), []);
+
+	// a volume-0 fallback does not count its 0 daily profit as a breach; always-show and floored do not matter
+	assert.deepEqual(limitBreaches({ ...healthy, volume: 0, dailyProfitMil: 0 }, {}), []);
+	assert.deepEqual(limitBreaches({ ...broken, floored: true }, { isAlwaysShow: true, DAYS_TO_COMPLETE: 5 }), ['dailyProfitMil', 'roi', 'activeDaysFraction', 'daysToClear']);
+	assert.deepEqual(limitBreaches(null, {}), []);
+
+	// a healthy estimate has none of them and still passes applyFilters
+	const report = computeItemReport({ srcOrders: [sellOrder(1 * M, 1000)], destOrders: baseDest(), destDays: baseDays(), now: NOW });
+	assert.equal(applyFilters(report, {}), null);
+	assert.equal(report.filteredReason, null);
+	assert.deepEqual(limitBreaches(report, {}), []);
+});
+
 test('regression: realistic fixture produces the full report shape', () => {
 	// 60 days of noisy history around 25M with a spike day and some quiet days.
 	const destDays = [];
@@ -378,7 +464,7 @@ test('regression: realistic fixture produces the full report shape', () => {
 	const report = computeItemReport({ srcOrders, destOrders, destDays, typeId: 12345, now: NOW });
 	assert.equal(JSON.stringify(srcOrders), before);
 
-	const CONTEXT_KEYS = ['activeDays', 'supplyVolume', 'sellPriceMil', 'srcBestSellPriceMil', 'destBestSellPriceMil', 'destBestBuyPriceMil', 'destSellOrderCount', 'stopReason', 'stopPriceMil', 'stopRoi', 'horizonVolume', 'targetVolume'];
+	const CONTEXT_KEYS = ['activeDays', 'supplyVolume', 'sellPriceMil', 'srcBestSellPriceMil', 'destBestSellPriceMil', 'destBestBuyPriceMil', 'destSellOrderCount', 'stopReason', 'stopPriceMil', 'stopRoi', 'horizonVolume', 'targetVolume', 'floored'];
 	assert.deepEqual(Object.keys(report).sort(), [
 		'activeDaysFraction',
 		'activeSellers',
@@ -400,7 +486,7 @@ test('regression: realistic fixture produces the full report shape', () => {
 		...CONTEXT_KEYS
 	].sort());
 	for (const [key, val] of Object.entries(report)) {
-		if (key === 'filteredReason' || key === 'stopReason') continue;
+		if (key === 'filteredReason' || key === 'stopReason' || key === 'floored') continue; // text and a boolean
 		if (val === null && (key === 'stopPriceMil' || key === 'stopRoi')) continue; // null when the demand cap bound
 		if (val === null && key === 'targetVolume') continue; // null for a recommendation
 		assert.equal(typeof val, 'number', `${key} should be a number`);
@@ -421,7 +507,8 @@ test('regression: realistic fixture produces the full report shape', () => {
 		stopPriceMil: null,
 		stopRoi: null,
 		horizonVolume: 5,
-		targetVolume: null
+		targetVolume: null,
+		floored: false
 	});
 
 	assert.deepEqual(report, {

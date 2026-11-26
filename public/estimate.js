@@ -224,7 +224,8 @@
 	//     demand cap, ignoring the ROI floor (the spend cap still applies). Used by the page for a factor
 	//     other than 1. stopReason is then 'target' when the target was reached, else 'book' or 'cost'.
 	// Returns a report object, or null when there is nothing to buy (no source
-	// sell orders) or the calculation fails (the reason is logged).
+	// sell orders) or the calculation fails (the reason is logged). A recommendation of 0 units is shown
+	// as 1 unit from the cheapest source order (report.floored), filtered as 'nothing to buy'.
 	const computeItemReport = ({ srcOrders = [], destOrders = [], destDays = [], typeId = null, now = new Date(), config = {}, targetVolume = null } = {}) => {
 		try {
 			const c = { ...defaultConfig, ...config };
@@ -368,12 +369,23 @@
 				dayReports.push({ volume, cost, revenue });
 			}
 
-			const total = dayReports.reduce((acc, cur) => {
+			let total = dayReports.reduce((acc, cur) => {
 				acc.volume += cur.volume;
 				acc.cost += cur.cost;
 				acc.revenue += cur.revenue;
 				return acc;
 			}, { volume: 0, cost: 0, revenue: 0 });
+
+			//a recommendation of 0 units is shown as 1 unit from the cheapest source order, so the row still has
+			//a real cost, ROI and days to clear. Only a recommendation is floored (a targeted walk buys what it
+			//was asked for), and only when there is a sell price to value the unit at and the unit is affordable
+			//(otherwise the raw-prices fallback below stays). The walk's own volume still decides the stop reason.
+			const walkedVolume = total.volume;
+			let floored = false;
+			if (!targeting && total.volume === 0 && sellPrice !== null && book.length > 0 && book[0].price <= c.COST_LIMIT) {
+				total = { volume: 1, cost: book[0].price * (1 + c.HAULING_REWARD_FRACTION), revenue: revenuePerItem };
+				floored = true;
+			}
 
 			//the demand horizon (or the target) bound when the walk reached its cap (same epsilon as the daily
 			//limit). That covers a cap of 0 from overhanging competing stock, and a book that ran out exactly
@@ -385,7 +397,7 @@
 					stopPrice = null;
 					stopRoi = null;
 				}
-			} else if (total.volume >= horizonVolume) {
+			} else if (walkedVolume >= horizonVolume) {
 				stopReason = 'horizon';
 				stopPrice = null;
 				stopRoi = null;
@@ -418,7 +430,10 @@
 				stopPriceMil: stopPrice === null ? null : milsNum(stopPrice, 3),
 				stopRoi: stopRoi === null ? null : round2(stopRoi),
 				horizonVolume,
-				targetVolume: targeting ? targetVolume : null
+				targetVolume: targeting ? targetVolume : null,
+				//true when nothing was worth buying and the figures are for 1 unit from the cheapest source order,
+				//so the row still shows a real cost, ROI and days to clear
+				floored
 			};
 
 			let report;
@@ -435,7 +450,8 @@
 					...common
 				};
 			} else {
-				// Nothing worth buying: show the raw best prices, like the old page did. With no dest
+				// Nothing to show a unit of (an empty source book, no sell price, an unaffordable cheapest
+				// order, or a target of 0): show the raw best prices, like the old page did. With no dest
 				// orders fall back to what history says buyers paid (recent profitable-day average, else
 				// the ordinary price) so ROI is still informative.
 				const destBest = destBestSellPrice !== null
@@ -462,19 +478,12 @@
 		}
 	};
 
-	// Page-level filters. Returns a short reason string, or null when the item
-	// passes (always-show items always pass).
-	const applyFilters = (report, config = {}) => {
-		const c = { ...defaultConfig, ...config };
-		if (c.isAlwaysShow) return null;
-		if (!report) return 'no report';
-
-		if (report.dailyProfitMil < 1 || report.volume === 0) return 'not profitable';
-
-		if (report.revenuePerItemMil < report.costPerItemMil * c.MIN_ROI) return 'margin too slim';
-
-		if (report.activeDaysFraction < 0.2) return 'too slow';
-
+	// The limits behind the page-level filters, shared by applyFilters (which names the first one a row
+	// breaks) and limitBreaches (which names every figure that breaks one), so the two cannot drift.
+	const profitBelowLimit = (report) => report.dailyProfitMil < 1;
+	const roiBelowLimit = (report, c) => report.revenuePerItemMil < report.costPerItemMil * c.MIN_ROI;
+	const activeDaysBelowLimit = (report) => report.activeDaysFraction < 0.2;
+	const sellerUpdatedTooRecently = (report) => {
 		const hem = (min, val, max) => Math.min(Math.max(min, val), max);
 		const profitRating = hem(0, report.dailyProfitMil * 0.1, 1);
 		const tooRecentThresholdMin = 1 / 24;
@@ -484,26 +493,55 @@
 		const sellerIdleDays = report.daysSinceInBandSellerUpdate !== undefined
 			? report.daysSinceInBandSellerUpdate
 			: report.daysSinceSellerUpdate;
-		if (sellerIdleDays !== null && sellerIdleDays !== undefined && sellerIdleDays < tooRecentlyThreshold) {
-			return 'seller updated too recently';
-		}
-
-		//rivals = expected number of sellers who will undercut us (recency × proximity weighted)
+		return sellerIdleDays !== null && sellerIdleDays !== undefined && sellerIdleDays < tooRecentlyThreshold;
+	};
+	//rivals = expected number of sellers who will undercut us (recency × proximity weighted)
+	const tooMuchCompetition = (report) => {
 		const rivals = report.rivals || 0;
-		if (
-			rivals + 1 > report.revenuePerItemMil / report.costPerItemMil //poor percentage profit (relative to competition)
-			&& report.dailyProfitMil < rivals * 3 //poor absolute profit (relative to competition)
-		) {
-			return 'too much competition';
-		}
+		return rivals + 1 > report.revenuePerItemMil / report.costPerItemMil //poor percentage profit (relative to competition)
+			&& report.dailyProfitMil < rivals * 3; //poor absolute profit (relative to competition)
+	};
+
+	// Page-level filters. Returns a short reason string, or null when the item
+	// passes (always-show items always pass).
+	const applyFilters = (report, config = {}) => {
+		const c = { ...defaultConfig, ...config };
+		if (c.isAlwaysShow) return null;
+		if (!report) return 'no report';
+
+		//a floored report is 1 unit shown for the figures' sake: the recommendation was to buy nothing
+		if (report.floored) return 'nothing to buy';
+
+		if (profitBelowLimit(report) || report.volume === 0) return 'not profitable';
+		if (roiBelowLimit(report, c)) return 'margin too slim';
+		if (activeDaysBelowLimit(report)) return 'too slow';
+		if (sellerUpdatedTooRecently(report)) return 'seller updated too recently';
+		if (tooMuchCompetition(report)) return 'too much competition';
 
 		return null;
+	};
+
+	// The report fields whose value breaks a limit, in column order: the filters' limits plus days to
+	// clear against the horizon (DAYS_TO_COMPLETE; not a filter, a limit the user set). It describes the
+	// figures, not the row's filtered state, so isAlwaysShow and floored are ignored.
+	const limitBreaches = (report, config = {}) => {
+		const c = { ...defaultConfig, ...config };
+		const breaches = [];
+		if (!report) return breaches;
+		if (report.volume > 0 && profitBelowLimit(report)) breaches.push('dailyProfitMil');
+		if (roiBelowLimit(report, c)) breaches.push('roi');
+		if (activeDaysBelowLimit(report)) breaches.push('activeDaysFraction');
+		if (sellerUpdatedTooRecently(report)) breaches.push('daysSinceSellerUpdate');
+		if (tooMuchCompetition(report)) breaches.push('rivals');
+		if (report.daysToClear > c.DAYS_TO_COMPLETE) breaches.push('daysToClear');
+		return breaches;
 	};
 
 	return {
 		defaultConfig,
 		computeItemReport,
 		applyFilters,
+		limitBreaches,
 		getOrdinaryPrice,
 		// exposed for tests
 		_internal: { roundNonZero, roundMils, avg, dayAge, recencyWeight }

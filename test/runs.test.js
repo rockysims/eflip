@@ -84,13 +84,17 @@ const context = () => exportPersist.marketContext({
 	destDays: [day('2026-11-17'), day('2026-11-18'), day('2025-01-01')],
 	now: NOW,
 });
-const copiedRow = (typeId, qty, over = {}) => ({
-	typeId, name: `Item ${typeId}`, m3: 2.5, qty, factor: 1,
-	report: { volume: qty, costPerItemMil: 1.1, revenuePerItemMil: 1.9, sellPriceMil: 2.1, profitPerItemMil: 0.8, dailyProfitMil: 16, daysToClear: 5, dailyDemand: 20, competingVolume: 3 },
-	context: context(),
-	orderCostMil: 1.1 * qty, orderRevenueMil: 1.9 * qty, km3: Math.ceil(qty * 2.5) / 1000,
-	...over,
-});
+// base is the factor-1 estimate, report the estimate for the copied quantity: the same object at factor 1
+const copiedRow = (typeId, qty, over = {}) => {
+	const report = over.report || { volume: qty, costPerItemMil: 1.1, revenuePerItemMil: 1.9, sellPriceMil: 2.1, profitPerItemMil: 0.8, dailyProfitMil: 16, daysToClear: 5, dailyDemand: 20, competingVolume: 3, floored: false, stopReason: 'horizon', horizonVolume: qty };
+	return {
+		typeId, name: `Item ${typeId}`, m3: 2.5, qty, factor: 1,
+		base: report, report,
+		context: context(),
+		orderCostMil: 1.1 * qty, orderRevenueMil: 1.9 * qty, km3: Math.ceil(qty * 2.5) / 1000,
+		...over,
+	};
+};
 const makeBody = ({ rows = [copiedRow(34, 100), copiedRow(35, 40)], copiedAt = T1, reportGeneratedAt = G1, route = ROUTE } = {}) =>
 	exportPersist.withId(exportPersist.buildRun({ copiedAt, reportGeneratedAt, route, horizonDays: 5, config: CONFIG, rows }));
 
@@ -150,7 +154,10 @@ test('marketContext keeps the best 20 of each book side, the listed fields, and 
 });
 
 test('buildRun: the run as saved, rows of quantity 0 left out, totals summed from the page\'s own figures', () => {
-	const rows = [copiedRow(34, 100), copiedRow(36, 0), copiedRow(35, 40, { m3: undefined, report: { volume: 55, costPerItemMil: 2, revenuePerItemMil: 3, sellPriceMil: null, profitPerItemMil: 1, dailyProfitMil: 8, daysToClear: null, dailyDemand: 4, competingVolume: 0 }, factor: 0.7, orderCostMil: 80, orderRevenueMil: 120, km3: 0.05 })];
+	// the factor-0.7 row: its report is the re-estimate for the 40 copied units, its base the factor-1 estimate of 55
+	const base35 = { volume: 55, costPerItemMil: 2.5, revenuePerItemMil: 3.5, sellPriceMil: 3.9, profitPerItemMil: 1, dailyProfitMil: 9, daysToClear: 7.5, dailyDemand: 4, competingVolume: 1, floored: false, stopReason: 'roi', horizonVolume: 80, extra: 'x' };
+	const report35 = { volume: 40, costPerItemMil: 2, revenuePerItemMil: 3, sellPriceMil: null, profitPerItemMil: 1, dailyProfitMil: 8, daysToClear: null, dailyDemand: 4, competingVolume: 0, floored: false, stopReason: 'target', horizonVolume: 80 };
+	const rows = [copiedRow(34, 100), copiedRow(36, 0), copiedRow(35, 40, { m3: undefined, base: base35, report: report35, factor: 0.7, orderCostMil: 80, orderRevenueMil: 120, km3: 0.05 })];
 	rows[0].orderCostMil = 110;
 	rows[0].orderRevenueMil = 190;
 	rows[0].km3 = 0.25;
@@ -162,14 +169,31 @@ test('buildRun: the run as saved, rows of quantity 0 left out, totals summed fro
 	assert.deepEqual(run.route, ROUTE);
 	assert.deepEqual(run.config, CONFIG);
 	assert.deepEqual(run.rows.map(r => r.typeId), [34, 35]);
-	assert.deepEqual(Object.keys(run.rows[0]), ['typeId', 'name', 'm3', 'qty', 'factor', 'recommended', 'costPerItemMil', 'revenuePerItemMil', 'sellPriceMil', 'profitPerItemMil', 'dailyProfitMil', 'daysToClear', 'dailyDemand', 'competingVolume']);
+	assert.deepEqual(Object.keys(run.rows[0]), ['typeId', 'name', 'm3', 'qty', 'factor', 'recommended', 'recommendation', 'costPerItemMil', 'revenuePerItemMil', 'sellPriceMil', 'profitPerItemMil', 'dailyProfitMil', 'daysToClear', 'dailyDemand', 'competingVolume']);
+	assert.deepEqual(Object.keys(run.rows[0].recommendation), ['volume', 'floored', 'stopReason', 'horizonVolume', ...exportPersist.PREDICTION_FIELDS]);
+	// the prediction fields are the copied quantity's (report); recommended and recommendation are the factor-1 estimate's (base)
 	assert.deepEqual(run.rows[1], {
-		typeId: 35, name: 'Item 35', m3: null, qty: 40, factor: 0.7, recommended: 55, costPerItemMil: 2, revenuePerItemMil: 3,
+		typeId: 35, name: 'Item 35', m3: null, qty: 40, factor: 0.7, recommended: 55,
+		recommendation: {
+			volume: 55, floored: false, stopReason: 'roi', horizonVolume: 80,
+			costPerItemMil: 2.5, revenuePerItemMil: 3.5, sellPriceMil: 3.9, profitPerItemMil: 1, dailyProfitMil: 9, daysToClear: 7.5, dailyDemand: 4, competingVolume: 1,
+		},
+		costPerItemMil: 2, revenuePerItemMil: 3,
 		sellPriceMil: null, profitPerItemMil: 1, dailyProfitMil: 8, daysToClear: null, dailyDemand: 4, competingVolume: 0,
 	});
+	assert.equal(run.rows[1].recommended, run.rows[1].recommendation.volume);
+	assert.notEqual(run.rows[1].recommended, report35.volume, 'not the re-estimate\'s volume');
+	assert.deepEqual(run.rows[0].recommendation, { volume: 100, floored: false, stopReason: 'horizon', horizonVolume: 100, costPerItemMil: 1.1, revenuePerItemMil: 1.9, sellPriceMil: 2.1, profitPerItemMil: 0.8, dailyProfitMil: 16, daysToClear: 5, dailyDemand: 20, competingVolume: 3 });
 	assert.deepEqual(run.totals, { costMil: 190, revenueMil: 310, profitMil: 120, km3: 0.3 });
 	assert.deepEqual(Object.keys(run.context), ['34', '35']);
 	assert.deepEqual(run.context[34], rows[0].context);
+
+	// a floored 1 unit is a recommendation of nothing, shown for its figures; a row passed without base falls back to its report
+	const floored = { volume: 1, floored: true, stopReason: 'roi', horizonVolume: 12, costPerItemMil: 8.8, revenuePerItemMil: 8.06, sellPriceMil: 9, profitPerItemMil: -0.74, dailyProfitMil: -0.9, daysToClear: 0.8, dailyDemand: 10, competingVolume: 7 };
+	const [noBase] = exportPersist.buildRun({ copiedAt: T1, reportGeneratedAt: G1, route: ROUTE, horizonDays: 5, config: CONFIG, rows: [{ ...copiedRow(37, 1, { report: floored }), base: undefined }] }).rows;
+	assert.deepEqual(noBase.recommendation, floored);
+	assert.equal(noBase.recommended, 1);
+	assert.equal(noBase.recommendation.floored, true);
 
 	assert.equal(exportPersist.buildRun({ copiedAt: T1, reportGeneratedAt: G1, route: ROUTE, horizonDays: 5, config: CONFIG, rows: [copiedRow(36, 0)] }), null, 'nothing to save');
 	assert.equal(exportPersist.buildRun({ copiedAt: T1, reportGeneratedAt: G1, route: ROUTE, horizonDays: 5, config: CONFIG, rows: [] }), null);
@@ -320,6 +344,39 @@ test('only the known fields are saved; id, lastCopiedAt and copyCount are the se
 	assert.equal('extra' in saved.context[34], false);
 });
 
+test('a row\'s recommendation (the factor-1 estimate) is saved with it, only its known keys', async (t) => {
+	const app = await startApp(t);
+	const body = await makeBody();
+	const recommendation = body.rows[0].recommendation;
+	assert.deepEqual(Object.keys(recommendation), ['volume', 'floored', 'stopReason', 'horizonVolume', ...exportPersist.PREDICTION_FIELDS]);
+	assert.deepEqual(recommendation, { volume: 100, floored: false, stopReason: 'horizon', horizonVolume: 100, costPerItemMil: 1.1, revenuePerItemMil: 1.9, sellPriceMil: 2.1, profitPerItemMil: 0.8, dailyProfitMil: 16, daysToClear: 5, dailyDemand: 20, competingVolume: 3 });
+	body.rows[0].recommendation = { ...recommendation, floored: true, stopReason: null, horizonVolume: null, sellPriceMil: null, extra: 'x' };
+	body.rows[1].recommendation.stopReason = 'target';
+	const res = await app.post('/api/runs', body);
+	assert.equal(res.status, 201, res.text);
+	const saved = app.read(body.id);
+	assert.deepEqual(Object.keys(saved.rows[0]).slice(5, 7), ['recommended', 'recommendation']);
+	assert.deepEqual(saved.rows[0].recommendation, { ...recommendation, floored: true, stopReason: null, horizonVolume: null, sellPriceMil: null });
+	assert.deepEqual(Object.keys(saved.rows[0].recommendation), ['volume', 'floored', 'stopReason', 'horizonVolume', ...exportPersist.PREDICTION_FIELDS], 'in the page\'s order, without the extra key');
+	assert.equal(saved.rows[1].recommendation.stopReason, 'target');
+	const listed = (await app.get('/api/runs')).json;
+	assert.deepEqual(listed[0].rows[0].recommendation, saved.rows[0].recommendation, 'GET answers it too');
+});
+
+test('a row without a recommendation (an older page) is accepted and saved with recommendation null', async (t) => {
+	const app = await startApp(t);
+	const body = await makeBody();
+	delete body.rows[0].recommendation;
+	body.rows[1].recommendation = null;
+	const res = await app.post('/api/runs', body);
+	assert.equal(res.status, 201, res.text);
+	const saved = app.read(body.id);
+	assert.equal(saved.rows[0].recommendation, null);
+	assert.equal(saved.rows[1].recommendation, null);
+	assert.deepEqual(Object.keys(saved.rows[0]).slice(5, 7), ['recommended', 'recommendation']);
+	assert.equal(saved.rows[0].recommended, 100);
+});
+
 // ---- validation
 
 const bodyCases = [
@@ -350,6 +407,15 @@ const bodyCases = [
 	['a negative factor', b => { b.rows[0].factor = -1; }, /rows\[0\]\.factor/],
 	['a prediction field missing', b => { delete b.rows[0].costPerItemMil; }, /rows\[0\]\.costPerItemMil/],
 	['a prediction field as text', b => { b.rows[1].daysToClear = '5'; }, /rows\[1\]\.daysToClear/],
+	['a recommendation that is not an object', b => { b.rows[0].recommendation = 5; }, /rows\[0\]\.recommendation/],
+	['a recommendation floored as text', b => { b.rows[0].recommendation.floored = 'yes'; }, /rows\[0\]\.recommendation\.floored/],
+	['a recommendation without floored', b => { delete b.rows[0].recommendation.floored; }, /recommendation\.floored/],
+	['a recommendation stopReason that is not one', b => { b.rows[1].recommendation.stopReason = 'maybe'; }, /rows\[1\]\.recommendation\.stopReason/],
+	['a recommendation without stopReason', b => { delete b.rows[0].recommendation.stopReason; }, /recommendation\.stopReason/],
+	['a recommendation volume that is negative', b => { b.rows[0].recommendation.volume = -1; }, /recommendation\.volume/],
+	['a recommendation volume of 2.5', b => { b.rows[0].recommendation.volume = 2.5; }, /recommendation\.volume/],
+	['a recommendation horizonVolume as text', b => { b.rows[0].recommendation.horizonVolume = '5'; }, /recommendation\.horizonVolume/],
+	['a recommendation prediction field as text', b => { b.rows[0].recommendation.dailyProfitMil = '16'; }, /recommendation\.dailyProfitMil/],
 	['missing totals', b => { delete b.totals; }, /totals/],
 	['a totals value that is null', b => { b.totals.profitMil = null; }, /totals\.profitMil/],
 	['missing context', b => { delete b.context; }, /context/],
