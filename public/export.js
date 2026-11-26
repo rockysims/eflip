@@ -194,8 +194,6 @@ const createSoldBeforeFetcher = ({ stationId, sourceStationId = null, days = SOL
 
 //--- pipeline
 
-// Runs one report. Calls onRow({typeId, name, m3, report, isAlwaysShow, daysToComplete, soldBefore, inputs}) for every report (filtered ones too).
-// Calls onProgress at least every 500ms.
 // Loads both regions' order books once (a few hundred paginated requests instead of two per type:
 // ESI's market-order rate limit counts requests) and indexes them by type, station-filtered.
 // Resolves {src: Map typeId -> sell orders at the start station, dest: Map typeId -> all orders at
@@ -298,6 +296,8 @@ const resolveTypeNames = async (names, options = {}) => {
 	return { ids, unresolved };
 };
 
+// Runs one report. Calls onRow({typeId, name, m3, report, isAlwaysShow, context, daysToComplete, minRoi, soldBefore, inputs}) for every report (filtered ones too).
+// Calls onProgress at least every 500ms.
 // alwaysShowIds: already-resolved type ids to report regardless of triage/filters. isAlwaysShow(typeId) is
 // consulted when each report is built, so the caller may change the set while the run is going.
 // minRoi: the ROI floor of this run: triage skips items whose Fuzzwork margin is below it, and each walk stops there.

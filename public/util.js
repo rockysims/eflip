@@ -4,8 +4,9 @@
 // error-limit headers, pauses on HTTP 420). Local /file/ cache reads/writes bypass the queue.
 //
 // Cancellation: every network-touching function (getOrFetch, fetchWithRetries, getOrders,
-// getDays, getTypeIds, getTypeName, getTypeM3, getTypeIdByName, getFuzzworkPricesInRegion)
-// takes an optional trailing `options` object: `{signal, queue}`.
+// getDays, getTypeIds, getRegionOrders, getTypeName, getTypeM3, getTypeIdByName,
+// getFuzzworkPricesInRegion) takes an optional trailing `options` object: `{signal, queue}`
+// (getRegionOrders takes it before its `onPage` callback).
 // Alternatively call `util.setAbortSignal(signal)` once per run (pass null to clear); it is
 // used whenever no per-call `options.signal` is given. Aborted work rejects with an Error whose
 // `name === 'AbortError'` and is never retried. Callers should catch it (check `e.name`).

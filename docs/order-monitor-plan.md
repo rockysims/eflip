@@ -258,7 +258,7 @@ and the formatters. The implementer loads the `ui-patterns` and `dataviz` skills
 2. **`lib/derive.js`**: `buildOrderLog` (raw `orders` files and `orders-history` rows per
    character, in `fetchedAt` order) and `buildBookLog` (raw public books and public sync logs per
    region and type), both in `rebuildAll` and in the incremental sync through shared fold functions.
-   `lib/ledger.js` reads and writes `order-log.json` and `market/<regionId>/<typeId>.json`.
+   `lib/ledger.js` reads and writes `order-log.json` and `market/<regionId>/<typeId>.json.gz`.
 3. **`lib/api.js`**: `POST /api/watch {characterIds?}` (16 kb JSON) runs one tick and answers its
    outcome; `GET /api/watch` answers `_watch.json` plus `running`; `GET /api/order-log?characterIds=`;
    `GET /api/market?typeIds=&regionIds=&log=1` adds `log` beside `orders` and `history`;

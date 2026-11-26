@@ -527,7 +527,7 @@ test('--region-book-report prints the last 24 hours of snapshots as a table with
 	ctx.lines.length = 0;
 	ctx.clock.set(Date.UTC(2026, 10, 25, 12, 0, 0));
 	assert.equal(await ctx.run(['--region-book-report'], { env: {} }), 0);
-	assert.match(ctx.lines.join('\n'), /^region book, the last 24 hours up to 2026-11-25 12:00:00 UTC: no snapshots \(EFLIP_REGION_BOOK=1 takes one with each hourly sync; node scripts\/sync\.js --region-book takes one now\)$/);
+	assert.match(ctx.lines.join('\n'), /^region book, the last 24 hours up to 2026-11-25 12:00:00 UTC: no snapshots \(EFLIP_REGION_BOOK=1 takes one an hour: the server's timer, --watch ticks, full syncs; node scripts\/sync\.js --region-book takes one now\)$/);
 
 	// no data directory at all
 	const bare = setup(t, { link: false });

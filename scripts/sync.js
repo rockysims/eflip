@@ -53,7 +53,8 @@
 // still honours its Expires, so a run inside the cache windows makes no call. The regional book
 // (EFLIP_REGION_BOOK=1) keeps its own rule: no second snapshot within 55 minutes of the last.
 // Reads the same .env as the server (EVE_CLIENT_ID, EVE_CLIENT_SECRET, EVE_CALLBACK_URL,
-// ESI_USER_AGENT, ESI_COMPAT_DATE, EFLIP_DATA_DIR).
+// ESI_USER_AGENT, ESI_COMPAT_DATE, EFLIP_DATA_DIR, EFLIP_REGION_BOOK, EFLIP_STORAGE_BUDGET,
+// EFLIP_STORAGE_SHARES).
 // Prints one block per character and one for the market: calls made, 304s, rows added, tokens left
 // (--watch: one line per character and per type, and what each answered), and the storage block when
 // the budget ran. --rebuild also rebuilds each character's order log and lists any warning it raised;
@@ -61,7 +62,9 @@
 // holds, and saying how many it could not).
 // Exit code: 0 everything synced (or nothing was due), 1 a sync (or the storage step) failed or stopped early, 2 usage or
 // configuration error. A watch tick exits 1 when a character failed, needs re-linking or was busy, a
-// stop ended it or the market step came back partial; a busy or skipped market step is not a failure.
+// stop ended it, or the market step came back partial or failed, or the hourly destination book came
+// back partial, paused or failed (a busy lock is not a failure); a busy or skipped market step is not
+// a failure either.
 // A --region-book run exits 1 when it came back partial, paused, busy or failed (a skip is not).
 // --storage exits 1 when the market lock was busy or the run failed; --storage-report never does.
 const path = require('path');
@@ -299,7 +302,7 @@ const readRegionBookEntries = (dataDir, sinceMs) => {
 const formatRegionBookReport = (entries, { now }) => {
 	const heading = `region book, the last 24 hours up to ${new Date(now).toISOString().slice(0, 19).replace('T', ' ')} UTC`;
 	if (entries.length === 0) {
-		return `${heading}: no snapshots (EFLIP_REGION_BOOK=1 takes one with each hourly sync; node scripts/sync.js --region-book takes one now)`;
+		return `${heading}: no snapshots (EFLIP_REGION_BOOK=1 takes one an hour: the server's timer, --watch ticks, full syncs; node scripts/sync.js --region-book takes one now)`;
 	}
 	const regions = [...new Set(entries.map(entry => entry.regionId))];
 	const growthOf = (entry) => (entry.logBytesAfter || 0) - (entry.logBytesBefore || 0);

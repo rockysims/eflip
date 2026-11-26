@@ -24,7 +24,7 @@
 	const ic = insightsCalc;
 	const store = resultsShared.storage('eflip.insights.');
 
-	//--- palette (dataviz skill, references/palette.md; checked with scripts/validate_palette.js, see the report)
+	//--- palette (dataviz skill, references/palette.md; checked with the dataviz skill's validate_palette.js, see the report)
 
 	const INK = '#0b0b0b';
 	const INK2 = '#52514e';

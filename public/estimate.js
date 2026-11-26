@@ -1,7 +1,7 @@
 // Pure export estimate: given source/destination station sell orders and the
 // destination region history for one type, work out how many units to haul and
 // what that is worth. No network, no DOM, no globals, so it can be unit tested
-// in Node (`node --test test/`) and loaded in the page with a plain <script>.
+// in Node (`node --test`) and loaded in the page with a plain <script>.
 //
 // Browser: <script src="estimate.js"></script> defines `window.estimate`.
 // Node:    const estimate = require('./public/estimate.js');

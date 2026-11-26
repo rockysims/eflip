@@ -1,13 +1,14 @@
-// results-shared.js: what the results page (results.html) and the insights page (insights.html) have in
-// common, so neither carries a copy: the ISK and date formatting, the guarded localStorage, the server
-// calls, the window bar (run or since-date, route, "count hauler bonuses"), and the loader that reads the
-// linked characters' ledgers, runs, snapshots, destination prices and item names, then works the results
-// out with results-calc.js. It also fills a page's `#envNotice` container, when it has one, with the
-// notice for an unset EFLIP_DATA_DIR or ESI_USER_AGENT, the error for a data directory that cannot
-// be written (GET /api/config's `env`) and the storage line (storage-notice.js, which the pages load
-// first: the budget used, or the hourly book running with no budget), and reads where an EVE sign-in
-// came back from (?linked= and ?ssoError=&ssoReason=, readSsoResult) so the results and orders pages
-// word it alike. Plain script, one global (`resultsShared`), no build step.
+// results-shared.js: what the results page (results.html), the insights page (insights.html) and the
+// orders page (orders.html) have in common, so none carries a copy: the ISK and date formatting, the
+// guarded localStorage, the server calls, the window bar (run or since-date, route, "count hauler
+// bonuses"), and the loader that reads the linked characters' ledgers, runs, snapshots, destination
+// prices and item names, then works the results out with results-calc.js. It also fills a page's
+// `#envNotice` container, when it has one, with the notice for an unset EFLIP_DATA_DIR or
+// ESI_USER_AGENT, the error for a data directory that cannot be written (GET /api/config's `env`)
+// and the storage line (storage-notice.js, which the pages load first: the budget used, or the
+// hourly book running with no budget), and reads where an EVE sign-in came back from (?linked= and
+// ?ssoError=&ssoReason=, readSsoResult) so the results and orders pages word it alike. Plain
+// script, one global (`resultsShared`), no build step.
 //
 // Usage (after util.js and results-calc.js, before the page's own script):
 //   const shared = resultsShared.create({ render, renderStatus, typesChanged, reloaded });

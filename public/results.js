@@ -7,8 +7,8 @@
 // snapshot the last sync stored (GET /api/market), so nothing shown is missing from disk.
 //
 // The formatting, the window bar and the loader (config, characters, runs, ledger, snapshots, prices,
-// item names, compute) are results-shared.js, shared with the insights page; this file is what only the
-// results page does: characters strip, syncing, banners, run info, totals, the table.
+// item names, compute) are results-shared.js, shared with the insights and orders pages; this file is
+// what only the results page does: characters strip, syncing, banners, run info, totals, the table.
 //
 // Flow: config -> characters, sync status, runs, ledger -> (snapshots for the window) -> compute()
 // on the main thread -> render. A sync that finishes (this page started it, or another page or the

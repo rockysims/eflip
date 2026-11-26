@@ -25,7 +25,7 @@
 //   books           {[typeId]: {[regionId]: {fetchedAt, orders}}}: ESI /markets/{region}/orders rows
 //                   {order_id, type_id, location_id, system_id, price, volume_remain, volume_total,
 //                   issued, duration, range, min_volume, is_buy_order}. Our own orders are in it.
-//   bookLogs        {[typeId]: {[regionId]: market/<regionId>/<typeId>.json}}: {samples: [{at, stored}],
+//   bookLogs        {[typeId]: {[regionId]: market/<regionId>/<typeId>.json.gz}}: {samples: [{at, stored}],
 //                   orders: {[orderId]: {isBuy, locationId, systemId, volumeTotal, duration, minVolume,
 //                   range, firstSeen, lastSeen, path: [{at, price, volumeRemain, issued}]}}}.
 //   history         {[typeId]: [{date: 'YYYY-MM-DD', average, highest, lowest, order_count, volume}]},
