@@ -185,3 +185,27 @@ See the chat message of 2026-11-25 (batched, with suggested answers). Answers ge
   `undercutsPerDay` 0. Bad inputs throw, so the route validates and catches per type.
 - Real logs on the dev machine are sampled about daily, so events coverage is mostly 0 at a pace of
   2 orders a day; volume coverage is small but present. Expected until M2.
+
+## P1.2 interpretations (agent, 2026-11-25; accepted at review) and the browser check
+
+- A column may define `display(row)` for its cell text ("≥ 1.5" when censored); `text` was already
+  the name column's alignment flag.
+- `windowDays = min(60, max(days to clear, 3))`: the route rejects more than 60.
+- Saved runs: an absent observed field saves as null (an older page); a present one must be a
+  number or null.
+- Coverage fractions are clamped to [0, 1]; a malformed observation counts as none.
+- `/api/market-stats`: an entry without a positive-integer typeId has no key and is left out; a type
+  named twice is answered once; `now` is echoed normalised; the ledger is reached as `sync.ledger`.
+- The avg-days-idle help says "within 75 % above the cheapest listing": the stats measure the band
+  from the cheapest station sell order, the estimate from its own sell price.
+- After Stop, a report task checks the abort signal again after `buildRow` (stats answer null then).
+- Report tasks hold one of the 40 slots while waiting up to 250 ms for a stats batch, so batches are
+  about 40 types; ESI throughput stays the bottleneck.
+- Live refresh and search lookups use a short-lived fetcher each, with `runDaysToComplete`.
+- Browser check (scratch data dir holding only the 358 book logs, placeholder SSO settings, port
+  5003): Standup Radar ECM Script (37824), 5-day window: POST /api/market-stats 200; avg days idle
+  "≥ 0.12" with "observed 0.12 of 5 days (events gap 12 h, 6 samples, median gap 2.85 h)"; daily
+  profit marked, "demand observed f=0.40 (volume gap 24 h): 2.01/day observed · 0.51/day model",
+  and the days-of-supply tooltip shows the blended 1.11/day and "stock trend +23.3/day"; rivals
+  marked, "observed f=0.02 (events gap 12 h): 0 observed · 1.21 model" → 1.18. Mark I Compact
+  Reactor Control Unit (8263, no log): no marks, "no observation", every figure as before.

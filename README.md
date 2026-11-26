@@ -41,6 +41,10 @@ On `results.html`, click "+ Add character". EVE signs you in and the page comes 
 
 Each character's chip shows its status (last sync, missing scope, or re-link needed). Its Sync button syncs that character. Remove asks for confirmation and revokes the character's token; the synced history stays unless you tick "also delete synced data".
 
+## Export page
+
+`export.html` ranks what to buy at the start station and sell at the end station, from the order books and daily history ESI reports. Where the server has watched a type's book at the end station (its book log, see Data), the page also uses what the log observed: daily demand from the units that sold, rivals from the undercuts that happened, and the "avg days idle" column, the mean days between price moves of the sellers near the best price (shown "≥ n" when nobody moved, blank when nothing was observed). Observed and modelled figures are blended by how much of the last max(days to clear, 3) days the log covers, and a blended figure (rivals, daily profit) has a dotted underline; its tooltip gives the covered share, the observed figure and the model figure. A type the server has not watched shows the model alone. Only types in play (listed, in transit, held or sold in the last 90 days) have a log so far. The page asks `POST /api/market-stats` for these figures; `public/market-stats.js` computes them from the book logs on each request.
+
 ## Order monitor
 
 `orders.html` gives each open sell order of your linked characters a verdict, with the figures behind it:
@@ -124,7 +128,7 @@ Everything eflip stores is in `data/` in the checkout (`EFLIP_DATA_DIR` moves it
 - `raw/`: every ESI response body, verbatim, with its fetch time and the headers that matter. Ledgers and snapshots are derived from it.
 - `ledger/`: per-character ledgers and retained snapshots, derived from `raw/`.
 - `ledger/<characterId>/order-log.json`: each of your orders' price path, and how it ended once it has.
-- `ledger/market/<regionId>/<typeId>.json`: every competing order's price path, with the times the book was checked.
+- `ledger/market/<regionId>/<typeId>.json`: every competing order's price path, with the times the book was checked. The export page's observed figures are computed from these.
 - `runs/`: export runs saved by "Copy orders" on `export.html`.
 - `esi-cache/`: per-route ETag and expiry bookkeeping, sync state and rate-limit state.
 - `esi-cache/public/_watch.json`: the last watch refresh, when it ran and what each character and type answered.

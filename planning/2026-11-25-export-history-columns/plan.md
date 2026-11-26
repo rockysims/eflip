@@ -94,7 +94,8 @@ raw; 358 book logs on this machine), Rocky's answers and the rough edges.
 5. **Filter removed.** `applyFilters` and `limitBreaches` drop "seller updated too recently";
    `daysSinceInBandSellerUpdate` stays in the report for the "days idle" tooltip. (Q3, Q8.)
 6. **Where computed.** `public/market-stats.js` (UMD like `estimate.js`, `node:test` beside it)
-   runs on the server behind `GET /api/market-stats?regionId=&stationId=&typeIds=&windowDays=`
+   runs on the server behind `POST /api/market-stats` (body `{regionId, stationId, windowDays, now?, types:
+   [{typeId, ordersPerDay}]}`; a POST because each type carries its own pace)
    (≤ 500 ids a call, computed on request from the book logs; revisit caching when M2 multiplies
    the logs). The page fetches it in batches once the books are loaded, passes each type's answer
    to the estimate as `observed`, keeps it in the row's `inputs` for re-estimates, and saves
