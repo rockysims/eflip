@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const zlib = require('node:zlib');
 const { createSyncService } = require('../lib/sync');
 const { createTokenStore } = require('../lib/tokenStore');
 const derive = require('../lib/derive');
@@ -19,14 +20,16 @@ const GRANT = 90000002;
 const STRUCTURE = 1028858195912;
 const HOUR = 60 * 60 * 1000;
 
-// path (relative, slash-separated) -> text of every file under `dir`.
+// path (relative, slash-separated) -> text of every file under `dir`; a gzipped file (`.gz`: book
+// logs, public market raw) by its decompressed text, so what compares is the stable text inside.
+const fileText = (file) => (file.endsWith('.gz') ? zlib.gunzipSync(fs.readFileSync(file)).toString('utf8') : fs.readFileSync(file, 'utf8'));
 const treeOf = (dir) => {
 	const out = {};
 	const visit = (current) => {
 		for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
 			const full = path.join(current, entry.name);
 			if (entry.isDirectory()) visit(full);
-			else if (!entry.name.startsWith('.')) out[path.relative(dir, full).split(path.sep).join('/')] = fs.readFileSync(full, 'utf8');
+			else if (!entry.name.startsWith('.')) out[path.relative(dir, full).split(path.sep).join('/')] = fileText(full);
 		}
 	};
 	if (fs.existsSync(dir)) visit(dir);
@@ -224,9 +227,9 @@ test('a book log folded from rows in hand is the log foldBook builds, and the re
 
 	const first = [row(1, 35, 100), row(2, 35, 90, { is_buy_order: true })];
 	const second = [row(1, 35, 99)];
-	const file = path.join(ctx.dataDir, 'ledger', 'market', String(REGION), '35.json');
+	const file = path.join(ctx.dataDir, 'ledger', 'market', String(REGION), '35.json.gz');
 	const bytes = derive.updateBookLogWithRows({ ledger, regionId: REGION, typeId: 35, at: '2026-11-20T12:00:00.000Z', rows: first });
-	assert.equal(bytes, fs.statSync(file).size, 'the bytes it answers are the file\'s');
+	assert.equal(bytes, fs.statSync(file).size, 'the bytes it answers are the (compressed) file\'s');
 	derive.updateBookLogWithRows({ ledger, regionId: REGION, typeId: 35, at: '2026-11-20T13:00:00.000Z', rows: second });
 	derive.updateBookLogWithRows({ ledger, regionId: REGION, typeId: 35, at: '2026-11-20T14:00:00.000Z', rows: [] });
 
@@ -234,7 +237,7 @@ test('a book log folded from rows in hand is the log foldBook builds, and the re
 	derive.foldBook(expected, { at: '2026-11-20T12:00:00.000Z', stored: true, rows: first });
 	derive.foldBook(expected, { at: '2026-11-20T13:00:00.000Z', stored: true, rows: second });
 	derive.foldBook(expected, { at: '2026-11-20T14:00:00.000Z', stored: true, rows: [] });
-	assert.equal(fs.readFileSync(file, 'utf8'), bookLogText(expected), 'byte for byte');
+	assert.equal(fileText(file), bookLogText(expected), 'byte for byte, inside the gzip');
 	assert.deepEqual(expected.orders[1].path.map(entry => entry.price), [100, 99]);
 	assert.equal(expected.orders[2].lastSeen, '2026-11-20T12:00:00.000Z', 'an order left out of a later sample keeps its last sighting');
 
@@ -243,7 +246,7 @@ test('a book log folded from rows in hand is the log foldBook builds, and the re
 	const run = await ctx.service.syncRegionBook({ regionId: REGION, force: true });
 	assert.equal(run.status, 'ok');
 	assert.equal(derive.bookPages(createRawStore({ dataDir: ctx.dataDir })).size, 0);
-	const before = fs.readFileSync(path.join(ctx.dataDir, 'ledger', 'market', String(REGION), '36.json'), 'utf8');
+	const before = fs.readFileSync(path.join(ctx.dataDir, 'ledger', 'market', String(REGION), '36.json.gz'));
 	assert.deepEqual(derive.rebuildBookLogs({ dataDir: ctx.dataDir }), { logs: 0 }, 'no per-type raw: nothing to rebuild, and no log is touched');
-	assert.equal(fs.readFileSync(path.join(ctx.dataDir, 'ledger', 'market', String(REGION), '36.json'), 'utf8'), before);
+	assert.deepEqual(fs.readFileSync(path.join(ctx.dataDir, 'ledger', 'market', String(REGION), '36.json.gz')), before);
 });

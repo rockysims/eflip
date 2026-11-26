@@ -2,7 +2,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { mergeRows, rowsText, classifySlug, createLedger, snapshotHash, KINDS } = require('../lib/ledger');
+const zlib = require('node:zlib');
+const { mergeRows, rowsText, classifySlug, createLedger, snapshotHash, bookLogText, KINDS } = require('../lib/ledger');
 const { tmpDataDir, tx, journalRow, historyOrder, contract } = require('../test-support/esi-fake');
 
 const CHAR = 90000001;
@@ -166,7 +167,7 @@ test('book logs: written bytes, file size and the ids a region has', (t) => {
 	assert.deepEqual(ledger.listBookLogs(10000043), []);
 	assert.equal(ledger.bookLogBytes(10000043, 35), 0);
 	const written = ledger.writeBookLog(10000043, 35, { samples: [{ at: '2026-11-20T12:00:00.000Z', stored: true }], orders: {} });
-	assert.equal(written, fs.statSync(path.join(ledger.root, 'market', '10000043', '35.json')).size);
+	assert.equal(written, fs.statSync(path.join(ledger.root, 'market', '10000043', '35.json.gz')).size, 'the compressed bytes');
 	assert.equal(ledger.bookLogBytes(10000043, 35), written);
 	ledger.writeBookLog(10000043, 9, { samples: [], orders: {} });
 	ledger.writeBookLog(10000043, 1000, { samples: [], orders: {} });
@@ -174,4 +175,40 @@ test('book logs: written bytes, file size and the ids a region has', (t) => {
 	fs.writeFileSync(path.join(ledger.root, 'market', '10000043', 'notes.txt'), 'stray');
 	assert.deepEqual(ledger.listBookLogs(10000043), [9, 35, 1000], 'numeric order, stray files ignored');
 	assert.deepEqual(ledger.listBookLogs(10000002), [34]);
+});
+
+test('book logs are written gzipped with the stable text inside; a plain log from before is read, listed once, and replaced on the next write', (t) => {
+	const ledger = createLedger({ dataDir: tmpDataDir(t) });
+	const dir = path.join(ledger.root, 'market', '10000043');
+	const log = { samples: [{ at: '2026-11-20T12:00:00.000Z', stored: true }], orders: { 7: { firstSeen: '2026-11-20T12:00:00.000Z', path: [{ at: '2026-11-20T12:00:00.000Z', price: 5 }] } } };
+	ledger.writeBookLog(10000043, 35, log);
+	assert.deepEqual(fs.readdirSync(dir), ['35.json.gz']);
+	assert.equal(zlib.gunzipSync(fs.readFileSync(path.join(dir, '35.json.gz'))).toString('utf8'), bookLogText(log), 'the stable text, compressed');
+	assert.equal(mode(path.join(dir, '35.json.gz')), 0o600);
+	assert.equal(ledger.bookLogFile(10000043, 35), path.join(dir, '35.json.gz'));
+
+	// a plain log as written before gzip: read as it is, counted once, its own size
+	const old = { samples: [{ at: '2026-11-19T12:00:00.000Z', stored: true }], orders: {} };
+	fs.writeFileSync(path.join(dir, '36.json'), bookLogText(old));
+	assert.ok(ledger.hasBookLog(10000043, 36));
+	assert.deepEqual(ledger.readBookLog(10000043, 36), old);
+	assert.equal(ledger.bookLogBytes(10000043, 36), Buffer.byteLength(bookLogText(old)));
+	assert.equal(ledger.bookLogFile(10000043, 36), path.join(dir, '36.json'));
+	assert.deepEqual(ledger.listBookLogs(10000043), [35, 36]);
+
+	// the next write migrates it: the gzipped file replaces the plain one
+	const grown = { samples: [...old.samples, { at: '2026-11-20T12:00:00.000Z', stored: true }], orders: {} };
+	const bytes = ledger.writeBookLog(10000043, 36, grown);
+	assert.deepEqual(fs.readdirSync(dir).sort(), ['35.json.gz', '36.json.gz']);
+	assert.equal(bytes, ledger.bookLogBytes(10000043, 36));
+	assert.deepEqual(ledger.readBookLog(10000043, 36), grown);
+
+	// both forms at once (a plain file put back by hand): the gzipped one is read, the type listed once
+	fs.writeFileSync(path.join(dir, '35.json'), bookLogText(old));
+	assert.deepEqual(ledger.readBookLog(10000043, 35), log);
+	assert.deepEqual(ledger.listBookLogs(10000043), [35, 36]);
+	assert.equal(ledger.bookLogBytes(10000043, 35), fs.statSync(path.join(dir, '35.json.gz')).size);
+	assert.equal(ledger.hasBookLog(10000043, 37), false);
+	assert.equal(ledger.bookLogFile(10000043, 37), null);
+	assert.deepEqual(ledger.readBookLog(10000043, 37), { samples: [], orders: {} });
 });

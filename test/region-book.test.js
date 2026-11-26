@@ -2,9 +2,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const zlib = require('node:zlib');
 const { createSyncService } = require('../lib/sync');
 const { createTokenStore } = require('../lib/tokenStore');
 const { acquireLock, createRawStore } = require('../lib/dataFiles');
+const { createLedger } = require('../lib/ledger');
 const {
 	ALL_SCOPES, makeClock, tmpDataDir, makeLog, makeTokens, createFakeEsi, order, asset,
 } = require('../test-support/esi-fake');
@@ -47,12 +49,14 @@ const SNAPSHOT_B = [
 	bookOrder(4, 36, 200), bookOrder(6, 34, 50, { location_id: 60003760 }),
 ];
 
-const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
-const bookLog = (dataDir, typeId) => readJson(path.join(dataDir, 'ledger', 'market', String(REGION), `${typeId}.json`));
-const hasLog = (dataDir, typeId) => fs.existsSync(path.join(dataDir, 'ledger', 'market', String(REGION), `${typeId}.json`));
+// book logs and public market raw are gzipped (`.json.gz`)
+const readJson = (file) => JSON.parse(file.endsWith('.gz') ? zlib.gunzipSync(fs.readFileSync(file)).toString('utf8') : fs.readFileSync(file, 'utf8'));
+const logFile = (dataDir, typeId, region = REGION) => path.join(dataDir, 'ledger', 'market', String(region), `${typeId}.json.gz`);
+const bookLog = (dataDir, typeId) => readJson(logFile(dataDir, typeId));
+const hasLog = (dataDir, typeId) => createLedger({ dataDir }).hasBookLog(REGION, typeId);
 const rawNames = (dataDir, slug) => {
 	try {
-		return fs.readdirSync(path.join(dataDir, 'raw', 'public', slug)).filter(name => name.endsWith('.json')).sort();
+		return fs.readdirSync(path.join(dataDir, 'raw', 'public', slug)).filter(name => /\.json(?:\.gz)?$/.test(name)).sort();
 	} catch (e) {
 		return [];
 	}
@@ -78,6 +82,7 @@ test('two pages of a region fold into one sample per type: a new log, existing l
 	assert.equal(first.typesEnded, 0);
 	// raw page by page, under esi.js's own slugs: page 1 without `page`
 	assert.equal(rawNames(dataDir, SLUG).length, 1);
+	assert.match(rawNames(dataDir, SLUG)[0], /\.json\.gz$/, 'a regional page is stored gzipped');
 	assert.equal(rawNames(dataDir, `${SLUG}-page-2`).length, 1);
 	assert.equal(rawNames(dataDir, `${SLUG}-page-3`).length, 0);
 	const rawPage = readJson(path.join(dataDir, 'raw', 'public', SLUG, rawNames(dataDir, SLUG)[0]));
@@ -159,21 +164,25 @@ test('the run is one entry in the public sync log with what it cost', async (t) 
 	assert.equal(one.elapsedMs, 0, 'the test clock did not move');
 	assert.equal(one.limits.groups[`public|market-order`].group, 'market-order');
 	assert.equal(one.limits.groups[`public|market-order`].limit, 12000);
-	// the bytes of the page bodies as they came, and of the files written (those carry headers too)
+	// the bytes of the page bodies as they came, and of the files written: rawBytesStored counts the
+	// bytes on disk, which since P2.2 are compressed (the pages are `.json.gz`); the text inside
+	// carries the headers too, so it is longer than the bodies
 	const bodies = [SNAPSHOT_A.slice(0, 3), SNAPSHOT_A.slice(3)].map(rows => JSON.stringify(rows).length);
 	assert.equal(one.rawBytes, bodies[0] + bodies[1]);
-	const onDisk = [SLUG, `${SLUG}-page-2`].map(slug => fs.statSync(path.join(dataDir, 'raw', 'public', slug, rawNames(dataDir, slug)[0])).size);
-	assert.equal(one.rawBytesStored, onDisk[0] + onDisk[1]);
-	assert.ok(one.rawBytesStored > one.rawBytes);
-	// the byte counts are the files' sizes
-	const sizes = (typeIds) => typeIds.map(typeId => fs.statSync(path.join(dataDir, 'ledger', 'market', String(REGION), `${typeId}.json`)).size).reduce((a, b) => a + b, 0);
+	const pageFiles = [SLUG, `${SLUG}-page-2`].map(slug => path.join(dataDir, 'raw', 'public', slug, rawNames(dataDir, slug)[0]));
+	const onDisk = pageFiles.map(file => fs.statSync(file).size);
+	assert.equal(one.rawBytesStored, onDisk[0] + onDisk[1], 'the compressed bytes on disk');
+	const inside = pageFiles.map(file => zlib.gunzipSync(fs.readFileSync(file)).length);
+	assert.ok(inside[0] + inside[1] > one.rawBytes);
+	// the log byte counts are the files' sizes, compressed too
+	const sizes = (typeIds) => typeIds.map(typeId => fs.statSync(logFile(dataDir, typeId)).size).reduce((a, b) => a + b, 0);
 	assert.equal(two.logBytesAfter, sizes([34, 35, 36, 37]), 'every log the run touched, new or not');
 	assert.equal(two.logBytesBefore, one.logBytesAfter);
 	assert.ok(two.logBytesAfter > two.logBytesBefore);
 	assert.equal(two.typesFolded, 4);
 	assert.equal(two.orders, 5);
 	// the page files each snapshot was cut from, for a rebuild to replay
-	assert.deepEqual(one.pageStamps, [rawNames(dataDir, SLUG)[0], rawNames(dataDir, `${SLUG}-page-2`)[0]].map(name => name.replace(/T(\d\d)-(\d\d)-(\d\d)-(\d{3})Z\.json$/, 'T$1:$2:$3.$4Z')));
+	assert.deepEqual(one.pageStamps, [rawNames(dataDir, SLUG)[0], rawNames(dataDir, `${SLUG}-page-2`)[0]].map(name => name.replace(/T(\d\d)-(\d\d)-(\d\d)-(\d{3})Z\.json(?:\.gz)?$/, 'T$1:$2:$3.$4Z')));
 	assert.deepEqual(one.books, [], 'no per-type check is recorded here');
 	// the answer is the measurement too
 	assert.equal(second.tokensUsed, two.tokensUsed);
@@ -323,7 +332,7 @@ test('the region is the destination region of the newest export run, else where 
 	assert.equal(named.status, 'ok');
 	assert.equal(named.regionId, 10000002);
 	assert.ok(regionCalls(fake).every(call => call.path === '/markets/10000002/orders'));
-	assert.ok(fs.existsSync(path.join(dataDir, 'ledger', 'market', '10000002', '34.json')));
+	assert.ok(fs.existsSync(logFile(dataDir, 34, 10000002)));
 });
 
 test('a type with raw per-type books but no log gets its log built from them before the regional sample; a damaged log is reported and the rest fold', async (t) => {
@@ -335,7 +344,7 @@ test('a type with raw per-type books but no log gets its log built from them bef
 	const market = await service.syncMarket({ force: true, concurrency: 1 });
 	assert.equal(market.status, 'ok');
 	assert.equal(bookLog(dataDir, 35).samples.length, 1);
-	fs.rmSync(path.join(dataDir, 'ledger', 'market', String(REGION), '35.json'));
+	fs.rmSync(logFile(dataDir, 35));
 
 	clock.advance(HOUR);
 	fake.market.regionOrders.set(String(REGION), SNAPSHOT_A);
@@ -349,7 +358,7 @@ test('a type with raw per-type books but no log gets its log built from them bef
 	// a log that will not parse: reported, the others still fold, the snapshot still counts as taken
 	clock.advance(HOUR);
 	fake.market.regionOrders.set(String(REGION), SNAPSHOT_B);
-	fs.writeFileSync(path.join(dataDir, 'ledger', 'market', String(REGION), '36.json'), '{not json');
+	fs.writeFileSync(logFile(dataDir, 36), '{not gzip');
 	const damaged = await service.syncRegionBook({ regionId: REGION });
 	assert.equal(damaged.status, 'partial');
 	assert.equal(damaged.foldErrors, 1);

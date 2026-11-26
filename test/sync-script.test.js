@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const zlib = require('node:zlib');
 const { spawnSync } = require('node:child_process');
 const { main, parseArgs, formatSummary, formatWatch, formatRegionBook, formatRegionBookReport, hasFailure, watchFailed, UsageError } = require('../scripts/sync');
 const { acquireLock, createRawStore } = require('../lib/dataFiles');
@@ -174,7 +175,7 @@ test('--watch runs one tick, prints each character and each type, and a second r
 	assert.ok(!text.includes('secret-refresh') && !text.includes('token-'));
 	assert.deepEqual(ctx.errors, []);
 	assert.ok(fs.existsSync(path.join(ctx.dataDir, 'ledger', String(IVAN), 'order-log.json')));
-	assert.ok(fs.existsSync(path.join(ctx.dataDir, 'ledger', 'market', String(REGION), '35.json')));
+	assert.ok(fs.existsSync(path.join(ctx.dataDir, 'ledger', 'market', String(REGION), '35.json.gz')));
 	assert.ok(fs.existsSync(path.join(ctx.dataDir, 'esi-cache', 'public', '_watch.json')));
 
 	ctx.fake.reset();
@@ -253,12 +254,13 @@ test('--rebuild also rebuilds the order log and the book logs, and lists what th
 	ctx.fake.market.orders.set(`${REGION}:35`, [bookOrder(8001, 35, 1000)]);
 	await ctx.run(['--watch', '--region', String(REGION)]);
 	const orderLog = path.join(ctx.dataDir, 'ledger', String(IVAN), 'order-log.json');
-	const bookLog = path.join(ctx.dataDir, 'ledger', 'market', String(REGION), '35.json');
-	const before = [fs.readFileSync(orderLog, 'utf8'), fs.readFileSync(bookLog, 'utf8')];
+	const bookLog = path.join(ctx.dataDir, 'ledger', 'market', String(REGION), '35.json.gz');
+	const texts = () => [fs.readFileSync(orderLog, 'utf8'), zlib.gunzipSync(fs.readFileSync(bookLog)).toString('utf8')];
+	const before = texts();
 	fs.rmSync(path.join(ctx.dataDir, 'ledger'), { recursive: true });
 	ctx.lines.length = 0;
 	assert.equal(await ctx.run(['--rebuild'], { env: {} }), 0);
-	assert.deepEqual([fs.readFileSync(orderLog, 'utf8'), fs.readFileSync(bookLog, 'utf8')], before, 'both logs, byte for byte');
+	assert.deepEqual(texts(), before, 'both logs, byte for byte (the book log\'s text inside its gzip)');
 	assert.match(ctx.lines.join('\n'), /90000001: .*, 1 logged orders/);
 	assert.match(ctx.lines.join('\n'), /book logs: 1/);
 	assert.ok(!/warning:/.test(ctx.lines.join('\n')));
@@ -335,7 +337,7 @@ test('--region-book takes one snapshot of the whole region without the flag, pri
 	assert.match(text, /^  tokens left: market-order 11994\/12000$/m);
 	assert.deepEqual(ctx.fake.calls.map(call => call.path), Array(3).fill(`/markets/${REGION}/orders`), 'nothing but the region pages: no character, no market');
 	assert.ok(ctx.fake.calls.every(call => call.query.order_type === 'all'));
-	assert.ok(fs.existsSync(path.join(ctx.dataDir, 'ledger', 'market', String(REGION), '38.json')));
+	assert.ok(fs.existsSync(path.join(ctx.dataDir, 'ledger', 'market', String(REGION), '38.json.gz')));
 	assert.ok(!text.includes('secret-refresh') && !text.includes('token-'));
 	assert.deepEqual(ctx.errors, []);
 

@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const zlib = require('node:zlib');
 const { createSyncService } = require('../lib/sync');
 const { createTokenStore } = require('../lib/tokenStore');
 const { createLedger, orderLogText, bookLogText } = require('../lib/ledger');
@@ -295,14 +296,16 @@ test('an hourly sync alone keeps the order log: an answer it stores is folded, a
 	assert.equal(fs.readFileSync(logFile, 'utf8'), before, 'a history row for an order the log never saw is not added');
 });
 
-// path (relative, slash-separated) -> text of every file under `dir`.
+// path (relative, slash-separated) -> text of every file under `dir`; a gzipped file (the book
+// logs) by its decompressed text, so what compares is the stable text inside.
+const fileText = (file) => (file.endsWith('.gz') ? zlib.gunzipSync(fs.readFileSync(file)).toString('utf8') : fs.readFileSync(file, 'utf8'));
 const treeOf = (dir) => {
 	const out = {};
 	const visit = (current) => {
 		for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
 			const full = path.join(current, entry.name);
 			if (entry.isDirectory()) visit(full);
-			else if (!entry.name.startsWith('.')) out[path.relative(dir, full).split(path.sep).join('/')] = fs.readFileSync(full, 'utf8');
+			else if (!entry.name.startsWith('.')) out[path.relative(dir, full).split(path.sep).join('/')] = fileText(full);
 		}
 	};
 	if (fs.existsSync(dir)) visit(dir);
@@ -361,8 +364,8 @@ test('re-deriving from raw gives byte-for-byte the order log and the book logs t
 	assert.equal(orderLog[8002].end.volumeRemain, 0);
 	assert.equal(orderLog[8001].end, null);
 	const names = Object.keys(incremental).filter(name => name.startsWith('market/'));
-	assert.deepEqual(names, [`market/${REGION}/34.json`, `market/${REGION}/35.json`, `market/${REGION}/36.json`], 'the types of the snapshot; the buy-order-only type 37 is not one');
-	const log35 = JSON.parse(incremental[`market/${REGION}/35.json`]);
+	assert.deepEqual(names, [`market/${REGION}/34.json.gz`, `market/${REGION}/35.json.gz`, `market/${REGION}/36.json.gz`], 'the types of the snapshot; the buy-order-only type 37 is not one');
+	const log35 = JSON.parse(incremental[`market/${REGION}/35.json.gz`]);
 	assert.ok(log35.samples.some(sample => sample.stored) && log35.samples.some(sample => !sample.stored), 'stored checks and 304s');
 	assert.equal(Object.keys(log35.orders).length, 6, 'the three pages as assembled, the new one included');
 	assert.deepEqual(log35.orders[9003].path.map(entry => entry.price), [1030, 1029]);
@@ -418,7 +421,7 @@ test('logs that predate the watch are built from raw and the old sync logs first
 	assert.equal(readJson(path.join(dataDir, 'ledger', String(IVAN), 'order-log.json'))[8001].path.length, 2);
 
 	// the held type 34 is only in the hourly snapshot: its log is built when that next checks it
-	assert.ok(!fs.existsSync(path.join(dataDir, 'ledger', 'market', String(REGION), '34.json')));
+	assert.ok(!createLedger({ dataDir }).hasBookLog(REGION, 34));
 	clock.advance(10 * MINUTE);
 	await restarted.syncAll({ force: true });
 	assert.deepEqual(createLedger({ dataDir }).readBookLog(REGION, 34).samples.map(sample => sample.stored), [true, false, false]);

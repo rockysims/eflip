@@ -297,3 +297,23 @@ test('public routes go out without Authorization and land under raw/public', asy
 	assert.equal(fetch.calls[0].headers.Authorization, undefined);
 	assert.equal(names(rawDir(dataDir, 'public', 'markets-10000043-orders-type-id-34')).length, 1);
 });
+
+test('a public market answer is stored gzipped, and the next 200 is compared with it: the same body is not stored again', async (t) => {
+	const clock0 = makeClock();
+	const { dataDir, client, clock } = setup(t, [
+		respond(200, [{ order_id: 1, price: 10 }], { expires: expiresIn(clock0, 100) }),
+		respond(200, [{ order_id: 1, price: 10 }], { expires: expiresIn(clock0, 5000) }),
+		respond(200, [{ order_id: 1, price: 9 }], { expires: expiresIn(clock0, 9000) }),
+	]);
+	const dir = rawDir(dataDir, 'public', 'markets-10000043-orders-type-id-34');
+	const get = () => client.get({ owner: 'public', path: '/markets/10000043/orders', query: { type_id: 34 } });
+	assert.equal((await get()).stored, true);
+	assert.deepEqual(names(dir), ['2026-11-20T12-00-00-000Z.json.gz']);
+	assert.equal(mode(path.join(dir, names(dir)[0])), 0o600);
+	clock.advance(200 * 1000);
+	assert.equal((await get()).stored, false, 'read back from the gzipped file and found equal');
+	clock.advance(6000 * 1000);
+	assert.equal((await get()).stored, true);
+	assert.equal(names(dir).length, 2);
+	assert.ok(names(dir).every(name => name.endsWith('.json.gz')));
+});
