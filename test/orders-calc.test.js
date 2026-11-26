@@ -1416,6 +1416,17 @@ test('fmtCompactDuration: minutes, hours and days, one decimal under 10, no spac
 	assert.equal(f(NaN), '');
 });
 
+test('fmtCompactDuration rounds before it picks the unit: 59.6 minutes is 1h and 23.6 hours 1d, in the sentence too', () => {
+	const f = ordersCalc.fmtCompactDuration;
+	assert.equal(f(59.6 * MIN), '1h');
+	assert.equal(f(23.6 * HOUR), '1d');
+	// 149 units at 3,600 a day: 59.6 minutes behind; 59 units at 60 a day: 23.6 hours behind
+	const minutes = verdictRow({ ahead: 149, history: flatHistory(3600) });
+	assert.deepEqual([minutes.verdict, minutes.reason, minutes.reasonText], ['leave', '1h', '149 units ahead at 3,600 a day: the queue ahead clears in about 1 hour']);
+	const hours = verdictRow({ ahead: 59, history: flatHistory(60) }, { thresholds: { leaveHours: 24 } });
+	assert.deepEqual([hours.verdict, hours.reason, hours.reasonText], ['leave', '1d', '59 units ahead at 60 a day: the queue ahead clears in about 1 day']);
+});
+
 test('reason tokens and their sentences for every verdict branch', () => {
 	const cases = [
 		[{ ahead: 13, trade: 3, history: flatHistory(5) }, {}, 'undercut', '2.6d', '13 units ahead at 5 a day: 2.6 days behind'],

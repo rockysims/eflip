@@ -263,21 +263,26 @@
 
 	// Text for reasons only (decision 21); every numeric field stays unrounded. One decimal under 10.
 	const oneDecimalUnder10 = (x) => (x < 10 ? Math.round(x * 10) / 10 : Math.round(x));
-	// The reason tokens' durations: '<1min', '35min', '1.1h', '12h', '2.6d', '14d'.
+	// The reason tokens' durations: '<1min', '35min', '1.1h', '12h', '2.6d', '14d'. Rounded before the
+	// unit is chosen, so a figure that rounds to 60 minutes or 24 hours reads '1h' or '1d'.
 	const fmtCompactDuration = (ms) => {
 		if (typeof ms !== 'number' || !Number.isFinite(ms)) return '';
 		const minutes = ms / MINUTE_MS;
 		if (minutes < 1) return '<1min';
-		if (ms < HOUR_MS) return `${Math.max(1, Math.round(minutes))}min`;
-		if (ms < DAY_MS) return `${oneDecimalUnder10(ms / HOUR_MS)}h`;
+		const wholeMinutes = Math.max(1, Math.round(minutes));
+		if (wholeMinutes < 60) return `${wholeMinutes}min`;
+		const hours = oneDecimalUnder10(ms / HOUR_MS);
+		if (hours < 24) return `${hours}h`;
 		return `${oneDecimalUnder10(ms / DAY_MS)}d`;
 	};
 	// The same duration in words, for the sentences: 'under a minute', '35 minutes', '1.1 hours', '2.6 days'.
 	const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 	const spokenDuration = (ms) => {
 		if (ms < MINUTE_MS) return 'under a minute';
-		if (ms < HOUR_MS) return plural(Math.max(1, Math.round(ms / MINUTE_MS)), 'minute');
-		if (ms < DAY_MS) return plural(oneDecimalUnder10(ms / HOUR_MS), 'hour');
+		const minutes = Math.max(1, Math.round(ms / MINUTE_MS));
+		if (minutes < 60) return plural(minutes, 'minute');
+		const hours = oneDecimalUnder10(ms / HOUR_MS);
+		if (hours < 24) return plural(hours, 'hour');
 		return plural(oneDecimalUnder10(ms / DAY_MS), 'day');
 	};
 	// Counts and rates: one decimal under 10, grouped ('0.2', '5', '1,234').
