@@ -713,7 +713,7 @@
 			lines.push(`Limits: leave under ${thresholds.leaveHours} h, undercut over ${thresholds.undercutDays} d, ROI floor ${thresholds.minRoi}x.`);
 		}
 		if (isNum(r.expectedSalesBeforeUndercut)) {
-			lines.push(`Others undercut after about ${dur(r.medianTimeOnTop)}: ~${nf2.format(Math.round(r.expectedSalesBeforeUndercut * 10) / 10)} units sell before then${isNum(r.expectedGainBeforeUndercut) ? `, worth ~${fmtExact(r.expectedGainBeforeUndercut)} against a fee of ~${isNum(r.feeEstimate) ? fmtExact(r.feeEstimate) : 'unknown'}` : ''}.`);
+			lines.push(`Others undercut after about ${dur(r.medianTimeOnTop)}: ~${nf2.format(Math.round(r.expectedSalesBeforeUndercut * 10) / 10)} units sell before then${isNum(r.expectedGainBeforeUndercut) ? `, worth ~${fmtExact(r.expectedGainBeforeUndercut)}` : ''}${isNum(r.feeEstimate) ? ` against a fee of ~${fmtExact(r.feeEstimate)}.` : '. The relist fee is not known yet (no relist of this order or this item in the ledger), so it is not weighed.'}`);
 		}
 		if (r.priceWar) lines.push(`Price war: the order that undercut this one changed its price ${r.reUndercuts} times since.`);
 		return lines.filter(Boolean).join('\n');
