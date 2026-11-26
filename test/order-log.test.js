@@ -168,6 +168,36 @@ test('buildOrderLog folds the raw orders records in time order and keeps the led
 	assert.equal(fs.readFileSync(path.join(quiet, 'ledger', String(IVAN), 'order-log.json'), 'utf8'), '{}\n');
 });
 
+test('updateOrderLog folds every raw orders record newer than anything the log holds, in stamp order, and skips one whose body is not a list', (t) => {
+	const dataDir = tmpDataDir(t);
+	const raw = createRawStore({ dataDir });
+	const ledger = createLedger({ dataDir });
+	const write = (stamp, body) => raw.write(IVAN, 'orders', { fetchedAt: stamp, url: 'x', status: 200, headers: {}, body });
+	write(T(0), [row(8001), row(8002)]);
+	derive.updateOrderLog({ raw, ledger, characterId: IVAN });
+	assert.deepEqual(Object.keys(ledger.readOrderLog(IVAN)), ['8001', '8002'], 'an empty log takes every record');
+
+	// two answers stored since (say one by a run killed before it folded), written out of order
+	write(T(20), [row(8001, { price: 990 })]);
+	write(T(10), [row(8001), row(8002, { volume_remain: 3 })]);
+	derive.updateOrderLog({ raw, ledger, characterId: IVAN });
+	const log = ledger.readOrderLog(IVAN);
+	assert.deepEqual(log[8001].path.map(entry => [entry.at, entry.price]), [[T(0), 1000], [T(20), 990]]);
+	assert.deepEqual(log[8002].path.map(entry => [entry.at, entry.volumeRemain]), [[T(0), 5], [T(10), 3]]);
+	assert.deepEqual(log[8002].end, { state: null, volumeRemain: null, at: T(20) });
+	const built = createLedger({ dataDir, root: path.join(path.dirname(dataDir), 'built') });
+	derive.buildOrderLog({ raw, ledger: built, characterId: IVAN });
+	assert.equal(orderLogText(ledger.readOrderLog(IVAN)), orderLogText(built.readOrderLog(IVAN)), 'what a build from raw gives');
+
+	// an answer that is not a list is no answer: open orders stay open, and folding again changes nothing
+	write(T(30), 'Service Unavailable');
+	const text = orderLogText(ledger.readOrderLog(IVAN));
+	derive.updateOrderLog({ raw, ledger, characterId: IVAN });
+	assert.equal(ledger.readOrderLog(IVAN)[8001].end, null);
+	derive.updateOrderLog({ raw, ledger, characterId: IVAN });
+	assert.equal(orderLogText(ledger.readOrderLog(IVAN)), text);
+});
+
 test('book checks come from the sync logs and the raw page files: new entries, old entries, and files nothing names', (t) => {
 	const dataDir = tmpDataDir(t);
 	const raw = createRawStore({ dataDir });
@@ -294,6 +324,30 @@ test('an hourly sync alone keeps the order log: an answer it stores is folded, a
 	const before = fs.readFileSync(logFile, 'utf8');
 	await service.syncCharacter(IVAN, { force: true });
 	assert.equal(fs.readFileSync(logFile, 'utf8'), before, 'a history row for an order the log never saw is not added');
+});
+
+test('an orders answer stored by a sync killed before it folded is folded by the next sync, which stores nothing new', async (t) => {
+	const { dataDir, fake, service, clock } = setup(t);
+	fake.character(IVAN, { orders: [order(8001, { type_id: 35 })] });
+	await service.syncCharacter(IVAN, { force: true });
+	const logFile = path.join(dataDir, 'ledger', String(IVAN), 'order-log.json');
+	assert.equal(readJson(logFile)[8001].end, null);
+
+	// the answer a killed run stored (Ctrl-C during the orders-history walk): in raw, never folded
+	const killedAt = new Date(clock() + 30 * MINUTE).toISOString();
+	service.raw.write(IVAN, 'orders', { fetchedAt: killedAt, url: `https://esi.evetech.net/characters/${IVAN}/orders`, status: 200, headers: {}, body: [] });
+
+	clock.advance(2 * HOUR);
+	fake.character(IVAN).orders = [];
+	const next = await service.syncCharacter(IVAN, { force: true });
+	assert.equal(next.status, 'ok', JSON.stringify(next.errors));
+	assert.equal(next.routes.orders.stored, 0, 'the same body as the stored answer: nothing new');
+	assert.deepEqual(readJson(logFile)[8001].end, { state: null, volumeRemain: null, at: killedAt });
+
+	const fresh = tmpDataDir(t);
+	fs.cpSync(path.join(dataDir, 'raw'), path.join(fresh, 'raw'), { recursive: true });
+	derive.rebuildAll({ dataDir: fresh, log: makeLog() });
+	assert.equal(fs.readFileSync(path.join(fresh, 'ledger', String(IVAN), 'order-log.json'), 'utf8'), fs.readFileSync(logFile, 'utf8'), 'the order log a rebuild gives');
 });
 
 // path (relative, slash-separated) -> text of every file under `dir`; a gzipped file (the book
