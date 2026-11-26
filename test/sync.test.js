@@ -820,3 +820,34 @@ test('with a storage budget the market step ends with the storage step; syncAll 
 	// the market step still reads its regions from the newest market entry, past the storage entries
 	assert.deepEqual(service.readMarket({ typeIds: [35] }).regionIds, [REGION]);
 });
+
+test('a status read while a storage run yields is not answered after the run: the run measures afresh when it ends', async (t) => {
+	const { createLedger } = require('../lib/ledger');
+	const derive = require('../lib/derive');
+	const { dataDir, clock, service } = setup(t, { service: { env: { EFLIP_STORAGE_BUDGET: '1' } } });
+	const REGION = 10000043;
+	const row = (id, typeId) => ({ order_id: id, type_id: typeId, price: 100 + id, is_buy_order: false, volume_remain: 5, volume_total: 10, issued: '2026-11-08T10:00:00Z', duration: 90, range: 'region', location_id: 60008494, system_id: 30002187, min_volume: 1 });
+	// 120 logs (the storage run yields every 100), each with orders last seen ten days ago, which the
+	// trim drops, and a sample an hour old inside the 3-day floor, which it keeps
+	const ledger = createLedger({ dataDir });
+	for (let typeId = 1; typeId <= 120; typeId++) {
+		const log = { samples: [], orders: {} };
+		derive.foldBook(log, { at: '2026-11-10T12:00:00.000Z', stored: true, rows: Array.from({ length: 30 }, (_, i) => row(typeId * 100 + i, typeId)) });
+		derive.foldBook(log, { at: new Date(clock() - HOUR).toISOString(), stored: true, rows: [] });
+		ledger.writeBookLog(REGION, typeId, log);
+	}
+
+	let during = null;
+	setImmediate(() => {
+		during = service.storageStatus(); // GET /api/config while the run is between two batches of logs
+	});
+	const result = await service.runStorage();
+	assert.equal(result.status, 'ok', JSON.stringify(result));
+	assert.ok(result.trims.bookLogs.logs > 0, 'the logs were trimmed');
+	assert.ok(during, 'the read came while the run was going');
+	assert.equal(during.total, result.totalBefore, 'it measured the logs before the trim');
+	assert.ok(result.totalAfter < result.totalBefore);
+
+	clock.advance(1000);
+	assert.equal(service.storageStatus().total, result.totalAfter, 'not the measurement taken before the trim');
+});
