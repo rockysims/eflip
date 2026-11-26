@@ -7,6 +7,7 @@ const { createSyncService } = require('../lib/sync');
 const { createTokenStore } = require('../lib/tokenStore');
 const { acquireLock, createRawStore } = require('../lib/dataFiles');
 const { createLedger } = require('../lib/ledger');
+const derive = require('../lib/derive');
 const {
 	ALL_SCOPES, makeClock, tmpDataDir, makeLog, makeTokens, createFakeEsi, order, asset,
 } = require('../test-support/esi-fake');
@@ -66,6 +67,27 @@ const regionBookEntries = (dataDir) => {
 	return raw.syncLogStamps('public').map(stamp => raw.readSyncLog('public', stamp)).filter(entry => entry.kind === 'regionBook');
 };
 const regionCalls = (fake) => fake.callsTo(/^\/markets\/\d+\/orders$/).filter(call => call.query.order_type !== undefined);
+// every book log under ledger/market/, path -> the file's bytes as they are on disk (gzip and all)
+const marketBytes = (dataDir) => {
+	const root = path.join(dataDir, 'ledger', 'market');
+	const out = {};
+	const visit = (dir) => {
+		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+			const full = path.join(dir, entry.name);
+			if (entry.isDirectory()) visit(full);
+			else if (!entry.name.startsWith('.')) out[path.relative(root, full).split(path.sep).join('/')] = fs.readFileSync(full);
+		}
+	};
+	if (fs.existsSync(root)) visit(root);
+	return out;
+};
+// the book logs `--rebuild-book-logs` gives from a copy of raw/ alone
+const rebuiltMarket = (t, dataDir) => {
+	const fresh = tmpDataDir(t);
+	fs.cpSync(path.join(dataDir, 'raw'), path.join(fresh, 'raw'), { recursive: true });
+	derive.rebuildAll({ dataDir: fresh, log: makeLog(), bookLogs: true });
+	return marketBytes(fresh);
+};
 
 test('two pages of a region fold into one sample per type: a new log, existing logs that gain a sample and a path, and an empty sample for a type whose orders ended', async (t) => {
 	const { dataDir, fake, clock, service } = setup(t);
@@ -226,8 +248,49 @@ test('a page that fails makes the run partial and folds nothing; the next run ta
 	assert.equal(healed.notDue, 1);
 	assert.equal(healed.tokensUsed, 2);
 	assert.equal(healed.typesFolded, 3);
-	assert.equal(healed.fetchedAt, partial.fetchedAt, 'the snapshot is dated by its first page');
+	assert.ok(healed.fetchedAt > partial.fetchedAt);
+	assert.equal(healed.fetchedAt, new Date(clock()).toISOString(), 'page 1 is still cached from a run that did not fold: the snapshot is dated by the run that folds it');
 	assert.equal(bookLog(dataDir, 35).orders[3].isBuy, true);
+});
+
+test('a snapshot healed after a watch tick checked one of its types is folded after that check: the log stays in time order and equals a rebuild', async (t) => {
+	const { dataDir, fake, clock, service } = setup(t);
+	fake.character(IVAN, { orders: [order(8001, { type_id: 35 })] });
+	fake.market.regionOrders.set(String(REGION), SNAPSHOT_A);
+	fake.market.orders.set(`${REGION}:35`, [bookOrder(1, 35, 100)]);
+	fake.respondWith = (call) => (call.query.order_type !== undefined && call.query.page === '2' ? new Response(JSON.stringify({ error: 'Bad Gateway' }), { status: 502, headers: { 'content-type': 'application/json' } }) : null);
+	const partial = await service.syncRegionBook({ regionId: REGION, force: true });
+	assert.equal(partial.status, 'partial');
+	fake.respondWith = null;
+
+	// two minutes on, a watch tick checks 35's own book: re-priced
+	clock.advance(2 * MINUTE);
+	fake.market.orders.set(`${REGION}:35`, [bookOrder(1, 35, 95)]);
+	const tick = await service.syncWatch({ regionIds: [REGION] });
+	assert.equal(tick.market.status, 'ok', JSON.stringify(tick.market));
+	assert.deepEqual(tick.market.types.map(type => [type.typeId, type.outcome]), [[35, 'stored']]);
+
+	// a minute on, inside page 1's cache window: page 1 from raw, page 2 from ESI
+	clock.advance(MINUTE);
+	const healed = await service.syncRegionBook({ regionId: REGION });
+	assert.equal(healed.status, 'ok', JSON.stringify(healed.errors));
+	assert.equal(healed.notDue, 1);
+	assert.equal(healed.fetchedAt, new Date(clock()).toISOString(), 'dated by the run that folded it, not by the partial run\'s page 1');
+	const log35 = bookLog(dataDir, 35);
+	const times = log35.samples.map(sample => sample.at);
+	assert.equal(times.length, 2);
+	assert.deepEqual(times, [...times].sort(), 'samples in time order');
+	assert.equal(log35.orders[1].lastSeen, times[times.length - 1], 'last seen at the newest sample');
+	assert.deepEqual(marketBytes(dataDir), rebuiltMarket(t, dataDir), 'a rebuild from raw gives the same bytes');
+
+	// a forced run a minute later finds page 1 still cached from the partial run, older than the fold: folded already
+	clock.advance(MINUTE);
+	fake.reset();
+	const again = await service.syncRegionBook({ regionId: REGION, force: true });
+	assert.equal(again.status, 'skipped');
+	assert.match(again.reason, /folded already/);
+	assert.equal(fake.calls.length, 0);
+	assert.equal(bookLog(dataDir, 35).samples.length, 2);
 });
 
 test('a snapshot already folded is not folded again inside the cache window, and an unforced run waits for the hour', async (t) => {
