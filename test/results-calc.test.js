@@ -14,6 +14,7 @@ const { pickBatchesByVolume, assignByGap } = resultsCalc._internal;
 // Characters: the buyer (hands goods over at the source) and the seller (couriers and sells them).
 const BUYER = 91000001;
 const SELLER = 91000002;
+const SELLER_2 = 91000003; // a second selling character, linked only where a test says so
 const HAULER_A = 93000001;
 const HAULER_B = 93000002;
 const OUTSIDER = 93000009;
@@ -42,13 +43,15 @@ const approx = (actual, expected, eps = 1e-6) => assert.ok(Math.abs(actual - exp
 const plusMinutes = (iso, minutes) => new Date(Date.parse(iso) + minutes * 60000).toISOString().replace('.000Z', 'Z');
 
 // Builds per-character ledgers the way lib/ledger.js readAll() returns them, plus snapshots.
-const makeFixture = () => {
+// `extraLinked`: characters linked besides the buyer and the seller.
+const makeFixture = ({ extraLinked = [] } = {}) => {
 	const next = { tx: 7000000000, j: 26000000000, order: 7400000000, contract: 238000000, record: 5370000000, item: 1030000000000 };
 	const ledgers = {};
 	const led = (c) => ledgers[c] || (ledgers[c] = { transactions: [], journal: [], ordersHistory: [], contracts: [], contractItems: {}, snapshots: [] });
 	led(BUYER);
 	led(SELLER);
-	const linked = (c) => c === BUYER || c === SELLER;
+	for (const c of extraLinked) led(c);
+	const linked = (c) => c === BUYER || c === SELLER || extraLinked.includes(c);
 	const f = { ledgers, next, led };
 
 	f.row = (c, row) => {
@@ -176,7 +179,7 @@ const makeFixture = () => {
 		rows: rows.map(([typeId, qty, extra = {}]) => ({ typeId, name: `type ${typeId}`, m3: M3[typeId], qty, factor: 1, recommended: qty, ...extra })),
 		totals: { costMil: 0, revenueMil: 0, profitMil: 0, km3: 0 }, lastCopiedAt: copiedAt, copyCount: 1, context: {}
 	});
-	f.compute = (extra = {}) => compute({ characterIds: [BUYER, SELLER], ledgers, route: ROUTE, m3: M3, now: NOW, ...extra });
+	f.compute = (extra = {}) => compute({ characterIds: [BUYER, SELLER, ...extraLinked], ledgers, route: ROUTE, m3: M3, now: NOW, ...extra });
 	return f;
 };
 
@@ -575,6 +578,132 @@ test('run mode broker fees: the type\'s fees from copiedAt to the run\'s sell-ou
 	assert.equal(r2.soldQty, 1);
 	approx(r2.broker, 200 * 4 / 5);
 	approx(r2.remaining.qty, 3);
+});
+
+//--- transfers (rule 2, decision 21)
+
+// The buyer hands 10 units to the seller, a courier carries them, the seller sells 7 and hands the
+// last 3 to a second linked seller at the destination, who sells them. Options vary the case.
+const transferFixture = ({ transfer = true, olderBuyerLot = false, sellerBuys = false, exchangeType = T1, laterCourier = false } = {}) => {
+	const f = makeFixture({ extraLinked: [SELLER_2] });
+	const runs = [f.run({ id: 'r1', copiedAt: at('11-02T00:00:00'), rows: [[T1, 10]] })];
+	// Bought before the hand-off, but the hand-off's 10 units are covered by the newer lot.
+	const older = olderBuyerLot ? f.buy(BUYER, { type: T1, qty: 5, price: 900000, date: at('11-01T09:00:00') }) : null;
+	const lot = f.buy(BUYER, { type: T1, qty: 10, price: 1000000, date: at('11-02T09:00:00') });
+	const handoff = f.handoff({ issued: at('11-02T10:00:00'), items: [[T1, 10]], price: 5000000, brokerFee: 10000 });
+	const courier = f.courier({ issued: at('11-02T10:30:00'), accepted: at('11-02T10:40:00'), completed: at('11-02T14:00:00'), volume: 10, reward: 100000, items: [[T1, 10]] });
+	f.sell(SELLER, { type: T1, qty: 7, price: 1500000, date: at('11-04T00:00:00'), rate: 0.0375 });
+	const own = sellerBuys ? f.buy(SELLER, { type: T1, qty: 3, price: 1200000, date: at('11-05T00:00:00'), loc: D }) : null;
+	const exchange = transfer
+		? f.handoff({ from: SELLER, to: SELLER_2, issued: at('11-06T00:00:00'), items: [[exchangeType, 3]], price: 1000000, brokerFee: 10000, loc: D })
+		: null;
+	const later = laterCourier
+		? f.courier({ issued: at('11-06T01:00:00'), accepted: at('11-06T01:10:00'), completed: at('11-06T05:00:00'), volume: 3, reward: 30000, items: [[T1, 3]] })
+		: null;
+	f.sell(SELLER_2, { type: T1, qty: 3, price: 1600000, date: at('11-07T00:00:00'), rate: 0.0375 });
+	return { f, runs, older, lot, handoff, courier, own, exchange, later };
+};
+
+test('transfer: the seller hands the last units of a batch to a second seller; no new batch, no lot consumed, its broker fee is haul on the source batch', () => {
+	const x = transferFixture();
+	const r = x.f.compute({ runs: x.runs });
+
+	assert.deepEqual(r.warnings.filter(w => w.kind === 'unsourced'), []);
+	assert.equal(r.totals.unsourcedUnits, 0);
+	assert.deepEqual(r.batches.map(b => b.batchId), [x.handoff.contract_id]);
+	assert.deepEqual(r.runs.map(run => [run.runId, run.batchIds]), [['r1', [x.handoff.contract_id]]]);
+	assert.deepEqual(r.couriers.map(k => [k.courierId, k.batchIds]), [[x.courier.contract_id, [x.handoff.contract_id]]]);
+	assert.equal(r.facts.transfers.length, 1);
+	assert.deepEqual(r.facts.transfers[0], {
+		contractId: x.exchange.contract_id, issuerId: SELLER, receiverId: SELLER_2,
+		issuedAt: at('11-06T00:00:00'), completedAt: at('11-06T00:01:00'),
+		items: [{ typeId: T1, qty: 3, fromBatchIds: [x.handoff.contract_id] }], cost: 10000
+	});
+	assert.equal(r.totals.transfers, 1);
+	assert.equal(r.totals.transferredUnits, 3);
+	// The second seller's sale draws from the buyer's lot, carried and hauled as before.
+	const lot = lotOf(r, x.lot.transaction_id);
+	assert.equal(lot.batchId, x.handoff.contract_id);
+	assert.equal(lot.soldQty, 10);
+	const second = r.facts.sells.filter(s => s.characterId === SELLER_2);
+	assert.deepEqual(second.map(s => [s.lotId, s.qty, s.batchId, s.courierId, s.unarrived]), [[lot.lotId, 3, x.handoff.contract_id, x.courier.contract_id, false]]);
+	assert.ok(second.every(s => s.haulShare > 0));
+	// Its price is internal on both sides; its broker fee is a transfer fee on the source batch.
+	const priceRows = r.facts.fees.filter(fee => fee.contractId === x.exchange.contract_id && fee.refType === 'contract_price');
+	assert.equal(priceRows.length, 2);
+	assert.ok(priceRows.every(fee => fee.kind === 'internal' && fee.counted === false));
+	const brokerRows = r.facts.fees.filter(fee => fee.contractId === x.exchange.contract_id && fee.refType === 'contract_brokers_fee');
+	assert.deepEqual(brokerRows.map(fee => [fee.kind, fee.batchId, fee.cost, fee.counted, fee.attributed]), [['transfer', x.handoff.contract_id, 10000, true, true]]);
+	assert.equal(r.crossCheck.internal, 0);
+	approx(r.crossCheck.unattributed, 0);
+	// Haul per unit: both hand-off broker fees over the batch's 10 units, plus the courier (reward
+	// 100000 + broker 11000; the deposit came back) over the same 10 units.
+	assert.equal(r.batches[0].handoffCost, 20000);
+	approx(lot.haulPerUnit, 2000 + 11100);
+	const base = transferFixture({ transfer: false }).f.compute({ runs: x.runs });
+	approx(lot.haulPerUnit, lotOf(base, x.lot.transaction_id).haulPerUnit + 1000);
+	approx(r.totals.haulPaid, 10000 + 10000 + 111000);
+	// Realized: 7 sold at 1.5 M and 3 at 1.6 M, 3.75 % tax, no listing fees, the 10 units' landed cost.
+	const gross = 7 * 1500000 + 3 * 1600000;
+	approx(r.totals.realizedProfit, gross - gross * 0.0375 - 0 - 10 * (1000000 + 13100));
+	approx(r.totals.realizedProfit, r.types.reduce((acc, t) => acc + t.realizedProfit, 0));
+
+	// Window: dated by completion. A run counts the transfers that moved its batches, with their fees.
+	assert.equal(x.f.compute({ runs: x.runs, window: { since: at('11-07T00:00:00') } }).totals.transfers, 0);
+	const rr = x.f.compute({ runs: x.runs, window: { runId: 'r1' } });
+	assert.equal(rr.totals.transfers, 1);
+	assert.ok(rr.facts.fees.some(fee => fee.kind === 'transfer' && fee.contractId === x.exchange.contract_id));
+	approx(rr.totals.haulPaid, 10000 + 10000 + 111000);
+});
+
+test('transfer: an older never-handed-off lot of the buyer stays unbatched', () => {
+	const x = transferFixture({ olderBuyerLot: true });
+	const r = x.f.compute();
+	assert.equal(r.facts.transfers.length, 1);
+	assert.equal(r.batches.length, 1);
+	assert.equal(lotOf(r, x.lot.transaction_id).batchId, x.handoff.contract_id);
+	const older = lotOf(r, x.older.transaction_id);
+	assert.equal(older.batchId, null);
+	assert.equal(older.qty, 5, 'not split');
+	assert.equal(older.soldQty, 0);
+	assert.equal(r.totals.unsourcedUnits, 0);
+	assert.equal(r.totals.unbatchedLots, 1);
+});
+
+test('transfer: a seller who bought units of the type himself before the contract makes a batch, sourced from his purchase', () => {
+	const x = transferFixture({ sellerBuys: true });
+	const r = x.f.compute();
+	assert.deepEqual(r.facts.transfers, []);
+	assert.equal(r.totals.transfers, 0);
+	const batch = r.batches.find(b => b.batchId === x.exchange.contract_id);
+	assert.deepEqual(batch.items.map(it => [it.typeId, it.qty, it.sourcedQty, it.unsourcedQty]), [[T1, 3, 3, 0]]);
+	assert.equal(lotOf(r, x.own.transaction_id).batchId, x.exchange.contract_id);
+	assert.equal(lotOf(r, x.lot.transaction_id).batchId, x.handoff.contract_id);
+	const brokerRows = r.facts.fees.filter(fee => fee.contractId === x.exchange.contract_id && fee.refType === 'contract_brokers_fee');
+	assert.deepEqual(brokerRows.map(fee => [fee.kind, fee.batchId]), [['handoff', x.exchange.contract_id]]);
+});
+
+test('transfer: a contract of a type the seller never received nor bought is still a batch with unsourced units', () => {
+	const x = transferFixture({ exchangeType: T2 });
+	const r = x.f.compute();
+	assert.deepEqual(r.facts.transfers, []);
+	assert.equal(r.totals.transfers, 0);
+	const batch = r.batches.find(b => b.batchId === x.exchange.contract_id);
+	assert.deepEqual(batch.items.map(it => [it.typeId, it.qty, it.sourcedQty, it.unsourcedQty]), [[T2, 3, 0, 3]]);
+	assert.deepEqual(r.warnings.filter(w => w.kind === 'unsourced').map(w => [w.batchId, w.typeId, w.qty]), [[x.exchange.contract_id, T2, 3]]);
+	assert.equal(r.totals.unsourcedUnits, 3);
+	assert.ok(typeRow(r, T2).flags.includes('unsourced'));
+});
+
+test('transfer: a courier issued after it, with overlapping items, does not claim it', () => {
+	const x = transferFixture({ laterCourier: true });
+	const r = x.f.compute();
+	assert.equal(r.facts.transfers.length, 1);
+	assert.deepEqual(r.batches.map(b => b.batchId), [x.handoff.contract_id]);
+	const later = r.couriers.find(k => k.courierId === x.later.contract_id);
+	assert.deepEqual(later.batchIds, []);
+	assert.equal(later.unattributed, true, 'every lot of the type was carried already');
+	assert.equal(lotOf(r, x.lot.transaction_id).courierId, x.courier.contract_id);
 });
 
 //--- hauling (rules 6 and 7)

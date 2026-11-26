@@ -459,6 +459,7 @@
 		}
 		if (isNum(t.unbatchedLots)) add('unbatched lots', fmtQty(t.unbatchedLots), 'purchases in the window that no hand-off took: they stay out of this view, but what they sold is still counted in the sales');
 		if (isNum(t.unsourcedUnits)) add('unsourced units', fmtQty(t.unsourcedUnits), 'units in a hand-off contract with no matching purchase in the synced history');
+		if (isNum(t.transfers) && t.transfers > 0) add('transfers between characters', fmtQty(t.transfers), 'item-exchange contracts that moved units a selling character had received through an earlier hand-off to another linked character; the lots, their run and haul are unchanged');
 		if (isNum(t.otherDonations)) add('other donations', `${fmtQty(t.otherDonations)}${t.otherDonations > 0 ? ` <span class="dim">(${esc(fmtIsk(t.otherDonationsAmount))})</span>` : ''}`, 'donations to people who are not a courier\u2019s hauler: listed, never counted as cost');
 		if (isNum(t.uncoveredQty) && t.uncoveredQty > 0) add('uncovered units', `${fmtQty(t.uncoveredQty)}${isNum(t.uncoveredGross) && t.uncoveredGross > 0 ? ` <span class="dim">(${esc(fmtIsk(t.uncoveredGross))} gross)</span>` : ''}`, `units sold with no purchase left to match (bought before the synced history began, or by a character that is not linked): ${fmtExact(t.uncoveredGross)} of sales that stay out of gross, tax and realized profit`);
 		totalsEl.hidden = false;

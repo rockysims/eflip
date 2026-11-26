@@ -1,10 +1,12 @@
 // Trade results accounting: turns the ledgers of the linked characters (wallet transactions and
 // journal, orders, contracts and their items, retained snapshots) into what an export really did:
-// lots, batches, couriers, FIFO sells, realized profit per type, what is left, and an event-level
-// fact table every chart groups for itself. Pure: no network, no DOM, no clock (the caller passes
-// `now`), so it runs under `node --test` and loads in the page with a plain <script>.
-// The rules are docs/trade-results-plan.md, "Profit accounting rules" 1-12 and "Comparison to the
-// prediction"; the comments below name the rule they implement.
+// lots, batches (the buyer's hand-offs) and transfers (a seller passing units of a batch on to
+// another linked character, which move no lot), couriers, FIFO sells, realized profit per type,
+// what is left, and an event-level fact table every chart groups for itself (sells, fees, lots,
+// transfers, relists). Pure: no network, no DOM, no clock (the caller passes `now`), so it runs
+// under `node --test` and loads in the page with a plain <script>.
+// The rules are docs/trade-results-plan.md, "Profit accounting rules" 1-12 (transfers: rule 2,
+// decision 21) and "Comparison to the prediction"; the comments below name the rule they implement.
 //
 // Browser: <script src="results-calc.js"></script> defines `window.resultsCalc`.
 // Node:    const resultsCalc = require('./public/results-calc.js');
@@ -588,17 +590,54 @@
 		return qty;
 	};
 
+	// Decision 21: a finished hand-off is a transfer when its issuer passes on units he himself
+	// received through an earlier batch (a seller handing the last units of a batch to another
+	// seller): every included type has a lot batched to an earlier finished hand-off whose receiver
+	// is this issuer, and the issuer bought no not-yet-batched lot of any included type by its
+	// date_issued (else he bought for this hand-off, and it is a batch). Per type, fromBatchIds are
+	// those source batches, newest first. null when it is not a transfer.
+	const transferOf = (ctx, c, issuedMs, qtyByType) => {
+		if (qtyByType.size === 0 || issuedMs === null) return null;
+		const issuer = c.issuer_id;
+		if (ctx.lots.some(l => l.characterId === issuer && l.batchId === null && l.ms <= issuedMs && qtyByType.has(l.typeId))) return null;
+		const items = [];
+		for (const [typeId, qty] of qtyByType) {
+			const ids = new Set(ctx.lots.filter(l => l.typeId === typeId && l.batchId !== null).map(l => l.batchId));
+			const from = [...ids].map(id => ctx.batchById.get(id))
+				.filter(b => b.receiverId === issuer && b.issuedMs < issuedMs)
+				.sort((a, b) => b.issuedMs - a.issuedMs || b.batchId - a.batchId);
+			if (from.length === 0) return null;
+			items.push({ typeId, qty, fromBatchIds: from.map(b => b.batchId) });
+		}
+		return {
+			contractId: c.contract_id, contract: c, issuerId: issuer,
+			receiverId: ctx.L.has(c.assignee_id) ? c.assignee_id : c.acceptor_id,
+			issuedMs, completedMs: toMs(c.date_completed), items, cost: 0
+		};
+	};
+
 	// A batch is a finished hand-off: its included items, per type, consume the newest unbatched
 	// lots bought by L before its date_issued (any location), splitting a lot if needed. A deleted
-	// hand-off never happened.
+	// hand-off never happened. A transfer (transferOf) is not a batch: it consumes no lot (the lots
+	// keep their batch, run, courier and haul, and FIFO is pooled anyway), so it goes to
+	// ctx.transfers and never into ctx.batches, which runs, couriers and the insights read.
 	const buildBatches = (ctx) => {
 		ctx.handoffs = [...ctx.contracts.values()].filter(c => isHandoff(ctx, c)).sort(cmpIssued);
 		ctx.batches = [];
 		ctx.batchById = new Map();
+		ctx.transfers = [];
+		ctx.transferById = new Map();
 		for (const c of ctx.handoffs) {
 			if (!isFinished(c.status)) continue;
 			const issuedMs = toMs(c.date_issued);
 			const itemList = ctx.items.get(c.contract_id);
+			const qtyByType = includedQty(itemList);
+			const transfer = transferOf(ctx, c, issuedMs, qtyByType);
+			if (transfer) {
+				ctx.transfers.push(transfer);
+				ctx.transferById.set(transfer.contractId, transfer);
+				continue;
+			}
 			const batch = {
 				batchId: c.contract_id, contract: c, issuedMs,
 				completedMs: toMs(c.date_completed), issuerId: c.issuer_id,
@@ -608,7 +647,7 @@
 				items: [], unsourcedQty: 0, runId: null, courierId: null,
 				handoffCost: 0, rolledIn: 0, est: false, noItems: itemList === undefined
 			};
-			for (const [typeId, qty] of includedQty(itemList)) {
+			for (const [typeId, qty] of qtyByType) {
 				let need = qty;
 				const candidates = ctx.lots.filter(l => l.typeId === typeId && l.batchId === null && l.ms <= issuedMs)
 					.sort((a, b) => cmpLot(b, a));
@@ -670,15 +709,25 @@
 	};
 
 	// Rule 7: the hand-off's own fees (its broker fee) are haul cost on the batch's lots, split by
-	// m3. Its contract_price is internal. A dead hand-off's fees roll into the next finished hand-off
-	// of the same issuer (its replacement); with none they stay unattributed.
+	// m3. Its contract_price is internal. A transfer's fees (decision 21) add to the hand-off cost of
+	// the newest source batch among its types, so they reach the transferred units' lots the same
+	// way. A dead hand-off's fees roll into the next finished hand-off of the same issuer (its
+	// replacement); with none they stay unattributed.
 	const attributeHandoffs = (ctx) => {
 		for (const c of ctx.handoffs) {
 			const { cost, rows } = contractCost(ctx, c);
 			for (const j of ctx.rowsByContract.get(c.contract_id) || []) {
 				if (j.ref_type === 'contract_price') ctx.feeInfo.set(rowKey(j), { kind: 'internal', contractId: c.contract_id });
 			}
-			if (isFinished(c.status)) {
+			const transfer = isFinished(c.status) ? ctx.transferById.get(c.contract_id) : undefined;
+			if (transfer) {
+				const sources = [...new Set(transfer.items.flatMap(it => it.fromBatchIds))].map(id => ctx.batchById.get(id))
+					.sort((a, b) => b.issuedMs - a.issuedMs || b.batchId - a.batchId);
+				const batch = sources[0];
+				transfer.cost = cost;
+				batch.handoffCost += cost;
+				for (const j of rows) ctx.feeInfo.set(rowKey(j), { kind: 'transfer', contractId: c.contract_id, batchId: batch.batchId });
+			} else if (isFinished(c.status)) {
 				const batch = ctx.batchById.get(c.contract_id);
 				batch.handoffCost += cost;
 				for (const j of rows) ctx.feeInfo.set(rowKey(j), { kind: 'handoff', contractId: c.contract_id, batchId: batch.batchId });
@@ -979,6 +1028,12 @@
 		const holdLots = isRun ? boughtLots : ctx.lots.filter(inPlay);
 		const batches = isRun ? ctx.batches.filter(b => b.runId === runId) : ctx.batches.filter(b => inWin(b.issuedMs));
 		const runCourierIds = new Set(batches.map(b => b.courierId).filter(id => id !== null));
+		// Transfers (decision 21), dated by completion, else issue; a run's are those that moved
+		// units of its batches.
+		const runBatchIds = new Set(batches.map(b => b.batchId));
+		const transfers = isRun
+			? ctx.transfers.filter(t => t.items.some(it => it.fromBatchIds.some(id => runBatchIds.has(id))))
+			: ctx.transfers.filter(t => inWin(t.completedMs !== null ? t.completedMs : t.issuedMs));
 
 		// --- broker fees per type: matched sell-order fees, unfilled buy-order fees, and the
 		// pro-rata remainder spread by gross sell value at D over the window's span.
@@ -1177,7 +1232,6 @@
 
 		// --- fees fact table
 		const sellTxIds = new Set(allocations.map(a => sellKey(a.sell)));
-		const runBatchIds = new Set(batches.map(b => b.batchId));
 		const fees = [];
 		for (const j of ctx.journal) {
 			const info = ctx.feeInfo.get(rowKey(j));
@@ -1192,7 +1246,7 @@
 					const own = allocations.filter(a => sellKey(a.sell) === key);
 					share = sum(own, a => a.qty) / own[0].sell.quantity;
 				}
-			} else if (info.kind === 'handoff' || info.kind === 'deletedHandoff') include = info.batchId !== null && runBatchIds.has(info.batchId);
+			} else if (info.kind === 'handoff' || info.kind === 'deletedHandoff' || info.kind === 'transfer') include = info.batchId !== null && runBatchIds.has(info.batchId);
 			else if (info.kind === 'courier' || info.kind === 'deletedCourier' || info.kind === 'haulerBonus') include = info.courierId !== null && runCourierIds.has(info.courierId);
 			else if (info.kind === 'listing' || info.kind === 'relist') {
 				include = typeIds.has(info.typeId) && typeFeeWindow(info.typeId, j.ms);
@@ -1238,9 +1292,11 @@
 			unpricedTypes: types.filter(t => t.remaining.qty > 0 && t.unrealizedAtMarket === null).length,
 			uncoveredQty: sum(types, t => t.uncoveredQty),
 			uncoveredGross: sum(types, t => t.uncoveredGross),
-			haulPaid: sum(fees.filter(f => ['courier', 'handoff', 'deletedCourier', 'deletedHandoff'].includes(f.kind) || (f.kind === 'haulerBonus' && f.counted)), f => f.cost * (f.share === undefined ? 1 : f.share)),
+			haulPaid: sum(fees.filter(f => ['courier', 'handoff', 'transfer', 'deletedCourier', 'deletedHandoff'].includes(f.kind) || (f.kind === 'haulerBonus' && f.counted)), f => f.cost * (f.share === undefined ? 1 : f.share)),
 			unbatchedLots: isRun ? 0 : ctx.lots.filter(l => !inPlay(l) && inWin(l.ms)).length,
 			unsourcedUnits: sum(batches, b => b.unsourcedQty),
+			transfers: transfers.length,
+			transferredUnits: sum(transfers, t => sum(t.items, it => it.qty)),
 			otherSells: isRun ? 0 : ctx.otherSells.filter(s => inWin(s.ms)).length,
 			otherDonations: isRun ? 0 : ctx.otherDonations.filter(d => inWin(d.ms)).length,
 			otherDonationsAmount: isRun ? 0 : sum(ctx.otherDonations.filter(d => inWin(d.ms)), d => -d.amount),
@@ -1268,6 +1324,7 @@
 				sells,
 				fees,
 				lots: ctx.lots.map(l => lotOut(l)),
+				transfers: ctx.transfers.map(t => transferOut(t)),
 				relists: relistsOut(ctx)
 			}
 		};
@@ -1285,7 +1342,7 @@
 			}
 			case 'listing': case 'relist': case 'buyOrder': case 'buyOrderUnfilled': return true;
 			case 'brokerRemainder': return Boolean(split && split.length > 0);
-			case 'handoff': case 'deletedHandoff': case 'courier': case 'deletedCourier': return true;
+			case 'handoff': case 'transfer': case 'deletedHandoff': case 'courier': case 'deletedCourier': return true;
 			case 'haulerBonus': return info.counted === true;
 			case 'refundedFee': case 'gmRefund': return true;
 			default: return false;
@@ -1396,6 +1453,15 @@
 			unplannedTypes: [...new Set(batches.flatMap(b => b.items.filter(it => it.unplanned).map(it => it.typeId)))].sort((a, b) => a - b)
 		};
 	};
+
+	// facts.transfers (decision 21): the contract, who handed what to whom, the source batches of
+	// each type (newest first) and the contract's own fees.
+	const transferOut = (t) => ({
+		contractId: t.contractId, issuerId: t.issuerId, receiverId: t.receiverId,
+		issuedAt: iso(t.issuedMs), completedAt: iso(t.completedMs),
+		items: t.items.map(it => ({ typeId: it.typeId, qty: it.qty, fromBatchIds: it.fromBatchIds.slice() })),
+		cost: t.cost
+	});
 
 	const lotOut = (l) => ({
 		lotId: l.lotId, transactionId: l.transactionId, journalId: l.journalId, typeId: l.typeId, characterId: l.characterId,

@@ -333,6 +333,21 @@ destination station D), the runs, packaged m3 per type, the window, and the bonu
      type, newest-first may hand the first contract the later purchase; the totals are unchanged,
      only the split of cost between the two batches. Accepted (decision 10).
    - Lots no batch consumes stay unbatched and show as a count, not as P&L exclusions.
+   - A **transfer** (decision 21, 2026-11-26) is a finished `item_exchange` contract between two
+     characters of L that moves units the issuer had itself received through an earlier batch,
+     the seller handing the last units of a batch to another seller. A contract is a transfer when
+     every included type has at least one lot batched to an earlier finished hand-off whose
+     receiver is this contract's issuer, and the issuer bought no not-yet-batched lot of any
+     included type before this `date_issued`; otherwise it is a batch as above (the issuer bought
+     for this hand-off). A transfer consumes no lot: the lots keep their batch, run, courier and
+     haul, FIFO is pooled anyway, and the receiver's sells at D draw from them as the issuer's
+     did. It is not a batch: couriers never claim it, no run maps to it, the insights pages count
+     no new hand-off, and no unit is `unsourced`. It is listed in the fact table as
+     `transfers: [{contractId, issuerId, receiverId, issuedAt, completedAt, items: [{typeId, qty,
+     fromBatchIds}], cost}]` and counted in the totals. Its `contract_price` is internal (rule 7)
+     and its own fees (the broker fee) add to the hand-off cost of the newest source batch among
+     its types, so they reach the transferred units' lots as haul the same way a hand-off's own
+     fees do (an approximation: the fee is 10,000 ISK a contract in the samples).
 3. **FIFO per type, pooled across L.** Order lots by `date`, then `transaction_id`. Each sell at D
    consumes the oldest units and records `{sellTxId, lotId, qty}`.
    - Lots that have arrived go first: carried by a `finished` courier (rule 6), through their
@@ -879,6 +894,20 @@ Checked on the real ledger: the waterfall equals the totals strip to the cent. A
 20. GM refunds (2026-11-19): a `gm_cash_transfer` equal to the cent to an earlier `brokers_fee`
     of the same character within 30 days voids that fee, and the GM row itself never counts
     (Rocky: "GM refund can be ignored if you also ignore the matching broker fee").
+21. Transfers (2026-11-26): a finished item exchange between two linked characters whose issuer
+    received the units through an earlier hand-off is a custody transfer, not a new batch (rule
+    2). Rocky's case: Grant hands the last units of a batch to a new selling character, Max. Read
+    as a batch, such a contract would show every unit as `unsourced` (the lots were taken by the
+    Ivan → Grant hand-off) and, worse, consume any older never-handed-off lots of the same types
+    that Ivan still holds; a later courier could claim it and the insights pages would count a
+    second hand-off for the run. The price on the contract changes nothing: the existing Ivan →
+    Grant hand-offs already carry prices of 35 M to 256 M ISK, which appear as `contract_price` on
+    both sides and are ignored as internal flows (rule 7); only the issuer's 10,000 ISK
+    `contract_brokers_fee` counts, as haul on the lots. The discriminator (the issuer bought none
+    of the types himself) keeps a seller who also buys on the batch path. Known limits, left for
+    when a case appears: units received through a transfer cannot be transferred on again (the
+    receiver has no batch of his own, so a chain reads as a batch); a transfer of more units than
+    the issuer received is not flagged; the fee lands on the newest source batch only.
 
 ### Still open
 
