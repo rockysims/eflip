@@ -158,8 +158,9 @@ test('ROI floor on the cheapest order: 1 unit shown, filtered as nothing to buy'
 	assert.equal(report.roi, 0.92);
 	assert.equal(report.daysToClear, 0.8); // (1 + 7) / 10
 	assert.equal(report.filteredReason, 'nothing to buy');
-	// the figures break the ROI floor, and the report says so
-	assert.ok(limitBreaches(report, {}).includes('roi'));
+	// the figures are below the ROI floor; that is the page's ROI column filter to flag, not limitBreaches's
+	assert.ok(report.roi < defaultConfig.MIN_ROI);
+	assert.ok(!limitBreaches(report, {}).includes('roi'));
 });
 
 test('an empty book keeps the volume-0 fallback', () => {
@@ -281,7 +282,8 @@ test('target volume walks the source book to the target, past the ROI floor', ()
 	assert.equal(report.stopRoi, null);
 	assert.equal(report.costPerItemMil, 6.23); // (10 x 1.1M + 20 x 8.8M) / 30 = 6.233M
 	assert.equal(report.roi, 1.29);
-	assert.equal(report.filteredReason, 'margin too slim'); // the estimate still applies its filters; the page keeps the recommendation's
+	assert.equal(report.roi < defaultConfig.MIN_ROI, true);
+	assert.equal(report.filteredReason, null); // a slim ROI is the page's column filter now, not the estimate's; the page keeps the recommendation's filtered state anyway
 	assert.deepEqual(srcOrders.map(o => o.volume_remain), [10, 1000]);
 });
 
@@ -380,10 +382,13 @@ test('applyFilters reasons', () => {
 	};
 	assert.equal(applyFilters(ok, {}), null);
 	assert.equal(applyFilters(null, {}), 'no report');
-	assert.equal(applyFilters({ ...ok, dailyProfitMil: 0.5 }, {}), 'not profitable');
 	assert.equal(applyFilters({ ...ok, volume: 0 }, {}), 'not profitable');
-	assert.equal(applyFilters({ ...ok, revenuePerItemMil: 1.2 }, {}), 'margin too slim');
-	assert.equal(applyFilters({ ...ok, activeDaysFraction: 0.1 }, {}), 'too slow');
+	// daily profit, ROI and active days are the page's column filters now: alone, a low value passes
+	assert.equal(applyFilters({ ...ok, dailyProfitMil: 0.5 }, {}), null);
+	assert.equal(applyFilters({ ...ok, revenuePerItemMil: 1.2 }, {}), null);
+	assert.equal(applyFilters({ ...ok, activeDaysFraction: 0.1 }, {}), null);
+	// all three low at once, with units to buy, an idle seller and no rivals, still passes
+	assert.equal(applyFilters({ ...ok, roi: 1.2, revenuePerItemMil: 1.2, dailyProfitMil: 0.5, activeDaysFraction: 0.1 }, {}), null);
 	// dailyProfit 2 => threshold 1.00 day
 	assert.equal(applyFilters({ ...ok, dailyProfitMil: 2, daysSinceSellerUpdate: 0.5 }, {}), 'seller updated too recently');
 	assert.equal(applyFilters({ ...ok, dailyProfitMil: 2, daysSinceSellerUpdate: 1.01 }, {}), null);
@@ -401,12 +406,14 @@ test('applyFilters: a floored report is filtered as nothing to buy, unless alway
 });
 
 test('limitBreaches names the fields that break a limit', () => {
+	// a low daily profit, ROI and active days are the page's column filters: they are not named here
 	const broken = { volume: 10, dailyProfitMil: 0.5, revenuePerItemMil: 1, costPerItemMil: 1, activeDaysFraction: 0.1, daysSinceInBandSellerUpdate: 10, rivals: 0, daysToClear: 9 };
-	assert.deepEqual(limitBreaches(broken, { DAYS_TO_COMPLETE: 5 }), ['dailyProfitMil', 'roi', 'activeDaysFraction', 'daysToClear']);
+	assert.deepEqual(limitBreaches({ ...broken, daysToClear: 4 }, { DAYS_TO_COMPLETE: 5 }), []);
+	assert.deepEqual(limitBreaches(broken, { DAYS_TO_COMPLETE: 5 }), ['daysToClear']);
 
 	const healthy = { volume: 10, dailyProfitMil: 20, revenuePerItemMil: 5, costPerItemMil: 1, activeDaysFraction: 0.5, daysSinceInBandSellerUpdate: 3, rivals: 0, daysToClear: 4 };
 	assert.deepEqual(limitBreaches(healthy, { DAYS_TO_COMPLETE: 5 }), []);
-	assert.deepEqual(limitBreaches(healthy), [], 'the default config has the 5-day horizon and the 1.5x floor');
+	assert.deepEqual(limitBreaches(healthy), [], 'the default config has the 5-day horizon');
 
 	// only the in-band idle figure is tiny (the all-orders figure is ignored when the in-band one exists)
 	assert.deepEqual(limitBreaches({ ...healthy, daysSinceInBandSellerUpdate: 0.01, daysSinceSellerUpdate: 9 }, {}), ['daysSinceSellerUpdate']);
@@ -420,9 +427,9 @@ test('limitBreaches names the fields that break a limit', () => {
 	assert.deepEqual(limitBreaches({ ...healthy, daysToClear: 9 }, { DAYS_TO_COMPLETE: 10 }), []);
 	assert.deepEqual(limitBreaches({ ...healthy, daysToClear: null }, {}), []);
 
-	// a volume-0 fallback does not count its 0 daily profit as a breach; always-show and floored do not matter
+	// always-show and floored do not matter
 	assert.deepEqual(limitBreaches({ ...healthy, volume: 0, dailyProfitMil: 0 }, {}), []);
-	assert.deepEqual(limitBreaches({ ...broken, floored: true }, { isAlwaysShow: true, DAYS_TO_COMPLETE: 5 }), ['dailyProfitMil', 'roi', 'activeDaysFraction', 'daysToClear']);
+	assert.deepEqual(limitBreaches({ ...broken, floored: true }, { isAlwaysShow: true, DAYS_TO_COMPLETE: 5 }), ['daysToClear']);
 	assert.deepEqual(limitBreaches(null, {}), []);
 
 	// a healthy estimate has none of them and still passes applyFilters

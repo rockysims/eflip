@@ -56,7 +56,8 @@ orders, destination region history. Changes:
    "seller updated too recently" filter stays.
 6. **Marginal stop rule**: while walking the source book, stop when the next
    order's `revenuePerItem / (price * (1 + HAULING_REWARD_FRACTION)) < MIN_ROI`.
-   Replaces the `profitPerDayEstimate < 2000000` test. A `targetVolume` input
+   Replaces the `profitPerDayEstimate < 2000000` test. The page sets `MIN_ROI`
+   per run from its "min ROI" input (Phase 3, item 13). A `targetVolume` input
    makes the walk buy toward that many units instead of the demand cap,
    ignoring the ROI floor (spend cap kept); the page uses it for a factor
    other than 1.
@@ -85,8 +86,12 @@ orders, destination region history. Changes:
 11. Page-level filters move into `estimate.js` as `applyFilters(report,
     config)` returning a reason string or null, so filtered items can be shown
     with their reason. Reasons, in the order they are checked: `no report`,
-    `nothing to buy`, `not profitable`, `margin too slim`, `too slow`,
-    `seller updated too recently`, `too much competition`.
+    `nothing to buy`, `not profitable` (for a volume of 0 only: an empty
+    source book, no sell price, a target of 0), `seller updated too
+    recently`, `too much competition`. The single-column limits (daily profit
+    1M/day, ROI, active days 0.2) are not estimate filters: they are the
+    page's min/max column filters, seeded once with those values (Phase 3,
+    item 12). The estimate keeps only what no one column can say.
 12. **Floor of 1**: a recommendation of 0 units (a demand cap of 0, or the
     ROI floor on the cheapest order) shows 1 unit from the cheapest source
     order, so the row still has a real cost, ROI, days to clear and daily
@@ -99,13 +104,13 @@ orders, destination region history. Changes:
     within `COST_LIMIT`; otherwise (an empty source book, no sell price) the
     volume-0 raw-prices fallback stays and the filter says `not profitable`.
 13. `limitBreaches(report, config)` returns the report fields whose value
-    breaks a limit, in column order: `dailyProfitMil` (below 1M/day, volume
-    above 0), `roi` (below `MIN_ROI`), `activeDaysFraction` (below 0.2),
-    `daysSinceSellerUpdate` (seller updated too recently), `rivals` (too much
-    competition) and `daysToClear` (beyond `DAYS_TO_COMPLETE`, the horizon:
-    not a filter, a limit the user set). It shares its predicates with
-    `applyFilters` so the two cannot drift, and ignores `isAlwaysShow` and
-    `floored`: it describes the figures, not the row's filtered state.
+    breaks a limit of the estimate, in column order: `daysSinceSellerUpdate`
+    (seller updated too recently), `rivals` (too much competition) and
+    `daysToClear` (beyond `DAYS_TO_COMPLETE`, the horizon: not a filter, a
+    limit the user set). It shares its predicates with `applyFilters` so the
+    two cannot drift, and ignores `isAlwaysShow` and `floored`: it describes
+    the figures, not the row's filtered state. The column filters' limits
+    (daily profit, ROI, active days) are the page's to check.
 
 Tests cover: ordinary price window, recency weights, competing volume band,
 buy cap with and without overhang, marginal stop, days to clear, filters.
@@ -135,12 +140,13 @@ Fixtures are small hand-written order/history arrays.
    memory, so no request is made. The quantity shown and copied is what the
    book had; cost/item, ROI, order cost and revenue, days to clear and daily
    profit are those of that quantity, km3 scales with it. The filtered state
-   stays the recommendation's, so a factor never hides a row; sorting uses
-   the re-estimated figures. A blank row factor (cleared by the user) removes
-   the row's own factor: the row follows the global factor again and is
-   re-estimated; on commit a blank or invalid entry snaps back to the factor
-   in force. The input is bold, with a tooltip, while the row has its own
-   factor.
+   stays the recommendation's, and the column filters test the
+   recommendation's figures too (item 12), so a factor never hides a row;
+   sorting uses the re-estimated figures. A blank row factor (cleared by the
+   user) removes the row's own factor: the row follows the global factor again
+   and is re-estimated; on commit a blank or invalid entry snaps back to the
+   factor in force. The input is bold, with a tooltip, while the row has its
+   own factor.
 5. Footer over selected rows: total cost, revenue, profit, km3 — same figures
    the paste box produced.
 6. Copy: one line per selected row, `name + '\t' + orderQty`, no trailing
@@ -150,20 +156,45 @@ Fixtures are small hand-written order/history arrays.
 8. Remove the mark textarea and its script; remove the duplicate moment.js
    tag.
 9. The always-show and ignore-one-seller lists remain in `export.js`.
-10. A cell whose value `limitBreaches` names turns dark red (`td.breach`) and
-    its tooltip gains why (below 1M/day, below the ROI floor, below 0.2, seller
-    updated too recently, too much competition, beyond the N-day horizon). The
-    colour marks the value, not the row's filtered state (filtered rows keep
-    their dimming); the column helps say when a column goes red. A floored
-    row's quantity tooltip says nothing was worth buying and the 1 unit is
-    shown so the figures are real.
+10. A cell turns dark red (`td.breach`) and its tooltip gains why when its
+    displayed value is outside its column's min/max filter ("below the
+    column's min 1.5", "above the column's max …"), or when `limitBreaches`
+    names it: seller updated too recently, too much competition, beyond the
+    N-day horizon. The colour marks the value, not the row's filtered state
+    (filtered rows keep their dimming); the column helps say when a column
+    goes red. A floored row's quantity tooltip says nothing was worth buying
+    and the 1 unit is shown so the figures are real.
 11. Saved run (Copy orders, `docs/trade-results-plan.md`): `recommended` is the
     factor-1 volume (`row.base.volume`), not the factored re-estimate's, and
     `recommendation` is the whole factor-1 estimate (`volume`, `floored`,
     `stopReason`, `horizonVolume` and the prediction fields), kept in case it
     is useful later. The row's own prediction fields are those of the copied
     quantity. `/api/runs` accepts a row without `recommendation` and saves it
-    as `null`.
+    as `null`. The run's config carries the `MIN_ROI` the run used.
+12. **Column filters carry the single-column limits.** The min/max filter
+    under each numeric column is seeded once (flag `colFiltersSeeded`, so a
+    bound the user clears stays cleared) with daily profit min 1, ROI min =
+    the min ROI input's value, active days min 0.2 (only where the column has
+    no min yet). A filter hides a row by its recommendation's figures (the
+    factor-1 report), so a factor never makes a row vanish; the red cells
+    (item 10) use the displayed figures. "show filtered" reveals the rows
+    either the estimate or the column filters hide, dimmed, with their red
+    cells visible; the name tooltip gives the estimate's reason, else the
+    first column outside its range ("ROI below the column's min 1.5"). The
+    totals line counts the rows only the column filters hide ("N hidden by
+    column filters", "N outside column filters" while show filtered is on).
+    A changed bound refreshes every row's dimming and red marks before the
+    table re-renders (150 ms debounce). Selected and stocked rows ignore the
+    filters; "clear" removes every bound, the seeded ones included.
+13. **min ROI** Run input (left of Run, default 1.5, a number of at least 1,
+    persisted): read when Run is pressed, like days to clear. It is the ROI
+    floor of triage (skip an item whose Fuzzwork margin is below it), of the
+    book walk (`MIN_ROI` in the estimate config, also for a factored
+    re-estimate) and of the saved run's config, and the report header says
+    which one the run used. The ROI column's min follows the input until the
+    user sets their own (blank or another value stays as left). It can only
+    tighten what a run produced, since a recommendation never buys below the
+    floor.
 
 ## Gates
 
