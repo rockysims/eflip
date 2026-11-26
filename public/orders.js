@@ -1144,7 +1144,7 @@
 		const daysListed = listedQty > 0 ? listed.reduce((a, s) => a + s.daysSinceListed * s.qty, 0) / listedQty : null;
 		const open = data.result.rows.find(r => r.typeId === d.typeId) || null;
 		const share = data.result.share.byType[d.typeId] || null;
-		const winVolume = share && isNum(share.volume) && share.days > 0 ? share.volume / share.days : null;
+		const winVolume = share && isNum(share.volume) && share.days.length > 0 ? share.volume / share.days.length : null;
 		const per = (v) => (d.qty > 0 && isNum(v) ? v / d.qty : null);
 		return {
 			sell: ["the day's average price", fmtIsk(per(d.gross)), `${fmtExact(d.gross)} gross ÷ ${fmtQty(d.qty)} units`],
@@ -1153,7 +1153,7 @@
 			days: ['days since listed', isNum(daysListed) ? dur(daysListed * DAY_MS) : DASH, isNum(daysListed) ? 'from listing to sale, the mean over the units sold that day' : 'not known for these sales'],
 			demand: open && isNum(open.dailyVolume)
 				? ['daily volume now', fmtRate(open.dailyVolume), 'units a day traded in the region, recency-weighted']
-				: ['daily volume in the window', isNum(winVolume) ? fmtRate(winVolume) : DASH, isNum(winVolume) ? `units a day traded in the region over the ${share.days} days of the window the history covers` : 'no regional history of this item'],
+				: ['daily volume in the window', isNum(winVolume) ? fmtRate(winVolume) : DASH, isNum(winVolume) ? `units a day traded in the region over the ${share.days.length} days of the window the history covers` : 'no regional history of this item'],
 			competing: ['units ahead now', open && isNum(open.unitsAhead) ? fmtQty(open.unitsAhead) : DASH, open ? (isNum(open.unitsAhead) ? `ahead of our open order ${scopeWord()}` : 'no book of this item yet') : 'no open order of this item']
 		};
 	};
