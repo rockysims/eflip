@@ -8,7 +8,7 @@ const config = (storage, regionBook = true) => ({ regionBook: { enabled: regionB
 
 test('the hourly book on with no budget: a note that raw grows, and the setting that stops it', () => {
 	assert.deepEqual(storageNoticeLines(config({ budget: null, total: 5e9, unmet: 0 })), [
-		{ kind: 'warn', text: 'The hourly destination book is on with no storage budget: raw grows about 46 MB an hour. Set EFLIP_STORAGE_BUDGET (e.g. 1GB).' },
+		{ kind: 'warn', text: 'The hourly destination book is on with no storage budget: it adds about 8 MB an hour on disk (46 MB of order pages, gzipped). Set EFLIP_STORAGE_BUDGET (e.g. 1GB).' },
 	]);
 	assert.deepEqual(storageNoticeLines(config({ budget: null, total: 5e9, unmet: 0 }, false)), [], 'the book off: nothing grows unbounded, nothing to say');
 });

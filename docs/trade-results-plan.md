@@ -269,7 +269,9 @@ snapshot adds up to 300 order calls (≤ 600 of the 12000 `market-order` tokens,
 is why it waits for a run in progress) and up to 300 history calls (no bucket: the legacy error
 limit).
 Syncs are at most hourly, which matches the cache timers. Price lookups take 2 tokens per held
-type from the same market-order bucket. A group with `X-Ratelimit-Remaining` below 20 % pauses
+type from the same market-order bucket. (2026-11-26: with `EFLIP_REGION_BOOK=1` the server also
+takes the destination region's whole order book once an hour, about 194 pages and 388 tokens for
+Domain, on top of this; README, Syncing.) A group with `X-Ratelimit-Remaining` below 20 % pauses
 until `Retry-After` or the window passes.
 
 Added by Phase 3 (2026-11-19), beside the files above:
@@ -851,6 +853,16 @@ Checked on the real ledger: the waterfall equals the totals strip to the cent. A
     double create contract its ok for source items to be mixed."
 11. Raw-first store and retained snapshots (2026-11-13): every ESI response is kept verbatim;
     ledgers and snapshots are derived and rebuildable.
+    (2026-11-26, M2 of `planning/2026-11-25-export-history-columns`: the public market raw, that is
+    the regional order pages, the per-type books and the histories, the book logs
+    (`data/ledger/market/`) and the saved runs' market contexts now live under an optional storage
+    budget, `EFLIP_STORAGE_BUDGET`, divided between them by percentage and trimmed oldest first; the
+    market raw and the book logs are stored gzipped (`.json.gz`, read in either form).
+    Character raw and the ledgers are outside the budget and unchanged: ESI keeps only recent wallet
+    and order history, so they cannot be fetched again, and the retained snapshots and sync logs
+    stay too. `scripts/sync.js --rebuild` rebuilds the character ledgers and leaves the book logs
+    alone, because they can hold history that raw no longer does; `--rebuild-book-logs` rebuilds
+    them from the raw that is left. README, Storage budget.)
 12. Market context (2026-11-13): the books and history behind each run are saved with it; each
     sync takes a capped destination market snapshot for the types in play.
 13. Scopes (2026-11-13): skills, standings and structures are added at link time.

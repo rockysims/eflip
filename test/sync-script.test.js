@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
 const { spawnSync } = require('node:child_process');
-const { main, parseArgs, formatSummary, formatWatch, formatRegionBook, formatRegionBookReport, formatStorage, hasFailure, watchFailed, UsageError } = require('../scripts/sync');
+const { main, parseArgs, formatSummary, formatWatch, formatRegionBook, formatRegionBookReport, formatStorage, hasFailure, watchFailed, WATCH_BOOK_OFF, UsageError } = require('../scripts/sync');
 const { acquireLock, createRawStore } = require('../lib/dataFiles');
 const { createTokenStore } = require('../lib/tokenStore');
 const {
@@ -400,6 +400,68 @@ test('the hourly sync of the script takes the region book after the market only 
 	assert.match(text, /market \(region 10000043\): ok/);
 	assert.match(text, /region book \(region 10000043\): ok, 1 of 1 pages/);
 	assert.ok(text.indexOf('market (region') < text.indexOf('region book ('), 'after the market');
+});
+
+test('--watch says whether the hourly region book is on: off by default, and on with EFLIP_REGION_BOOK=1 it takes the snapshot on the first tick, skips the ticks inside the hour and takes the next an hour later', async (t) => {
+	const off = setup(t);
+	off.fake.market.orders.set(`${REGION}:35`, [bookOrder(8001, 35, 1000)]);
+	off.fake.market.regionOrders.set(String(REGION), regionBookRows([35, 36]));
+	assert.equal(await off.run(['--watch', '--region', String(REGION)]), 0, off.errors.join('\n'));
+	assert.equal(off.lines.at(-1), 'hourly region book: off (EFLIP_REGION_BOOK=1 turns it on)');
+	assert.equal(off.lines.at(-1), WATCH_BOOK_OFF);
+	assert.equal(off.lines.filter(line => line.startsWith('hourly region book')).length, 1, 'one line');
+	assert.equal(off.fake.callsTo(/orders/).filter(call => call.query.order_type !== undefined).length, 0, 'no regional page');
+
+	const on = setup(t);
+	const env = { ...ENV, EFLIP_REGION_BOOK: '1' };
+	on.fake.market.orders.set(`${REGION}:35`, [bookOrder(8001, 35, 1000)]);
+	on.fake.market.regionOrders.set(String(REGION), regionBookRows([35, 36]));
+	const regionCalls = () => on.fake.callsTo(/^\/markets\/\d+\/orders$/).filter(call => call.query.order_type !== undefined);
+	assert.equal(await on.run(['--watch', '--region', String(REGION)], { env }), 0, on.errors.join('\n'));
+	const first = on.lines.join('\n');
+	assert.match(first, /^watch tick 2026-11-20T12:00:00\.000Z/);
+	assert.match(first, /^hourly region book: on$/m);
+	assert.match(first, /^region book \(region 10000043\): ok, 1 of 1 pages, 1 calls/m);
+	assert.ok(first.indexOf('watch tick') < first.indexOf('hourly region book'), 'after the tick');
+	assert.equal(regionCalls().length, 1);
+	assert.ok(fs.existsSync(path.join(on.dataDir, 'ledger', 'market', String(REGION), '36.json.gz')), 'a type nobody watches has a log now');
+
+	// five minutes later: the tick runs, the book is not due
+	on.lines.length = 0;
+	on.clock.advance(5 * 60 * 1000);
+	assert.equal(await on.run(['--watch', '--region', String(REGION)], { env }), 0, on.errors.join('\n'));
+	assert.equal(on.lines.at(-1), 'hourly region book: on, skipped - a snapshot was folded within the last hour');
+	assert.equal(on.lines.filter(line => line.startsWith('hourly region book')).length, 1);
+	assert.equal(regionCalls().length, 1, 'no second snapshot inside the hour');
+
+	// an hour after the first
+	on.lines.length = 0;
+	on.clock.advance(55 * 60 * 1000);
+	assert.equal(await on.run(['--watch', '--region', String(REGION)], { env }), 0, on.errors.join('\n'));
+	assert.match(on.lines.join('\n'), /^hourly region book: on\nregion book \(region 10000043\): ok/m);
+	assert.equal(regionCalls().length, 2);
+	assert.deepEqual(on.errors, []);
+});
+
+test('--watch with the region book on exits 1 when the snapshot came back partial, and 0 when the market lock was busy', async (t) => {
+	const env = { ...ENV, EFLIP_REGION_BOOK: '1' };
+	const partial = setup(t);
+	partial.fake.pageSize = 1;
+	partial.fake.market.orders.set(`${REGION}:35`, [bookOrder(8001, 35, 1000)]);
+	partial.fake.market.regionOrders.set(String(REGION), regionBookRows([35, 36]));
+	partial.fake.respondWith = (call) => (call.query.page === '2' ? new Response('{}', { status: 500 }) : null);
+	assert.equal(await partial.run(['--watch', '--region', String(REGION)], { env }), 1);
+	assert.match(partial.lines.join('\n'), /^hourly region book: on\nregion book \(region 10000043\): partial, 1 of 2 pages/m);
+
+	// the server's own hourly run holds the market lock: the tick's market step and the book are both busy, and that is not a failure
+	const busy = setup(t);
+	busy.fake.market.orders.set(`${REGION}:35`, [bookOrder(8001, 35, 1000)]);
+	busy.fake.market.regionOrders.set(String(REGION), regionBookRows([35]));
+	const release = acquireLock(busy.dataDir, 'market');
+	assert.equal(await busy.run(['--watch', '--region', String(REGION)], { env }), 0, busy.errors.join('\n'));
+	release();
+	assert.match(busy.lines.join('\n'), /^hourly region book: on\nregion book: busy - another market sync is running$/m);
+	assert.equal(busy.fake.callsTo(/markets/).length, 0);
 });
 
 test('formatRegionBook and hasFailure read the answers of a run', () => {

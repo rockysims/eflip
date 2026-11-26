@@ -180,6 +180,16 @@ orders, destination region history. Changes:
     `planning/2026-11-25-export-history-columns`) runs, only types in play
     (listed, in transit, held, sold in the last 90 days) have book logs and so
     coverage; every other row has `f = 0` and looks as it did before.
+    (Amended 2026-11-26, M2 P2.3: with `EFLIP_REGION_BOOK=1` the server takes
+    the destination region's whole order book every hour and folds each
+    type's orders into its book log, so after a few days every type at the
+    destination station has a log, types never in play included, and `f` rises
+    above 0 for them too. The job is opt-in. Its raw pages and the logs live
+    under an optional storage budget, trimmed oldest first and never below the
+    last 3 days of a log (this item's window floor). See the README, Syncing
+    and Storage budget, and
+    `planning/2026-11-25-export-history-columns/02-destination-book-series.md`.
+    Without the flag nothing changes: only types in play have coverage.)
 15. **`typicalOrdersPerDay(destDays, now, config)`** (2026-11-25), exported
     from `estimate.js`: the recency-weighted mean of the history's
     `order_count` over ages 1 to `DAYS_CONSIDERED`, with the demand weights
@@ -343,6 +353,11 @@ Fixtures are small hand-written order/history arrays.
     own short-lived fetcher, so a route that was down is tried again. Report
     tasks hold a worker slot while they wait up to 250 ms for a batch, so
     batches hold about 40 types; ESI throughput stays the bottleneck.
+    (Amended 2026-11-26: the logs are gzipped, `<typeId>.json.gz`, and read in
+    either form. With the hourly destination book (M2, opt-in through
+    `EFLIP_REGION_BOOK=1`) a type nobody trades has a log too, so the route
+    answers null only for a type no snapshot has seen an order of. README,
+    Syncing.)
 
 ## Gates
 

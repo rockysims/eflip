@@ -310,3 +310,14 @@ Rough edges:
   adds it to a full sync, which the pages do not request. P2.3 adds the server-side hourly timer
   (and the `--watch` loop's), keeps the job opt-in through the flag rather than on by default, and
   does the plan-doc cross-references.
+
+## P2.3 as built (agent, 2026-11-26; accepted at review)
+
+- `createRegionBookScheduler` in lib/sync.js: started by the server when `EFLIP_REGION_BOOK=1`
+  (first run a minute after start, then hourly, timers unref'd, no overlap, errors logged, the job's
+  55-minute rule still applies); `/api/config.regionBook` = {enabled, scheduled, nextRunAt, lastRun}.
+- `scripts/sync.js --watch` is one tick per process (launchd, StartInterval 300), not a loop, so
+  with the flag it runs the snapshot unforced after the tick and the 55-minute rule makes it hourly.
+- Opt-in stays; README says why (about 8 MB an hour on disk after gzip, 46 MB of pages, some
+  190 MB a day) and that the snapshot does not wait for an export run.
+- The no-budget nag now quotes the on-disk figure (8 MB an hour, gzipped) rather than 46 MB.

@@ -10,6 +10,7 @@ const {
 	ALL_SCOPES, makeClock, tmpDataDir, makeLog, makeTokens, createFakeEsi,
 	tx, journalRow, order, asset, contract, contractItem,
 } = require('../test-support/esi-fake');
+const { makeFakeTimers, timerFunctions } = require('../test-support/fake-timers');
 
 // The /api/sync, /api/ledger, /api/snapshots and /api/market routes, against a fake ESI. The token
 // manager is swapped for a stub through app.locals, so no SSO call is involved.
@@ -56,14 +57,19 @@ const startApp = async (t, { configured = true, characters = [IVAN], env: extraE
 		: {};
 	Object.assign(env, extraEnv);
 	const log = makeLog();
-	mountApi(app, { env, dataDir, fetch: fake.fetch, now: clock, log });
+	// the hourly region book scheduler (EFLIP_REGION_BOOK=1) runs on fake timers the test fires by hand
+	const timers = makeFakeTimers();
+	mountApi(app, { env, dataDir, fetch: fake.fetch, now: clock, log, timers: timerFunctions(timers) });
+	t.after(() => app.locals.regionBookScheduler.stop());
+	// what mountApi logged while mounting (the scheduler says whether it is on); the tests read `log` for what came after
+	const startup = log.lines.splice(0);
 	app.locals.tokens = configured ? makeTokens() : null;
 	for (const id of characters) {
 		app.locals.tokenStore.upsert({ characterId: id, name: id === IVAN ? 'Ivan Tester' : 'Grant Tester', ownerHash: `owner-${id}`, scopes: ALL_SCOPES, refreshToken: `secret-refresh-${id}`, status: 'ok' });
 		fake.character(id);
 	}
 	return {
-		app, port, dataDir, clock, fake, log,
+		app, port, dataDir, clock, fake, log, startup, timers,
 		get: (p, o) => request(port, 'GET', p, o),
 		post: (p, body, o = {}) => request(port, 'POST', p, { ...o, body }),
 	};
@@ -472,18 +478,59 @@ const regionRows = [
 	{ order_id: 2, type_id: 36, price: 90, is_buy_order: true, volume_remain: 5, volume_total: 10, issued: '2026-11-20T10:00:00Z', duration: 90, range: 'region', location_id: 60008494, system_id: 30002187, min_volume: 1 },
 ];
 
-test('GET /api/config says whether the hourly regional book job is on, and GET /api/sync how the last run ended', async (t) => {
+test('GET /api/config says whether the hourly regional book job is on and scheduled, and GET /api/sync how the last run ended', async (t) => {
 	const off = await startApp(t);
-	assert.deepEqual((await off.get('/api/config')).json.regionBook, { enabled: false });
+	assert.deepEqual((await off.get('/api/config')).json.regionBook, { enabled: false, scheduled: false, nextRunAt: null, lastRun: null });
+	assert.deepEqual(off.timers.pending(), [], 'no flag, no timer');
+	assert.deepEqual(off.startup, ['info: region book schedule: off (EFLIP_REGION_BOOK=1 takes the destination book once an hour)']);
 	assert.equal((await off.get('/api/sync')).json.regionBook.enabled, false);
 	assert.equal((await off.get('/api/sync')).json.regionBook.status, null);
 	const on = await startApp(t, { env: { EFLIP_REGION_BOOK: '1' } });
-	assert.deepEqual((await on.get('/api/config')).json.regionBook, { enabled: true });
+	assert.deepEqual((await on.get('/api/config')).json.regionBook, { enabled: true, scheduled: true, nextRunAt: new Date(on.clock() + 60 * 1000).toISOString(), lastRun: null });
+	assert.deepEqual(on.timers.pending().map(({ kind, ms, unrefed }) => [kind, ms, unrefed]), [['timeout', 60 * 1000, true]]);
 	assert.equal((await on.get('/api/sync')).json.regionBook.enabled, true);
 	const odd = await startApp(t, { env: { EFLIP_REGION_BOOK: 'yes' } });
-	assert.deepEqual((await odd.get('/api/config')).json.regionBook, { enabled: false }, 'only 1 turns it on');
+	assert.deepEqual((await odd.get('/api/config')).json.regionBook, { enabled: false, scheduled: false, nextRunAt: null, lastRun: null }, 'only 1 turns it on');
 	const bare = await startApp(t, { configured: false, env: { EFLIP_REGION_BOOK: '1' } });
-	assert.deepEqual((await bare.get('/api/config')).json.regionBook, { enabled: true }, 'beside the other flags, without credentials');
+	assert.equal((await bare.get('/api/config')).json.regionBook.enabled, true, 'beside the other flags, without credentials');
+	assert.equal(on.app.locals.regionBookScheduler.status().scheduled, true, 'the scheduler is on app.locals');
+});
+
+test('with EFLIP_REGION_BOOK=1 the server takes the hourly snapshot by itself: the first run a minute after the mount, then every hour, and /api/config reports it', async (t) => {
+	const ctx = await startApp(t, { env: { EFLIP_REGION_BOOK: '1' } });
+	fillIvan(ctx.fake);
+	ctx.fake.market.regionOrders.set('10000043', regionRows);
+	const regionCalls = () => ctx.fake.callsTo(/^\/markets\/\d+\/orders$/).filter(call => call.query.order_type !== undefined);
+	assert.deepEqual(ctx.startup, ['info: region book schedule: on, first snapshot in 60 s, then every 60 min']);
+	assert.equal(regionCalls().length, 0, 'nothing runs at mount');
+
+	// the region is the one Ivan lists in: his orders must be synced first (the scheduled run reads it from the ledger)
+	await ctx.post('/api/sync', { market: false });
+	ctx.clock.advance(60 * 1000);
+	const first = ctx.timers.fire('timeout');
+	await first;
+	assert.equal(regionCalls().length, 1);
+	const after = (await ctx.get('/api/config')).json.regionBook;
+	assert.deepEqual(after, { enabled: true, scheduled: true, nextRunAt: new Date(ctx.clock() + HOUR).toISOString(), lastRun: { at: new Date(ctx.clock()).toISOString(), status: 'ok' } });
+	assert.ok(ctx.log.lines.some(line => /^info: region book schedule: ok, 1\/1 pages, 2 tokens, \d+\.\d s$/.test(line)), ctx.log.lines.join('\n'));
+	assert.ok(fs.existsSync(path.join(ctx.dataDir, 'ledger', 'market', '10000043', '35.json.gz')));
+
+	// the next hourly tick: the job's own 55-minute rule decides, here it is due
+	ctx.clock.advance(HOUR);
+	await ctx.timers.fire('interval');
+	assert.equal(regionCalls().length, 2, 'one more snapshot an hour later');
+	assert.equal((await ctx.get('/api/sync')).json.regionBook.status, 'ok');
+
+	// a tick inside the hour skips itself: no call, and the schedule reports it
+	ctx.clock.advance(10 * 60 * 1000);
+	await ctx.timers.fire('interval');
+	assert.equal(regionCalls().length, 2);
+	assert.equal(ctx.log.lines.at(-1), 'info: region book schedule: skipped - a snapshot was folded within the last hour');
+	assert.equal((await ctx.get('/api/config')).json.regionBook.lastRun.status, 'skipped');
+
+	ctx.app.locals.regionBookScheduler.stop();
+	assert.deepEqual((await ctx.get('/api/config')).json.regionBook.scheduled, false);
+	assert.deepEqual(ctx.timers.pending(), []);
 });
 
 test('POST /api/sync regionBook: true takes the destination region now, false never does, absent follows EFLIP_REGION_BOOK; anything else is a 400', async (t) => {

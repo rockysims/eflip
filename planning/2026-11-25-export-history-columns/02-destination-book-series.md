@@ -87,11 +87,19 @@ This replaces the fixed windows (24 h raw, 90 days of log) with one budget.
   (the raw pages behind it went earlier); that is the budget's purpose. A lowered budget trims at
   the next run. The rebuild-from-raw invariant holds for whatever raw the budget still holds.
 
-## P2.3 — on by default, docs (haiku: mechanical)
+## P2.3 — the hourly scheduler and the docs (sonnet)
 
-Default the hourly job on when SSO is configured; README (data directory sizes, the 48 h rule,
-how to turn it off); `docs/trade-results-plan.md` cross-reference; `docs/order-monitor-plan.md`
-note that its backlog item "station-level sell-side share from book differences" now has the data.
+Amended 2026-11-26: the job stays **opt-in** behind `EFLIP_REGION_BOOK=1` rather than on by default,
+because without a budget it grows raw without bound (the pages nag about that). What was missing
+after P2.2 was a scheduler: nothing ran the snapshot hourly by itself. P2.3 adds
+`createRegionBookScheduler` in `lib/sync.js`, started by the server when the flag is on (first run
+a minute after start, then hourly, timers unref'd, no overlap, errors logged) and by
+`scripts/sync.js --watch` beside its five-minute ticks; `/api/config.regionBook` gains
+`scheduled`, `nextRunAt`, `lastRun`. No deferral for an export run in progress: the server does
+not know about runs, the snapshot is 388 of 12,000 tokens, and the 20 % pause rule holds. Docs:
+README (how it runs, opt-in and why; the export page's coverage note), the three plan docs'
+cross-references (export plan "until M2" items, trade-results raw-first note, order-monitor
+backlog item), `.env.example`.
 
 Sub-agent reminders (every phase): do not commit; do not expand scope; do not suppress warnings or
 disable tests; stop and report if blocked; report what changed, what was validated and any

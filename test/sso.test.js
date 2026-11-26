@@ -575,14 +575,14 @@ test('GET /api/config tells whether SSO is configured and leaks nothing else', a
 	const on = await startApp(t);
 	const res = await on.get('/api/config');
 	assert.equal(res.status, 200);
-	assert.deepEqual(res.json, { configured: true, callbackUrl: `http://localhost:${on.port}/sso/callback`, scopes: [...SCOPES], env: { dataDir: on.dataDir, dataDirFromEnv: false, userAgentFromEnv: true, dataDirError: null }, regionBook: { enabled: false }, storage: NO_BUDGET });
+	assert.deepEqual(res.json, { configured: true, callbackUrl: `http://localhost:${on.port}/sso/callback`, scopes: [...SCOPES], env: { dataDir: on.dataDir, dataDirFromEnv: false, userAgentFromEnv: true, dataDirError: null }, regionBook: { enabled: false, scheduled: false, nextRunAt: null, lastRun: null }, storage: NO_BUDGET });
 	assert.ok(!res.text.includes(CLIENT_SECRET));
 	assert.equal(res.text.split(on.dataDir).length, 2, 'the data directory appears once, as env.dataDir (a local path, shown so the pages can remind the user)');
 
 	const off = await startApp(t, { configured: false });
 	const offRes = await off.get('/api/config');
 	assert.equal(offRes.status, 200);
-	assert.deepEqual(offRes.json, { configured: false, callbackUrl: 'http://localhost:5001/sso/callback', scopes: [...SCOPES], env: { dataDir: off.dataDir, dataDirFromEnv: false, userAgentFromEnv: false, dataDirError: null }, regionBook: { enabled: false }, storage: NO_BUDGET });
+	assert.deepEqual(offRes.json, { configured: false, callbackUrl: 'http://localhost:5001/sso/callback', scopes: [...SCOPES], env: { dataDir: off.dataDir, dataDirFromEnv: false, userAgentFromEnv: false, dataDirError: null }, regionBook: { enabled: false, scheduled: false, nextRunAt: null, lastRun: null }, storage: NO_BUDGET });
 
 	const foreign = await on.get('/api/config', { Host: 'evil.example' });
 	assert.equal(foreign.status, 403);

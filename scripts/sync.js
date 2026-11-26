@@ -22,13 +22,18 @@
 //                                           five minutes; optional here, for a launchd job while the game
 //                                           is open on a machine where the page is not). Takes --character
 //                                           and --region; contradicts --rebuild, --market-only,
-//                                           --no-market and --max-types.
+//                                           --no-market and --max-types. With EFLIP_REGION_BOOK=1 the
+//                                           tick is followed by the hourly destination book: the
+//                                           snapshot is taken on the first tick that finds the last
+//                                           one 55 minutes old (the job's own rule), so a launchd job
+//                                           that runs --watch every five minutes keeps it hourly.
+//                                           One line says whether it is on.
 //   node scripts/sync.js --region-book      one snapshot of the destination region's whole order book
 //                                           (every type, buy and sell), folded into the per-type book
 //                                           logs, and what it cost: pages, market-order tokens, raw
 //                                           bytes, log growth, time. Takes --region (one); no other
-//                                           flag. The server runs the same job with each hourly sync
-//                                           when EFLIP_REGION_BOOK=1.
+//                                           flag. The server runs the same job hourly while it is up
+//                                           when EFLIP_REGION_BOOK=1 (and with each full sync).
 //   node scripts/sync.js --region-book-report   the regionBook entries of the last 24 hours from the
 //                                           public sync log as a table, with totals and per-hour
 //                                           averages (the measurement behind the retention rule). No
@@ -58,7 +63,7 @@ const path = require('path');
 const { createSso } = require('../lib/sso');
 const { createTokenStore, DEFAULT_DATA_DIR } = require('../lib/tokenStore');
 const { createTokenManager } = require('../lib/tokens');
-const { createSyncService } = require('../lib/sync');
+const { createSyncService, regionBookEnabled } = require('../lib/sync');
 const { createRawStore } = require('../lib/dataFiles');
 const derive = require('../lib/derive');
 const { KINDS } = require('../lib/storage-budget');
@@ -354,6 +359,12 @@ const hasFailure = (result) => {
 	return (result.characters || []).some(c => bad(c.status)) || Boolean(result.market && bad(result.market.status)) || Boolean(result.regionBook && regionBookFailed(result.regionBook)) || Boolean(result.storage && result.storage.status === 'failed');
 };
 
+// The line --watch prints about the hourly destination book (EFLIP_REGION_BOOK=1), always one of these.
+// A tick that took a snapshot follows the line with what --region-book prints; one that found the
+// last snapshot recent says so on the same line.
+const WATCH_BOOK_ON = 'hourly region book: on';
+const WATCH_BOOK_OFF = 'hourly region book: off (EFLIP_REGION_BOOK=1 turns it on)';
+
 // A regional book run fails when it came back partial, paused, busy or failed; skipped and deferred are not failures.
 const regionBookFailed = (result) => ['partial', 'paused', 'busy', 'failed'].includes(result.status);
 
@@ -499,7 +510,31 @@ const main = async (argv, deps = {}) => {
 			return 1;
 		}
 		out(formatWatch(tick));
-		return watchFailed(tick) ? 1 : 0;
+		let failed = watchFailed(tick);
+		// The hourly destination book. A script is started deliberately and ticks from launchd, so there is
+		// no timer here: the snapshot runs on the tick that finds the last fold 55 minutes old (an unforced
+		// run skips otherwise), the first one right away, and the market lock keeps it off a server's run.
+		if (!regionBookEnabled(env)) {
+			out(WATCH_BOOK_OFF);
+		} else {
+			let book;
+			try {
+				book = await service.syncRegionBook({ regionId: options.regionIds ? options.regionIds[0] : null });
+			} catch (e) {
+				out(WATCH_BOOK_ON);
+				err(`region book failed: ${e.message}`);
+				return 1;
+			}
+			if (book.status === 'skipped') {
+				out(`${WATCH_BOOK_ON}, skipped - ${book.reason}`);
+			} else {
+				out(WATCH_BOOK_ON);
+				out(formatRegionBook(book));
+				// a busy lock (the server's own hourly run) is not a failure here, as for the tick's market step
+				if (regionBookFailed(book) && book.status !== 'busy') failed = true;
+			}
+		}
+		return failed ? 1 : 0;
 	}
 
 	let result;
@@ -530,4 +565,4 @@ if (require.main === module) {
 	);
 }
 
-module.exports = { main, parseArgs, formatSummary, formatWatch, formatRegionBook, formatRegionBookReport, formatStorage, readRegionBookEntries, hasFailure, watchFailed, UsageError };
+module.exports = { main, parseArgs, WATCH_BOOK_ON, WATCH_BOOK_OFF, formatSummary, formatWatch, formatRegionBook, formatRegionBookReport, formatStorage, readRegionBookEntries, hasFailure, watchFailed, UsageError };

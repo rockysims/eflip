@@ -36,7 +36,7 @@
 		const budget = Number(storage.budget);
 		if (storage.budget === null || storage.budget === undefined || !(budget > 0)) {
 			return regionBookOn
-				? [{ kind: 'warn', text: 'The hourly destination book is on with no storage budget: raw grows about 46 MB an hour. Set EFLIP_STORAGE_BUDGET (e.g. 1GB).' }]
+				? [{ kind: 'warn', text: 'The hourly destination book is on with no storage budget: it adds about 8 MB an hour on disk (46 MB of order pages, gzipped). Set EFLIP_STORAGE_BUDGET (e.g. 1GB).' }]
 				: [];
 		}
 		const total = Number(storage.total) || 0;

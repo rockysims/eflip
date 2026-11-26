@@ -100,12 +100,16 @@ incremental result:
   one refresh interval). Folded from every raw `orders` file and `orders-history` row in
   `fetchedAt` order. This is finer than the retained snapshots, which need assets and balance to be
   current too and so follow the hourly sync.
-- `data/ledger/market/<regionId>/<typeId>.json`: `{samples: [{at, stored}], orders: {<orderId>:
+- `data/ledger/market/<regionId>/<typeId>.json.gz`: `{samples: [{at, stored}], orders: {<orderId>:
   {isBuy, locationId, systemId, volumeTotal, duration, minVolume, range, firstSeen, lastSeen, path:
   [{at, price, volumeRemain, issued}]}}}`. Same path rule. `samples` lists every time the book was
   checked, stored or answered 304, so a consumer knows when an order was last confirmed present and
   how long the gaps were. The watch and market syncs record their per-type check times in the
   public sync log for this; existing public sync logs give the hourly samples since 2026-11-20.
+  (Amended 2026-11-26: the file is the same JSON gzipped, `<typeId>.json.gz`; a plain `.json` is
+  still read and is replaced by the gzipped file on the next write. With `EFLIP_REGION_BOOK=1` the
+  hourly destination book adds one sample an hour, both sides, to the log of every type in the
+  region, not only the types watched here.)
 - `data/esi-cache/public/_watch.json`: the last tick (`tickedAt`, per-character and per-type
   outcomes, `stop`), read by `GET /api/watch`.
 
@@ -430,12 +434,17 @@ Done 2026-11-26: `public/export.js` (`showEnvNotice`, called on the page-load `/
 
 - A buy-order view. The logs and the module carry buy orders so it can be added without new data.
 - Notifications of any kind. The page is live while open; nothing runs in the background beyond the
-  optional `--watch` job.
+  optional `--watch` job (and, since 2026-11-26 and only with `EFLIP_REGION_BOOK=1`, the server's
+  hourly destination book).
 - Changing an order from the tool: ESI has no endpoint to place or modify market orders.
 - Station-level sell-side share from book differences (a persisting competing order whose
   `volume_remain` drops is a fill; one that vanishes may have filled, been withdrawn or expired, so
   the figure is a range that narrows with five-minute samples). Backlog, after the logs have a few
-  weeks of five-minute samples.
+  weeks of five-minute samples. (Amended 2026-11-26: with `EFLIP_REGION_BOOK=1` the hourly
+  destination book, M2 of `planning/2026-11-25-export-history-columns`, gives every type at the
+  destination station a book log, so the data for this figure now exists for any type, not only
+  the ones listed; the samples are hourly, so the range is wider than the watch's. The export
+  page's `fillsPerDay` already differences the same logs for its own purpose. Still not built here.)
 - Competitor profiles (the same `order_id` undercutting repeatedly across items), a price sparkline
   per order, structure markets, corporation orders.
 
