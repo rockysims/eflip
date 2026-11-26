@@ -40,6 +40,9 @@
 	const OBSERVED_FIELDS = Object.freeze([
 		'observedFractionEvents', 'observedFractionVolume', 'avgDaysIdle', 'dailyDemandObserved', 'rivalsObserved'
 	]);
+	// The "sold before" fields a run keeps per row, after the observed ones: the units of the type the linked
+	// characters sold at the destination in the last 90 days (POST /api/sold-before), null when none or unknown.
+	const SOLD_FIELDS = Object.freeze(['soldBeforeUnits']);
 	// Which limit bound the volume of a saved recommendation (estimate.js stopReason).
 	const STOP_REASONS = Object.freeze(['horizon', 'roi', 'book', 'cost', 'target']);
 	const CONFIG_FIELDS = Object.freeze(['SELL_TAX', 'SALES_TAX', 'BROKER_FEE', 'HAULING_REWARD_FRACTION', 'MIN_ROI']);
@@ -126,7 +129,8 @@
 	//     orderRevenueMil, km3}; the page works out qty and the order figures (it owns those formulas).
 	//     base is the factor-1 estimate (the recommendation), report the estimate for the quantity (the
 	//     same object at factor 1); a row without base falls back to report. A row keeps its report's
-	//     OBSERVED_FIELDS after the prediction fields.
+	//     OBSERVED_FIELDS after the prediction fields, then its soldBefore ({units, ...} or null) as
+	//     SOLD_FIELDS.
 	// Rows of quantity 0 are no order and are left out; null when nothing is left to save.
 	const buildRun = ({ copiedAt, reportGeneratedAt, route, horizonDays, config, rows }) => {
 		const kept = rows.filter(row => row.qty >= 1);
@@ -152,7 +156,8 @@
 					recommended: base.volume,
 					recommendation: recommendationOf(base),
 					...Object.fromEntries(PREDICTION_FIELDS.map(key => [key, numOrNull(row.report[key])])),
-					...Object.fromEntries(OBSERVED_FIELDS.map(key => [key, numOrNull(row.report[key])]))
+					...Object.fromEntries(OBSERVED_FIELDS.map(key => [key, numOrNull(row.report[key])])),
+					soldBeforeUnits: numOrNull(row.soldBefore ? row.soldBefore.units : null)
 				};
 			}),
 			totals: {
@@ -190,6 +195,7 @@
 		HISTORY_FIELDS,
 		PREDICTION_FIELDS,
 		OBSERVED_FIELDS,
+		SOLD_FIELDS,
 		STOP_REASONS,
 		CONFIG_FIELDS,
 		ROUTE_ID_FIELDS,

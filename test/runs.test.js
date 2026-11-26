@@ -158,7 +158,8 @@ test('buildRun: the run as saved, rows of quantity 0 left out, totals summed fro
 	// the observed figures are the row's report's (the copied quantity's), not the base's: base35 carries others to show it
 	const base35 = { volume: 55, costPerItemMil: 2.5, revenuePerItemMil: 3.5, sellPriceMil: 3.9, profitPerItemMil: 1, dailyProfitMil: 9, daysToClear: 7.5, dailyDemand: 4, competingVolume: 1, floored: false, stopReason: 'roi', horizonVolume: 80, extra: 'x', observedFractionEvents: 0.1, rivalsObserved: 9 };
 	const report35 = { volume: 40, costPerItemMil: 2, revenuePerItemMil: 3, sellPriceMil: null, profitPerItemMil: 1, dailyProfitMil: 8, daysToClear: null, dailyDemand: 4, competingVolume: 0, floored: false, stopReason: 'target', horizonVolume: 80, observedFractionEvents: 0.62, observedFractionVolume: 0.8, avgDaysIdle: 2.1, dailyDemandObserved: 23.5, rivalsObserved: 1.9, observedCoverage: { windowDays: 3 }, avgDaysIdleCensored: true };
-	const rows = [copiedRow(34, 100), copiedRow(36, 0), copiedRow(35, 40, { m3: undefined, base: base35, report: report35, factor: 0.7, orderCostMil: 80, orderRevenueMil: 120, km3: 0.05 })];
+	const soldBefore35 = { units: 15, sales: 2, lastSoldAt: '2026-11-19T10:00:00Z', netMarginMilPerUnit: 0.845, medianDaysOnMarket: 8.417 };
+	const rows = [copiedRow(34, 100), copiedRow(36, 0), copiedRow(35, 40, { m3: undefined, base: base35, report: report35, factor: 0.7, orderCostMil: 80, orderRevenueMil: 120, km3: 0.05, soldBefore: soldBefore35 })];
 	rows[0].orderCostMil = 110;
 	rows[0].orderRevenueMil = 190;
 	rows[0].km3 = 0.25;
@@ -170,8 +171,9 @@ test('buildRun: the run as saved, rows of quantity 0 left out, totals summed fro
 	assert.deepEqual(run.route, ROUTE);
 	assert.deepEqual(run.config, CONFIG);
 	assert.deepEqual(run.rows.map(r => r.typeId), [34, 35]);
-	assert.deepEqual(Object.keys(run.rows[0]), ['typeId', 'name', 'm3', 'qty', 'factor', 'recommended', 'recommendation', 'costPerItemMil', 'revenuePerItemMil', 'sellPriceMil', 'profitPerItemMil', 'dailyProfitMil', 'daysToClear', 'dailyDemand', 'competingVolume', 'observedFractionEvents', 'observedFractionVolume', 'avgDaysIdle', 'dailyDemandObserved', 'rivalsObserved']);
+	assert.deepEqual(Object.keys(run.rows[0]), ['typeId', 'name', 'm3', 'qty', 'factor', 'recommended', 'recommendation', 'costPerItemMil', 'revenuePerItemMil', 'sellPriceMil', 'profitPerItemMil', 'dailyProfitMil', 'daysToClear', 'dailyDemand', 'competingVolume', 'observedFractionEvents', 'observedFractionVolume', 'avgDaysIdle', 'dailyDemandObserved', 'rivalsObserved', 'soldBeforeUnits']);
 	assert.deepEqual(exportPersist.OBSERVED_FIELDS, ['observedFractionEvents', 'observedFractionVolume', 'avgDaysIdle', 'dailyDemandObserved', 'rivalsObserved']);
+	assert.deepEqual(exportPersist.SOLD_FIELDS, ['soldBeforeUnits'], 'after the observed fields');
 	assert.deepEqual(Object.keys(run.rows[0].recommendation), ['volume', 'floored', 'stopReason', 'horizonVolume', ...exportPersist.PREDICTION_FIELDS]);
 	// the prediction fields are the copied quantity's (report); recommended and recommendation are the factor-1 estimate's (base)
 	assert.deepEqual(run.rows[1], {
@@ -183,7 +185,14 @@ test('buildRun: the run as saved, rows of quantity 0 left out, totals summed fro
 		costPerItemMil: 2, revenuePerItemMil: 3,
 		sellPriceMil: null, profitPerItemMil: 1, dailyProfitMil: 8, daysToClear: null, dailyDemand: 4, competingVolume: 0,
 		observedFractionEvents: 0.62, observedFractionVolume: 0.8, avgDaysIdle: 2.1, dailyDemandObserved: 23.5, rivalsObserved: 1.9,
+		soldBeforeUnits: 15,
 	});
+	// a row the characters never sold saves null, and so does one whose figure is not a finite number
+	assert.equal(run.rows[0].soldBeforeUnits, null);
+	for (const units of [NaN, Infinity, '15', undefined]) {
+		const [odd] = exportPersist.buildRun({ copiedAt: T1, reportGeneratedAt: G1, route: ROUTE, horizonDays: 5, config: CONFIG, rows: [copiedRow(39, 5, { soldBefore: { units } })] }).rows;
+		assert.equal(odd.soldBeforeUnits, null, String(units));
+	}
 	// a report without observation (or with a figure that is not a finite number) saves null for each
 	assert.deepEqual(exportPersist.OBSERVED_FIELDS.map(key => run.rows[0][key]), [null, null, null, null, null]);
 	const [odd] = exportPersist.buildRun({ copiedAt: T1, reportGeneratedAt: G1, route: ROUTE, horizonDays: 5, config: CONFIG, rows: [copiedRow(38, 5, { report: { ...report35, avgDaysIdle: NaN, rivalsObserved: Infinity, dailyDemandObserved: '3', observedFractionEvents: 0 } })] }).rows;
@@ -388,19 +397,22 @@ test('a row without a recommendation (an older page) is accepted and saved with 
 test('a row\'s observed figures are saved with it, in order; a row without them (an older page) saves nulls', async (t) => {
 	const app = await startApp(t);
 	const observed = { observedFractionEvents: 0.62, observedFractionVolume: 0.8, avgDaysIdle: 2.1, dailyDemandObserved: 23.5, rivalsObserved: 1.9 };
-	const body = await makeBody({ rows: [copiedRow(34, 100, { report: { ...copiedRow(34, 100).report, ...observed, observedCoverage: { windowDays: 3 }, avgDaysIdleCensored: true } }), copiedRow(35, 40)] });
+	const body = await makeBody({ rows: [copiedRow(34, 100, { report: { ...copiedRow(34, 100).report, ...observed, observedCoverage: { windowDays: 3 }, avgDaysIdleCensored: true }, soldBefore: { units: 15, sales: 2 } }), copiedRow(35, 40)] });
 	assert.deepEqual(exportPersist.OBSERVED_FIELDS.map(key => body.rows[0][key]), Object.values(observed));
+	assert.deepEqual(exportPersist.SOLD_FIELDS.map(key => body.rows[0][key]), [15]);
 	body.rows[0].extra = 'x';
-	// the second row as an older page posts it: no observed keys at all
-	for (const key of exportPersist.OBSERVED_FIELDS) delete body.rows[1][key];
+	// the second row as an older page posts it: no observed keys and no sold-before key at all
+	for (const key of [...exportPersist.OBSERVED_FIELDS, ...exportPersist.SOLD_FIELDS]) delete body.rows[1][key];
 	const res = await app.post('/api/runs', body);
 	assert.equal(res.status, 201, res.text);
 	const saved = app.read(body.id);
-	assert.deepEqual(Object.keys(saved.rows[0]).slice(-5), exportPersist.OBSERVED_FIELDS, 'after the prediction fields, in the page\'s order');
+	assert.deepEqual(Object.keys(saved.rows[0]).slice(-6), [...exportPersist.OBSERVED_FIELDS, ...exportPersist.SOLD_FIELDS], 'after the prediction fields, in the page\'s order');
 	assert.deepEqual(exportPersist.OBSERVED_FIELDS.map(key => saved.rows[0][key]), [0.62, 0.8, 2.1, 23.5, 1.9]);
+	assert.equal(saved.rows[0].soldBeforeUnits, 15);
 	assert.equal('extra' in saved.rows[0], false);
 	assert.deepEqual(exportPersist.OBSERVED_FIELDS.map(key => saved.rows[1][key]), [null, null, null, null, null]);
-	assert.deepEqual(Object.keys(saved.rows[1]).slice(-5), exportPersist.OBSERVED_FIELDS);
+	assert.equal(saved.rows[1].soldBeforeUnits, null);
+	assert.deepEqual(Object.keys(saved.rows[1]).slice(-6), [...exportPersist.OBSERVED_FIELDS, ...exportPersist.SOLD_FIELDS]);
 	const listed = (await app.get('/api/runs')).json;
 	assert.equal(listed[0].rows[0].avgDaysIdle, 2.1, 'GET answers them too');
 });
@@ -437,6 +449,7 @@ const bodyCases = [
 	['a prediction field as text', b => { b.rows[1].daysToClear = '5'; }, /rows\[1\]\.daysToClear/],
 	['an observed fraction as text', b => { b.rows[0].observedFractionEvents = '0.5'; }, /rows\[0\]\.observedFractionEvents/],
 	['an observed demand that is not finite', b => { b.rows[1].dailyDemandObserved = 'Infinity'; }, /rows\[1\]\.dailyDemandObserved/],
+	['a sold-before count as text', b => { b.rows[0].soldBeforeUnits = '15'; }, /rows\[0\]\.soldBeforeUnits/],
 	['an avgDaysIdle that is an object', b => { b.rows[0].avgDaysIdle = {}; }, /rows\[0\]\.avgDaysIdle/],
 	['a recommendation that is not an object', b => { b.rows[0].recommendation = 5; }, /rows\[0\]\.recommendation/],
 	['a recommendation floored as text', b => { b.rows[0].recommendation.floored = 'yes'; }, /rows\[0\]\.recommendation\.floored/],

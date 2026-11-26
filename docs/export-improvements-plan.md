@@ -9,7 +9,8 @@ Principle: every number shown to the user comes from ESI (station orders and
 region history). Fuzzwork aggregates are used only to decide which types get a
 full report; no Fuzzwork figure is displayed or used in a displayed figure.
 (2026-11-25: the observed figures of Phase 2, items 14 to 16, come from the server's
-book logs, which are stored ESI market orders, so the principle holds.)
+book logs, which are stored ESI market orders, so the principle holds. 2026-11-26: the
+"sold before" column of Phase 3, item 16, reads the user's own stored wallet transactions, ESI data too.)
 
 ## Phase 1 — fetch layer (`public/util.js`)
 
@@ -358,6 +359,46 @@ Fixtures are small hand-written order/history arrays.
     `EFLIP_REGION_BOOK=1`) a type nobody trades has a log too, so the route
     answers null only for a type no snapshot has seen an order of. README,
     Syncing.)
+
+16. **Sold before** (2026-11-26; planning/2026-11-25-export-history-columns,
+    M3). New last column `sold before` (after `days to clear`): the units of the
+    type the linked characters sold at the destination station in the last 90
+    days, blank when none. It sorts and filters by the number like the other
+    numeric columns (a blank passes a filter), has no mark and no limit, and
+    does not touch the estimate. Its help says all of this; its tooltip reads
+    "12 sales, last 2026-11-20; net 1.9M/unit; median 3.4 days on market", each
+    part left out when its figure is null (a sale no bought lot stands behind,
+    which FIFO could not match, has a count and a date but no margin and no
+    days). It is a fact about the user's own trades, not an estimate: there is
+    no model fallback and no ESI call, and it needs a linked character with a
+    synced ledger (the column stays blank without one).
+    `POST /api/sold-before` (`lib/api.js`, `lib/sold-before.js`, behind
+    `requireConfigured`; 256 KB body limit) takes `{stationId, typeIds,
+    days?, sourceStationId?}`: 1 to 500 type ids, `days` an integer 1 to 365
+    (default 90), `sourceStationId` the route's start (optional: with it the
+    courier hauls that carried the stock are found and counted in the margin).
+    It pools every character in the token store, as the results page does, and
+    answers `{stationId, days, types: {<typeId>: {units, sales, lastSoldAt,
+    netMarginMilPerUnit, medianDaysOnMarket}}}`, a type with no sale left out.
+    `units`, `sales` and `lastSoldAt` come from the wallet transactions: sells
+    of a linked character at that station, within `days` of the server's clock,
+    to someone outside the linked pool and not a corporation's (the results
+    accounting's rule 1). `netMarginMilPerUnit` and `medianDaysOnMarket` come
+    from `results-calc.js` `compute` over the same ledgers, snapshots, saved
+    runs' volumes, route (source to station) and window the results page
+    uses: the margin is profit (price less sales tax, broker fees, haul and buy
+    fee, against the FIFO lot) over the units FIFO matched; the days are each
+    matched sale's days since its unit was listed at the station (else since it
+    arrived), median by units. Both are null when no sale was matched or
+    `compute` failed (one warning; the counts stay). Working a ledger out takes
+    a moment, so the answer for all types of one (station, source, days) is
+    kept for a minute and the batches of a run share it.
+    The page makes one `createSoldBeforeFetcher` per run and one per live
+    refresh or lookup, built on the same `createBatchFetcher` as the stats
+    fetcher (250 ms or 500 types, off for the rest of the run after a failure
+    or 503, null on abort). `buildRow` asks it beside the stats and keeps the
+    answer as `row.soldBefore` and in `inputs`. Each saved run row gains
+    `soldBeforeUnits` (a number, or null), after the observed fields.
 
 ## Gates
 

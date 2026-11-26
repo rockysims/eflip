@@ -1,7 +1,9 @@
 // export.js: pipeline (runReport) + page UI for export.html.
 // Every displayed number comes from ESI (station orders + region history) via estimate.js, blended where
 // the server's book log covers the window with what that log observed (POST /api/market-stats; the log is
-// ESI data the server stored). Fuzzwork aggregates are used ONLY for triage (deciding which types get a full report).
+// ESI data the server stored). The "sold before" column is a fact about the user's own trades, from the server's
+// ledger (POST /api/sold-before; the ledger is ESI wallet data the server stored). Fuzzwork aggregates are used
+// ONLY for triage (deciding which types get a full report).
 const {
 	roundNonZero,
 	constants: {
@@ -87,16 +89,16 @@ const STATS_FLUSH_MS = 250;
 const STATS_MAX_BATCH = 500; // types a call to /api/market-stats takes
 const statsWindowDays = (daysToComplete) => Math.min(STATS_MAX_WINDOW_DAYS, Math.max(daysToComplete, STATS_MIN_WINDOW_DAYS));
 
-// Fetches the observed figures (public/market-stats.js, served by POST /api/market-stats) of types at one
-// destination station, batched: get(typeId, ordersPerDay) queues the type and resolves with its answer (the
-// object computeMarketStats returns) or null (no book log for it, or no observation); the queue is sent as one
-// request 250 ms after its first type, or at once at 500 types. A type asked for twice while queued shares one
-// entry. It never rejects. When the route answers anything but 200 (503: SSO is not set up) or the request
-// fails, every queued and later type resolves null, one line is logged and the route is not called again;
-// an aborted signal resolves everything null quietly. Made once per run, and once per live refresh or
+// A batching fetcher of one answer per type from a route that takes many types a call. get(typeId, extra) queues
+// the type and resolves with its answer or null; the queue is sent as one POST 250 ms after its first type, or at
+// once at 500 types, as `bodyOf(entries)` (entries: [{typeId, extra}], `extra` being what the first get of a type
+// passed). A type asked for twice while queued shares one entry. It never rejects. When the route answers anything
+// but 200 (503: SSO is not set up) or the request fails, every queued and later type resolves null, one line is
+// logged and the route is not called again; an aborted signal resolves everything null quietly. The answer of a
+// type is `answer.types[typeId]`, null when the route left it out. Made once per run, and once per live refresh or
 // lookup, so a route that was down is tried again by the next one.
-const createStatsFetcher = ({ regionId, stationId, windowDays, signal = null, log = console }) => {
-	let queue = new Map(); // typeId -> {typeId, ordersPerDay, resolvers}
+const createBatchFetcher = ({ path, what, offNote, bodyOf, signal = null, log = console }) => {
+	let queue = new Map(); // typeId -> {typeId, extra, resolvers}
 	let timer = null;
 	let unavailable = false;
 	const isAborted = () => !!signal && signal.aborted;
@@ -118,7 +120,7 @@ const createStatsFetcher = ({ regionId, stationId, windowDays, signal = null, lo
 	const giveUp = (reason) => {
 		if (unavailable) return;
 		unavailable = true;
-		log.warn(`market stats unavailable (${reason}): observed figures off for this run`);
+		log.warn(`${what} unavailable (${reason}): ${offNote}`);
 	};
 
 	const flush = async () => {
@@ -126,10 +128,10 @@ const createStatsFetcher = ({ regionId, stationId, windowDays, signal = null, lo
 		if (batch.length === 0) return;
 		if (unavailable || isAborted()) { settle(batch, null); return; }
 		try {
-			const response = await fetch('/api/market-stats', {
+			const response = await fetch(path, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ regionId, stationId, windowDays, types: batch.map(({ typeId, ordersPerDay }) => ({ typeId, ordersPerDay })) }),
+				body: JSON.stringify(bodyOf(batch.map(({ typeId, extra }) => ({ typeId, extra })))),
 				signal
 			});
 			if (!response.ok) {
@@ -145,11 +147,11 @@ const createStatsFetcher = ({ regionId, stationId, windowDays, signal = null, lo
 		}
 	};
 
-	const get = (typeId, ordersPerDay) => {
+	const get = (typeId, extra) => {
 		if (unavailable || isAborted()) return Promise.resolve(null);
 		return new Promise((resolve) => {
 			let entry = queue.get(typeId);
-			if (!entry) queue.set(typeId, entry = { typeId, ordersPerDay, resolvers: [] });
+			if (!entry) queue.set(typeId, entry = { typeId, extra, resolvers: [] });
 			entry.resolvers.push(resolve);
 			if (queue.size >= STATS_MAX_BATCH) flush();
 			else if (timer === null) timer = setTimeout(flush, STATS_FLUSH_MS);
@@ -160,9 +162,39 @@ const createStatsFetcher = ({ regionId, stationId, windowDays, signal = null, lo
 	return { get, flush };
 };
 
+// Fetches the observed figures (public/market-stats.js, served by POST /api/market-stats) of types at one
+// destination station: get(typeId, ordersPerDay) resolves with the object computeMarketStats returns, or null
+// (no book log for the type, or no observation). A batch fetcher (above).
+const createStatsFetcher = ({ regionId, stationId, windowDays, signal = null, log = console }) => createBatchFetcher({
+	path: '/api/market-stats',
+	what: 'market stats',
+	offNote: 'observed figures off for this run',
+	bodyOf: (entries) => ({ regionId, stationId, windowDays, types: entries.map(({ typeId, extra }) => ({ typeId, ordersPerDay: extra })) }),
+	signal,
+	log
+});
+
+//--- sold before
+
+const SOLD_BEFORE_DAYS = 90;
+
+// Fetches what the linked characters sold of types at one destination station in the last `days` days (POST
+// /api/sold-before, from the server's ledger, no ESI call): get(typeId) resolves with {units, sales, lastSoldAt,
+// netMarginMilPerUnit, medianDaysOnMarket}, or null (none sold, or the route is off). `sourceStationId` is the
+// route's start: with it the server finds the courier hauls that carried the stock, so the margin counts them.
+// A batch fetcher (above): one per run and one per live lookup.
+const createSoldBeforeFetcher = ({ stationId, sourceStationId = null, days = SOLD_BEFORE_DAYS, signal = null, log = console }) => createBatchFetcher({
+	path: '/api/sold-before',
+	what: 'sold before',
+	offNote: 'the sold before column is blank for this run',
+	bodyOf: (entries) => ({ stationId, sourceStationId, typeIds: entries.map(({ typeId }) => typeId), days }),
+	signal,
+	log
+});
+
 //--- pipeline
 
-// Runs one report. Calls onRow({typeId, name, m3, report, isAlwaysShow, daysToComplete, inputs}) for every report (filtered ones too).
+// Runs one report. Calls onRow({typeId, name, m3, report, isAlwaysShow, daysToComplete, soldBefore, inputs}) for every report (filtered ones too).
 // Calls onProgress at least every 500ms.
 // Loads both regions' order books once (a few hundred paginated requests instead of two per type:
 // ESI's market-order rate limit counts requests) and indexes them by type, station-filtered.
@@ -208,7 +240,7 @@ const reportConfig = ({ typeId, isAlwaysShow, daysToComplete, minRoi }) => ({
 });
 
 // Fetches the ESI data for one type and computes its report.
-// Resolves {typeId, name, m3, report, isAlwaysShow, context, daysToComplete, minRoi, inputs}; report is null when there is nothing to buy.
+// Resolves {typeId, name, m3, report, isAlwaysShow, context, daysToComplete, minRoi, soldBefore, inputs}; report is null when there is nothing to buy.
 // context is what the estimator was given (top of each order book, destination history), kept so
 // Copy orders can save it with the run. inputs (the orders, history and clock the report was computed from)
 // let the page re-estimate the row for another quantity without a request. The order arrays may be shared
@@ -221,7 +253,10 @@ const reportConfig = ({ typeId, isAlwaysShow, daysToComplete, minRoi }) => ({
 // With it the type's observed figures are fetched once the history is in (its pace sets how close two book-log
 // samples must be to count), passed to the estimate, and kept in inputs with the pace so a re-estimate for
 // another quantity blends the same way.
-const buildRow = async ({ start, end, typeId, isAlwaysShow, books = null, options = {}, daysToComplete = DEFAULT_DAYS_TO_COMPLETE, minRoi = DEFAULT_MIN_ROI, stats = null }) => {
+// soldBefore: a sold-before fetcher (createSoldBeforeFetcher) for the end station, or null. Asked beside the stats;
+// its answer ({units, ...}, or null when the linked characters sold none) is the row's `soldBefore`, and is kept in
+// inputs too. It is a fact about past sales, so the estimate does not read it.
+const buildRow = async ({ start, end, typeId, isAlwaysShow, books = null, options = {}, daysToComplete = DEFAULT_DAYS_TO_COMPLETE, minRoi = DEFAULT_MIN_ROI, stats = null, soldBefore = null }) => {
 	// 'all' returns buy and sell orders in one request; the estimate uses dest buy orders to spot buy-fill days.
 	const srcOrders = books
 		? (books.src.get(typeId) || [])
@@ -234,7 +269,10 @@ const buildRow = async ({ start, end, typeId, isAlwaysShow, books = null, option
 	const name = await util.getTypeName(typeId, options);
 	const now = new Date();
 	const ordersPerDay = estimate.typicalOrdersPerDay(destDays, now);
-	const observed = stats ? await stats.get(typeId, ordersPerDay) : null;
+	const [observed, sold] = await Promise.all([
+		stats ? stats.get(typeId, ordersPerDay) : null,
+		soldBefore ? soldBefore.get(typeId) : null
+	]);
 	const report = estimate.computeItemReport({
 		srcOrders,
 		destOrders,
@@ -245,7 +283,7 @@ const buildRow = async ({ start, end, typeId, isAlwaysShow, books = null, option
 		config: reportConfig({ typeId, isAlwaysShow, daysToComplete, minRoi })
 	});
 	const context = report ? exportPersist.marketContext({ srcOrders, destOrders, destDays, now, historyDays: CONTEXT_HISTORY_DAYS }) : null;
-	return { typeId, name, m3, report, isAlwaysShow, context, daysToComplete, minRoi, inputs: { srcOrders, destOrders, destDays, now, observed, ordersPerDay } };
+	return { typeId, name, m3, report, isAlwaysShow, context, daysToComplete, minRoi, soldBefore: sold, inputs: { srcOrders, destOrders, destDays, now, observed, ordersPerDay, soldBefore: sold } };
 };
 
 // Resolves item names to type ids. Resolves {ids: Set, unresolved: [names]}.
@@ -295,6 +333,8 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		// One fetcher for the run: every report task asks it for its type's observed figures once its history is in,
 		// and it sends them to the server in batches (the end station's region and station, the run's window).
 		const stats = createStatsFetcher({ regionId: end.regionId, stationId: end.stationId, windowDays: statsWindowDays(daysToComplete), signal });
+		// and one for what the linked characters sold at the end station before (the "sold before" column)
+		const soldBefore = createSoldBeforeFetcher({ stationId: end.stationId, sourceStationId: start.stationId, signal });
 		// Order books load alongside the type list and triage; report tasks wait for them.
 		const booksPromise = loadBooks({
 			start,
@@ -340,7 +380,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 					if (aborted()) return;
 					const books = await booksPromise;
 					if (aborted()) return;
-					const row = await buildRow({ start, end, typeId, isAlwaysShow: isAlwaysShow(typeId), books, daysToComplete, minRoi, stats });
+					const row = await buildRow({ start, end, typeId, isAlwaysShow: isAlwaysShow(typeId), books, daysToComplete, minRoi, stats, soldBefore });
 					if (aborted()) return; // (a stopped run's stats answer null: no row without its observed figures)
 					progress.reportsDone++;
 					if (!row.report) {
@@ -629,6 +669,25 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		const r = Math.round(v * 10) / 10;
 		return r > 0 ? `+${nf1.format(r)}` : nf1.format(r === 0 ? 0 : r);
 	};
+	// "12 sales, last 2026-11-20; net 1.9M/unit; median 3.4 days on market": what the "sold before" cell says beyond its
+	// units (the figures POST /api/sold-before answered); a figure the answer left null leaves its part out.
+	const finite = (v) => typeof v === 'number' && Number.isFinite(v);
+	const marginText = (v) => Math.abs(v) >= 100 ? nf.format(Math.round(v)) : String(Number(v.toPrecision(2)));
+	const soldBeforeTip = (r) => {
+		const s = r.soldBefore;
+		if (!s) return '';
+		const parts = [];
+		if (finite(s.sales)) {
+			const last = typeof s.lastSoldAt === 'string' && s.lastSoldAt.length >= 10 ? `, last ${s.lastSoldAt.slice(0, 10)}` : '';
+			parts.push(`${nf.format(s.sales)} sale${s.sales === 1 ? '' : 's'}${last}`);
+		}
+		if (finite(s.netMarginMilPerUnit)) parts.push(`net ${marginText(s.netMarginMilPerUnit)}M/unit`);
+		if (finite(s.medianDaysOnMarket)) {
+			const days = nf1.format(s.medianDaysOnMarket);
+			parts.push(`median ${days} day${days === '1' ? '' : 's'} on market`);
+		}
+		return parts.join('; ');
+	};
 	const BLENDED_HELP = 'Blended with what the book log observed when it covers part of the window; a dotted underline marks it and the tooltip gives the observed share';
 	// `help` is a string, or a function for text that depends on the run (read on every header render).
 	// `display(row)` replaces fmt(val(row)) as the cell's text where the number alone is not enough (avg days idle
@@ -706,7 +765,10 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			tip: (r) => `${fmtTotal(orderRevenue(r))} − ${fmtTotal(orderCost(r))}` },
 		{ key: 'daysToClear', label: 'days to clear', val: (r) => num(r.report.daysToClear), fmt: fmtRoi,
 			help: `(quantity + competing stock: within ${pct(cfg.COMPETE_BAND)} above the sell price in full, dearer stock by its seller's rival weight) ÷ demand per day. Red when beyond the days-to-clear horizon`,
-			tip: (r) => `(${nf.format(r.report.volume)} + ${nf.format(r.report.competingVolume)} competing) ÷ ${r.report.dailyDemand}/day` }
+			tip: (r) => `(${nf.format(r.report.volume)} + ${nf.format(r.report.competingVolume)} competing) ÷ ${r.report.dailyDemand}/day` },
+		{ key: 'soldBefore', label: 'sold before', val: (r) => r.soldBefore ? num(r.soldBefore.units) : null, fmt: fmtNum,
+			help: `units of this type your linked characters sold at the destination in the last ${SOLD_BEFORE_DAYS} days; blank when none. The tooltip gives the sales, the realized net margin per unit and the median days on market`,
+			tip: soldBeforeTip }
 	];
 	const sortValue = (col, row) => col.sort ? col.sort(row) : col.val(row);
 	if (!COLUMNS.some(c => c.key === sort.key) || (sort.dir !== 'asc' && sort.dir !== 'desc')) {
@@ -1404,7 +1466,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			horizonDays: runDaysToComplete,
 			config: { SELL_TAX, SALES_TAX, BROKER_FEE, HAULING_REWARD_FRACTION, MIN_ROI: runMinRoi },
 			rows: copiedRows().map(r => ({
-				typeId: r.typeId, name: r.name, m3: r.m3, qty: orderQty(r), factor: r.factor, base: r.base, report: r.report, context: r.context,
+				typeId: r.typeId, name: r.name, m3: r.m3, qty: orderQty(r), factor: r.factor, base: r.base, report: r.report, context: r.context, soldBefore: r.soldBefore,
 				orderCostMil: orderCost(r), orderRevenueMil: orderRevenue(r), km3: km3Of(r)
 			}))
 		});
@@ -1469,6 +1531,8 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	// horizon. Short-lived: one per refresh or lookup, so each asks the server once (a lookup waits up to the
 	// fetcher's 250 ms flush) and a server that answers 503 is only found out, and logged, per refresh or lookup.
 	const liveStats = (end) => createStatsFetcher({ regionId: end.regionId, stationId: end.stationId, windowDays: statsWindowDays(runDaysToComplete) });
+	// ...and its sold-before fetcher, the same way (the route's start is the source of the courier hauls)
+	const liveSoldBefore = (start, end) => createSoldBeforeFetcher({ stationId: end.stationId, sourceStationId: start.stationId });
 	const syncAlwaysShow = ({ refreshRows = true } = {}) => {
 		alwaysShowSyncChain = alwaysShowSyncChain.then(async () => {
 			const names = alwaysShowNamesFromUi();
@@ -1491,11 +1555,12 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			if (!refreshRows || !reportGeneratedAt) return;
 			const start = STATIONS[startSel.value];
 			const end = STATIONS[endSel.value];
-			// one short-lived stats fetcher for the refreshed types (a run's own is gone when the run ends)
+			// one short-lived stats and sold-before fetcher for the refreshed types (a run's own are gone when the run ends)
 			const stats = liveStats(end);
+			const soldBefore = liveSoldBefore(start, end);
 			await Promise.all([...added, ...removed].map(async (typeId) => {
 				try {
-					const row = await buildRow({ start, end, typeId, isAlwaysShow: alwaysShowIds.has(typeId), books: currentBooks, options: liveOptions, daysToComplete: runDaysToComplete, minRoi: runMinRoi, stats });
+					const row = await buildRow({ start, end, typeId, isAlwaysShow: alwaysShowIds.has(typeId), books: currentBooks, options: liveOptions, daysToComplete: runDaysToComplete, minRoi: runMinRoi, stats, soldBefore });
 					if (row.report) addRow(row);
 				} catch (e) {
 					if (!isAbort(e)) console.error(`always-show refresh failed (typeId: ${typeId})`, e);
@@ -1550,7 +1615,8 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 				options: liveOptions,
 				daysToComplete: runDaysToComplete,
 				minRoi: runMinRoi,
-				stats: liveStats(STATIONS[endKey]) // (a lookup is one type: its own short-lived fetcher)
+				stats: liveStats(STATIONS[endKey]), // (a lookup is one type: its own short-lived fetchers)
+				soldBefore: liveSoldBefore(STATIONS[startKey], STATIONS[endKey])
 			});
 			if (stale()) return;
 			if (row.report) {

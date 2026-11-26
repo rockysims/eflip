@@ -321,3 +321,16 @@ Rough edges:
 - Opt-in stays; README says why (about 8 MB an hour on disk after gzip, 46 MB of pages, some
   190 MB a day) and that the snapshot does not wait for an export run.
 - The no-budget nag now quotes the on-disk figure (8 MB an hour, gzipped) rather than 46 MB.
+
+## M3 as built (agent, 2026-11-26; accepted at review)
+
+- `POST /api/sold-before {stationId, typeIds, days = 90, sourceStationId?}` pools the linked
+  characters' ledgers and runs `results-calc.compute` server-side (the results page's inputs), so the
+  realized net margin per unit (FIFO profit ÷ units) and the unit-weighted median days on market are
+  the results page's own figures; `units`, `sales`, `lastSoldAt` come from the transactions. The
+  source station matters: without it the haul cost drops out of the margin. Answers are cached 60 s
+  per (station, source, days). Scope follows the results accounting: personal sales to clients outside
+  the pool.
+- Page: a shared `createBatchFetcher` behind the stats and the sold-before fetchers; `buildRow` asks
+  both in parallel; last column "sold before" (units; tooltip "2 sales, last 2026-11-19; net
+  0.84M/unit; median 8.4 days on market"; blank when none); saved runs gain `soldBeforeUnits`.

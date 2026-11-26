@@ -11,6 +11,7 @@ const {
 	tx, journalRow, order, asset, contract, contractItem,
 } = require('../test-support/esi-fake');
 const { makeFakeTimers, timerFunctions } = require('../test-support/fake-timers');
+const soldFixture = require('../test-support/sold-before-fixture');
 
 // The /api/sync, /api/ledger, /api/snapshots and /api/market routes, against a fake ESI. The token
 // manager is swapped for a stub through app.locals, so no SSO call is involved.
@@ -87,13 +88,13 @@ const fillIvan = (fake) => fake.character(IVAN, {
 
 test('without SSO credentials the data routes answer 503, and the guards still apply', async (t) => {
 	const off = await startApp(t, { configured: false, characters: [] });
-	for (const [method, p] of [['GET', '/api/sync'], ['POST', '/api/sync'], ['GET', '/api/ledger'], ['GET', '/api/snapshots'], ['GET', '/api/market?typeIds=34'], ['GET', '/api/watch'], ['POST', '/api/watch'], ['GET', '/api/order-log'], ['POST', '/api/market-stats']]) {
+	for (const [method, p] of [['GET', '/api/sync'], ['POST', '/api/sync'], ['GET', '/api/ledger'], ['GET', '/api/snapshots'], ['GET', '/api/market?typeIds=34'], ['GET', '/api/watch'], ['POST', '/api/watch'], ['GET', '/api/order-log'], ['POST', '/api/market-stats'], ['POST', '/api/sold-before']]) {
 		const res = await request(off.port, method, p, method === 'POST' ? { body: {} } : {});
 		assert.equal(res.status, 503, `${method} ${p}`);
 		assert.deepEqual(res.json, { error: 'not configured' });
 	}
 	const on = await startApp(t);
-	for (const [method, p] of [['GET', '/api/ledger'], ['GET', '/api/snapshots'], ['GET', '/api/sync'], ['POST', '/api/sync'], ['GET', '/api/market?typeIds=34'], ['GET', '/api/watch'], ['POST', '/api/watch'], ['GET', '/api/order-log'], ['POST', '/api/market-stats'], ['GET', '/api/config']]) {
+	for (const [method, p] of [['GET', '/api/ledger'], ['GET', '/api/snapshots'], ['GET', '/api/sync'], ['POST', '/api/sync'], ['GET', '/api/market?typeIds=34'], ['GET', '/api/watch'], ['POST', '/api/watch'], ['GET', '/api/order-log'], ['POST', '/api/market-stats'], ['POST', '/api/sold-before'], ['GET', '/api/config']]) {
 		const foreignHost = await request(on.port, method, p, { headers: { Host: 'evil.example' }, body: method === 'POST' ? {} : undefined });
 		assert.equal(foreignHost.status, 403, `${method} ${p} with a foreign Host`);
 		const foreignOrigin = await request(on.port, method, p, { headers: { Origin: 'http://evil.example' }, body: method === 'POST' ? {} : undefined });
@@ -468,6 +469,124 @@ test('POST /api/market-stats rejects malformed bodies with 400', async (t) => {
 	assert.equal((await ctx.post('/api/market-stats', statsBody({ windowDays: 1 }))).status, 200);
 	// a body over the limit is 413
 	const huge = await ctx.post('/api/market-stats', statsBody({ types: [type], pad: 'x'.repeat(1024 * 1024 + 10) }));
+	assert.equal(huge.status, 413);
+});
+
+// ---- POST /api/sold-before: what the linked characters sold at one station, from the ledger
+
+// The fixture's two characters' ledgers (test-support/sold-before-fixture.js) on disk, as a sync would leave them.
+const writeSoldLedgers = (ctx, { ids = [IVAN, GRANT] } = {}) => {
+	const ledger = createLedger({ dataDir: ctx.dataDir });
+	const { ledgers, snapshots } = soldFixture.buildLedgers();
+	for (const id of ids) {
+		ledger.mergeInto(id, 'transactions', ledgers[id].transactions);
+		ledger.mergeInto(id, 'journal', ledgers[id].journal);
+		for (const snapshot of snapshots[id]) ledger.writeSnapshot(id, snapshot);
+	}
+	return ledger;
+};
+const soldBody = (over = {}) => ({ stationId: soldFixture.AMARR, typeIds: [34, 35, 36, 37, 38, 99], days: 90, sourceStationId: soldFixture.JITA, ...over });
+
+test('POST /api/sold-before pools every linked character\'s ledger and answers the types sold at the station, and only those', async (t) => {
+	const ctx = await startApp(t, { characters: [IVAN, GRANT] });
+	writeSoldLedgers(ctx);
+	// a ledger on disk of a character that is not linked is not pooled
+	const stranger = 90000003;
+	createLedger({ dataDir: ctx.dataDir }).mergeInto(stranger, 'transactions', [tx(9001, { is_buy: false, location_id: soldFixture.AMARR, type_id: 34, quantity: 1000, date: '2026-11-19T11:00:00Z' })]);
+
+	const res = await ctx.post('/api/sold-before', soldBody());
+	assert.equal(res.status, 200, res.text);
+	assert.deepEqual(Object.keys(res.json), ['stationId', 'days', 'types']);
+	assert.deepEqual([res.json.stationId, res.json.days], [soldFixture.AMARR, 90]);
+	assert.deepEqual(res.json.types, soldFixture.EXPECTED, 'types 35 (a buy), 37 (inside the pool), 38 (a corporation) and 99 (never traded) are left out');
+	assert.deepEqual(Object.keys(res.json.types[34]), ['units', 'sales', 'lastSoldAt', 'netMarginMilPerUnit', 'medianDaysOnMarket']);
+	assert.equal(res.json.types[36].netMarginMilPerUnit, null, 'a sale no bought lot stands behind has no margin');
+	assert.equal(res.json.types[36].medianDaysOnMarket, null);
+
+	// only the types asked for come back; days defaults to 90; the source station is optional
+	const one = await ctx.post('/api/sold-before', { stationId: soldFixture.AMARR, typeIds: [36, 36] });
+	assert.deepEqual(one.json, { stationId: soldFixture.AMARR, days: 90, types: { 36: soldFixture.EXPECTED[36] } });
+	assert.deepEqual((await ctx.post('/api/sold-before', soldBody({ typeIds: [35, 99] }))).json.types, {});
+	// another station answers its own sales; FIFO takes the oldest lots (3 at 0.5M, 4 at 1.0M): (14.7M - 1.1025M tax - 5.5M) / 7
+	assert.deepEqual((await ctx.post('/api/sold-before', soldBody({ stationId: soldFixture.OTHER }))).json.types, { 34: { units: 7, sales: 1, lastSoldAt: '2026-11-17T10:00:00Z', netMarginMilPerUnit: 1.156786, medianDaysOnMarket: null } });
+	// the window follows days: 5 days back is 2026-11-15T12:00Z, past the type 36 sale; 2 days leaves the one sale of 5 units
+	const five = await ctx.post('/api/sold-before', soldBody({ days: 5 }));
+	assert.deepEqual(Object.keys(five.json.types), ['34']);
+	assert.equal(five.json.days, 5);
+	assert.equal(five.json.types[34].units, 15);
+	const two = await ctx.post('/api/sold-before', soldBody({ days: 2 }));
+	assert.deepEqual([two.json.types[34].units, two.json.types[34].sales, two.json.types[34].netMarginMilPerUnit], [5, 1, 0.835]); // 4.175M profit over 5 units
+	assert.equal(two.json.types[34].medianDaysOnMarket, 9.417);
+	assert.equal(ctx.fake.calls.length, 0, 'nothing reaches ESI');
+	assert.deepEqual(ctx.log.lines, []);
+});
+
+test('POST /api/sold-before answers {} for linked characters with no ledger yet, and with no characters linked', async (t) => {
+	const bare = await startApp(t, { characters: [IVAN] });
+	const res = await bare.post('/api/sold-before', soldBody());
+	assert.equal(res.status, 200, res.text);
+	assert.deepEqual(res.json.types, {});
+	const none = await startApp(t, { characters: [] });
+	assert.deepEqual((await none.post('/api/sold-before', soldBody())).json.types, {});
+});
+
+test('POST /api/sold-before keeps the answer for a minute, so the batches of one run share one pass over the ledger', async (t) => {
+	const ctx = await startApp(t, { characters: [IVAN, GRANT] });
+	const ledger = writeSoldLedgers(ctx);
+	const before = await ctx.post('/api/sold-before', soldBody({ typeIds: [34] }));
+	assert.equal(before.json.types[34].units, 15);
+	ledger.mergeInto(IVAN, 'transactions', [tx(9100, { is_buy: false, location_id: soldFixture.AMARR, type_id: 34, quantity: 2, unit_price: 2500000, date: '2026-11-20T11:00:00Z' })]);
+	ctx.clock.advance(30 * 1000);
+	assert.equal((await ctx.post('/api/sold-before', soldBody({ typeIds: [34] }))).json.types[34].units, 15, 'within the minute: the kept answer');
+	assert.equal((await ctx.post('/api/sold-before', soldBody({ typeIds: [34], days: 30 }))).json.types[34].units, 17, 'another window is its own answer');
+	ctx.clock.advance(31 * 1000);
+	const after = await ctx.post('/api/sold-before', soldBody({ typeIds: [34] }));
+	assert.equal(after.json.types[34].units, 17, 'a minute on: worked out again');
+	assert.equal(after.json.types[34].sales, 3);
+	assert.equal(after.json.types[34].lastSoldAt, '2026-11-20T11:00:00Z');
+});
+
+test('POST /api/sold-before rejects malformed bodies with 400', async (t) => {
+	const ctx = await startApp(t, { characters: [IVAN, GRANT] });
+	writeSoldLedgers(ctx);
+	const bad = [
+		['an array body', []],
+		['no stationId', soldBody({ stationId: undefined })],
+		['a stationId of 0', soldBody({ stationId: 0 })],
+		['a stationId as text', soldBody({ stationId: '60008494' })],
+		['a fractional stationId', soldBody({ stationId: 60008494.5 })],
+		['no typeIds', soldBody({ typeIds: undefined })],
+		['an empty typeIds', soldBody({ typeIds: [] })],
+		['typeIds that is not a list', soldBody({ typeIds: { 34: true } })],
+		['501 typeIds', soldBody({ typeIds: Array.from({ length: 501 }, (_, i) => i + 1) })],
+		['a typeId of 0', soldBody({ typeIds: [34, 0] })],
+		['a typeId as text', soldBody({ typeIds: ['34'] })],
+		['a fractional typeId', soldBody({ typeIds: [34.5] })],
+		['a null typeId', soldBody({ typeIds: [null] })],
+		['days 0', soldBody({ days: 0 })],
+		['days 366', soldBody({ days: 366 })],
+		['fractional days', soldBody({ days: 1.5 })],
+		['days as text', soldBody({ days: '90' })],
+		['null days', soldBody({ days: null })],
+		['a sourceStationId of 0', soldBody({ sourceStationId: 0 })],
+		['a sourceStationId as text', soldBody({ sourceStationId: '60003760' })]
+	];
+	for (const [label, body] of bad) {
+		const res = await ctx.post('/api/sold-before', body);
+		assert.equal(res.status, 400, label);
+		assert.deepEqual(res.json, { error: 'bad request' }, label);
+	}
+	assert.equal((await ctx.post('/api/sold-before', '{not json')).status, 400);
+	assert.equal((await ctx.post('/api/sold-before', 'plain text', { headers: { 'Content-Type': 'text/plain' } })).status, 400);
+	// the edges that are fine: 500 types, days 1 and 365, a null or absent source station
+	const edge = await ctx.post('/api/sold-before', soldBody({ typeIds: Array.from({ length: 500 }, (_, i) => 34 + i), days: 365 }));
+	assert.equal(edge.status, 200);
+	assert.deepEqual(Object.keys(edge.json.types), ['34', '36']);
+	assert.equal((await ctx.post('/api/sold-before', soldBody({ days: 1 }))).status, 200);
+	assert.equal((await ctx.post('/api/sold-before', soldBody({ sourceStationId: null }))).status, 200);
+	assert.equal((await ctx.post('/api/sold-before', { stationId: soldFixture.AMARR, typeIds: [34] })).status, 200);
+	// a body over the limit is 413
+	const huge = await ctx.post('/api/sold-before', soldBody({ pad: 'x'.repeat(256 * 1024 + 10) }));
 	assert.equal(huge.status, 413);
 });
 
