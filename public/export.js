@@ -34,7 +34,7 @@ const DAYS_CONSIDERED = 30;
 const DEFAULT_DAYS_TO_COMPLETE = 5; // the page's "days to clear" input overrides it per run
 const HAULING_REWARD_FRACTION = 0.10;
 const COST_LIMIT = 10 * Math.pow(10, 9);
-const MIN_ROI = 1.5;
+const DEFAULT_MIN_ROI = 1.5; // the page's "min ROI" input overrides it per run
 // The destination history the estimator can read: the longer of its ordinary-price window and its
 // demand window plus the recent-price lead-in. A saved run keeps that much (exportPersist.marketContext).
 const CONTEXT_HISTORY_DAYS = Math.max(estimate.defaultConfig.ORDINARY_PRICE_DAYS, DAYS_CONSIDERED + estimate.defaultConfig.RECENT_THRESHOLD_DAYS);
@@ -113,19 +113,19 @@ const loadBooks = async ({ start, end, options = {}, onProgress = () => {} }) =>
 };
 
 // The estimate's config for one row (the page re-estimates a row with the same config for another quantity).
-const reportConfig = ({ typeId, isAlwaysShow, daysToComplete }) => ({
+const reportConfig = ({ typeId, isAlwaysShow, daysToComplete, minRoi }) => ({
 	DAYS_CONSIDERED,
 	DAYS_TO_COMPLETE: daysToComplete,
 	HAULING_REWARD_FRACTION,
 	COST_LIMIT,
-	MIN_ROI,
+	MIN_ROI: minRoi,
 	SELL_TAX,
 	isAlwaysShow,
 	ignoreOneActiveSeller: ignoreOneActiveSellerForTypeIds.includes(typeId)
 });
 
 // Fetches the ESI data for one type and computes its report.
-// Resolves {typeId, name, m3, report, isAlwaysShow, context, daysToComplete, inputs}; report is null when there is nothing to buy.
+// Resolves {typeId, name, m3, report, isAlwaysShow, context, daysToComplete, minRoi, inputs}; report is null when there is nothing to buy.
 // context is what the estimator was given (top of each order book, destination history), kept so
 // Copy orders can save it with the run. inputs (the orders, history and clock the report was computed from)
 // let the page re-estimate the row for another quantity without a request. The order arrays may be shared
@@ -133,7 +133,8 @@ const reportConfig = ({ typeId, isAlwaysShow, daysToComplete }) => ({
 // options ({signal, queue}) is passed through to util so callers can use their own request queue.
 // With `books` (from loadBooks) the orders come from memory; otherwise one request per station.
 // daysToComplete: the horizon the recommended quantity covers (days of demand minus competing stock).
-const buildRow = async ({ start, end, typeId, isAlwaysShow, books = null, options = {}, daysToComplete = DEFAULT_DAYS_TO_COMPLETE }) => {
+// minRoi: the ROI floor the walk stops at (a source order that returns less is not bought).
+const buildRow = async ({ start, end, typeId, isAlwaysShow, books = null, options = {}, daysToComplete = DEFAULT_DAYS_TO_COMPLETE, minRoi = DEFAULT_MIN_ROI }) => {
 	// 'all' returns buy and sell orders in one request; the estimate uses dest buy orders to spot buy-fill days.
 	const srcOrders = books
 		? (books.src.get(typeId) || [])
@@ -151,10 +152,10 @@ const buildRow = async ({ start, end, typeId, isAlwaysShow, books = null, option
 		destDays,
 		typeId,
 		now,
-		config: reportConfig({ typeId, isAlwaysShow, daysToComplete })
+		config: reportConfig({ typeId, isAlwaysShow, daysToComplete, minRoi })
 	});
 	const context = report ? exportPersist.marketContext({ srcOrders, destOrders, destDays, now, historyDays: CONTEXT_HISTORY_DAYS }) : null;
-	return { typeId, name, m3, report, isAlwaysShow, context, daysToComplete, inputs: { srcOrders, destOrders, destDays, now } };
+	return { typeId, name, m3, report, isAlwaysShow, context, daysToComplete, minRoi, inputs: { srcOrders, destOrders, destDays, now } };
 };
 
 // Resolves item names to type ids. Resolves {ids: Set, unresolved: [names]}.
@@ -171,7 +172,8 @@ const resolveTypeNames = async (names, options = {}) => {
 
 // alwaysShowIds: already-resolved type ids to report regardless of triage/filters. isAlwaysShow(typeId) is
 // consulted when each report is built, so the caller may change the set while the run is going.
-const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new Set(), isAlwaysShow = (id) => alwaysShowIds.has(id), daysToComplete = DEFAULT_DAYS_TO_COMPLETE, signal, onRow = () => {}, onProgress = () => {}, onBooks = () => {} }) => {
+// minRoi: the ROI floor of this run: triage skips items whose Fuzzwork margin is below it, and each walk stops there.
+const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new Set(), isAlwaysShow = (id) => alwaysShowIds.has(id), daysToComplete = DEFAULT_DAYS_TO_COMPLETE, minRoi = DEFAULT_MIN_ROI, signal, onRow = () => {}, onProgress = () => {}, onBooks = () => {} }) => {
 	const start = STATIONS[startStationKey];
 	const end = STATIONS[endStationKey];
 	if (!start || !end) throw new Error(`unknown station (${startStationKey} -> ${endStationKey})`);
@@ -245,7 +247,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 					if (aborted()) return;
 					const books = await booksPromise;
 					if (aborted()) return;
-					const row = await buildRow({ start, end, typeId, isAlwaysShow: isAlwaysShow(typeId), books, daysToComplete });
+					const row = await buildRow({ start, end, typeId, isAlwaysShow: isAlwaysShow(typeId), books, daysToComplete, minRoi });
 					progress.reportsDone++;
 					if (!row.report) {
 						progress.noReport++;
@@ -296,7 +298,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 						console.log(`${typeId} fuzz negative spread (src: ${util.roundMils(srcFuzzPrice)}, dest: ${util.roundMils(destFuzzPrice)})`);
 						continue;
 					}
-					if (destFuzzPrice < srcFuzzPrice * MIN_ROI) {
+					if (destFuzzPrice < srcFuzzPrice * minRoi) {
 						// Fuzz margin too slim
 						console.log(`${typeId} fuzz margin too slim (${Math.round(100 * destFuzzPrice / srcFuzzPrice) / 100}x)`);
 						continue;
@@ -356,6 +358,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	const autoRunChk = $('#autoRun');
 	const globalFactorInput = $('#globalFactor');
 	const daysToClearInput = $('#daysToClear');
+	const minRoiInput = $('#minRoi');
 	const showFilteredChk = $('#showFiltered');
 	const searchInput = $('#search');
 	const searchNote = $('#searchNote');
@@ -411,6 +414,15 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	let daysToClear = parseDaysToClear(lsGet('daysToClear', DEFAULT_DAYS_TO_COMPLETE)) ?? DEFAULT_DAYS_TO_COMPLETE;
 	let runDaysToComplete = daysToClear;
 	let horizonFromRun = false;
+	// "min ROI": a number >= 1, the ROI floor of triage and of the book walk. It mirrors days to clear: minRoi is
+	// the input's last valid value, runMinRoi the floor every row in the table shares (read once by Run, and
+	// following the input only while the table holds no run's rows).
+	const parseMinRoi = (v) => {
+		const d = Number(v);
+		return Number.isFinite(d) && d >= 1 ? d : null;
+	};
+	let minRoi = parseMinRoi(lsGet('minRoi', DEFAULT_MIN_ROI)) ?? DEFAULT_MIN_ROI;
+	let runMinRoi = minRoi;
 	let sort = lsGet('sort', { key: 'dailyProfitMil', dir: 'desc' });
 	let showFiltered = !!lsGet('showFiltered', false);
 	let pendingRender = false;
@@ -448,8 +460,8 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	// The row's report is the estimate for its quantity. At factor 1 that is the recommendation itself (row.base);
 	// otherwise the estimate is re-run with ceil(recommended × factor) as the target, bought for real up the
 	// source book (past the ROI floor; the spend cap still applies), from the same orders, history and clock as
-	// the recommendation, so only the quantity differs. The filtered state stays the recommendation's, so a
-	// factor never hides a row. No request is made: the inputs are kept on the row. A recommendation of 0 (no unit to
+	// the recommendation, so only the quantity differs. The filtered state stays the recommendation's, and the
+	// column filters hide a row by its recommendation's figures (baseView), so a factor never hides a row. No request is made: the inputs are kept on the row. A recommendation of 0 (no unit to
 	// floor to: an empty source book, no sell price) stays 0 at any factor, so it keeps the recommendation (and its
 	// real stop reason); a floored recommendation of 1 unit scales from that 1.
 	const reportForFactor = (row) => {
@@ -459,7 +471,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			...row.inputs,
 			typeId: row.typeId,
 			targetVolume: target,
-			config: reportConfig({ typeId: row.typeId, isAlwaysShow: row.isAlwaysShow, daysToComplete: row.daysToComplete })
+			config: reportConfig({ typeId: row.typeId, isAlwaysShow: row.isAlwaysShow, daysToComplete: row.daysToComplete, minRoi: row.minRoi })
 		});
 		if (!report) return row.base;
 		report.filteredReason = row.base.filteredReason;
@@ -481,28 +493,26 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	const mil = (v) => v === null || v === undefined ? '?' : `${v}M`;
 	const SUPPLY_BAND_TXT = `within ${pct(cfg.SUPPLY_BAND)} above the sell price`;
 	// What bound the recommended quantity (the factor-1 report `base`): the demand cap and the limit that cut it.
-	const recommendedClause = (base) => {
+	const recommendedClause = (base, minRoi) => {
 		const head = `Demand cap ${nf.format(base.horizonVolume)} (${base.dailyDemand}/day × ${runDaysToComplete} days − ${nf.format(base.competingVolume)} competing)`;
 		// a floored base recommends nothing: its 1 unit is there so the figures are real
 		if (base.floored) {
 			const shown = 'shown for 1 unit so the figures are real';
 			return base.stopReason === 'roi'
-				? `${head}; cut to 0 by the ROI floor: the cheapest source order (${mil(base.stopPriceMil)}) returns ${base.stopRoi}x, below ${cfg.MIN_ROI}x; ${shown}`
+				? `${head}; cut to 0 by the ROI floor: the cheapest source order (${mil(base.stopPriceMil)}) returns ${base.stopRoi}x, below ${minRoi}x; ${shown}`
 				: `${head}: nothing to buy; ${shown}`;
 		}
 		switch (base.stopReason) {
 			case 'horizon': return `${head} sets the recommended quantity`;
-			case 'roi': return `${head}; cut to ${nf.format(base.volume)} by the ROI floor: the next source order (${mil(base.stopPriceMil)}) returns ${base.stopRoi}x, below ${cfg.MIN_ROI}x`;
+			case 'roi': return `${head}; cut to ${nf.format(base.volume)} by the ROI floor: the next source order (${mil(base.stopPriceMil)}) returns ${base.stopRoi}x, below ${minRoi}x`;
 			case 'book': return `${head}; cut to ${nf.format(base.volume)}: the source station lists no more units`;
 			case 'cost': return `${head}; cut to ${nf.format(base.volume)} by the ${COST_LIMIT / 1e9}B spend cap`;
 			default: return head;
 		}
 	};
-	// Why a cell is red (limitBreaches names the columns): appended to the cell's tooltip. A function takes the row.
+	// Why a cell is red for a limit of the estimate (limitBreaches names the columns): appended to the cell's
+	// tooltip. A function takes the row. A cell outside its column's min/max says so itself (colFilterBreaches).
 	const BREACH_TEXT = {
-		dailyProfitMil: 'below 1M/day',
-		roi: () => `below the ${cfg.MIN_ROI}x floor`,
-		activeDaysFraction: 'below 0.2',
 		daysSinceSellerUpdate: 'seller updated too recently',
 		rivals: 'too much competition',
 		daysToClear: (row) => `beyond the ${row.daysToComplete}-day horizon`
@@ -512,18 +522,18 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		{ key: 'select', label: '', sort: (r) => selected.has(r.typeId) ? 1 : 0, help: 'checked rows are always shown, summed in the totals and included in Copy orders. Greyed rows are stocked items.' },
 		{ key: 'name', label: 'name', sort: (r) => r.name.toLowerCase(), text: true, help: 'dim rows were filtered out; hover the name for the reason' },
 		{ key: 'dailyProfitMil', label: 'daily profit', val: (r) => num(r.report.dailyProfitMil), fmt: fmtMil,
-			help: 'profit on the quantity ÷ max(days to clear, 1), in millions. Red when below 1M/day',
+			help: "profit on the quantity ÷ max(days to clear, 1), in millions. Red when outside the column's min/max (the default min is the old filter limit, 1M/day)",
 			tip: (r) => `${mil(r.report.profitPerItemMil)} profit/item × ${nf.format(orderQty(r))} = ${mil(Math.round(r.report.profitPerItemMil * r.report.volume * 100) / 100)}, over max(${r.report.daysToClear ?? '?'} days to clear, 1)` },
 		{ key: 'roi', label: 'ROI', val: (r) => num(r.report.roi), fmt: fmtRoi,
-			help: `revenue/item ÷ cost/item for the quantity (recommendations below ${cfg.MIN_ROI}x are filtered; a factor above 1 buys past that floor, so the row's ROI can be lower). Red when below the ${cfg.MIN_ROI}x floor`,
+			help: () => `revenue/item ÷ cost/item for the quantity. The recommendation stops at the min ROI (${runMinRoi}x), so only a factor above 1 or a 1-unit 'nothing to buy' row goes below it. Red when outside the column's min/max (its min starts at the min ROI and follows that input until you set your own)`,
 			tip: (r) => `${mil(r.report.revenuePerItemMil)} ÷ ${mil(r.report.costPerItemMil)}` },
 		{ key: 'factor', label: 'factor', val: (r) => r.factor, help: 'multiplier on the recommended quantity. The row is re-estimated for ceil(recommended × factor), bought for real up the source book. Clear a row\'s factor to follow the global factor again' },
 		{ key: 'qty', label: 'quantity', val: orderQty, fmt: fmtNum,
-			help: () => `recommended × factor, bought for real up the source book, so cost/item, ROI, the order totals, days to clear and daily profit are for this quantity. Recommended = ${runDaysToComplete} days of demand minus competing stock (within ${pct(cfg.COMPETE_BAND)} above the sell price in full, dearer stock by its seller's rival weight), bought while each order still clears ${cfg.MIN_ROI}x ROI; a factor above 1 buys past that floor. The cell tooltip names the limit that bound. When nothing is worth buying the row shows 1 unit so its figures are real, filtered as 'nothing to buy'`,
+			help: () => `recommended × factor, bought for real up the source book, so cost/item, ROI, the order totals, days to clear and daily profit are for this quantity. Recommended = ${runDaysToComplete} days of demand minus competing stock (within ${pct(cfg.COMPETE_BAND)} above the sell price in full, dearer stock by its seller's rival weight), bought while each order still clears ${runMinRoi}x ROI; a factor above 1 buys past that floor. The cell tooltip names the limit that bound. When nothing is worth buying the row shows 1 unit so its figures are real, filtered as 'nothing to buy'`,
 			tip: (r) => {
 				const base = r.base || r.report;
 				const baseWord = base.floored ? 'shown' : 'recommended'; // a floored base recommends nothing
-				if (r.report === base) return `${nf.format(base.volume)} ${baseWord} × factor ${r.factor}. ${recommendedClause(base)}`;
+				if (r.report === base) return `${nf.format(base.volume)} ${baseWord} × factor ${r.factor}. ${recommendedClause(base, r.minRoi)}`;
 				const target = Math.ceil(base.volume * r.factor);
 				const bought = r.report.volume;
 				const outcome = bought >= target
@@ -531,7 +541,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 					: r.report.stopReason === 'cost'
 						? `; only ${nf.format(bought)} bought: the ${COST_LIMIT / 1e9}B spend cap`
 						: `; only ${nf.format(bought)} bought: the source station lists no more units`;
-				return `${nf.format(target)} = ${nf.format(base.volume)} ${baseWord} × factor ${r.factor}${outcome}. Recommended: ${recommendedClause(base)}`;
+				return `${nf.format(target)} = ${nf.format(base.volume)} ${baseWord} × factor ${r.factor}${outcome}. Recommended: ${recommendedClause(base, r.minRoi)}`;
 			} },
 		{ key: 'daysOfSupply', label: 'days of supply left', val: (r) => num(r.report.daysOfSupply), fmt: fmtRoi,
 			help: `units listed at the destination ${SUPPLY_BAND_TXT} ÷ demand per day: how long until the cheap stock is gone and the price steps up`,
@@ -551,7 +561,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		{ key: 'km3', label: 'km3', val: km3Of, fmt: fmtNum, help: 'packaged volume of the order quantity, in thousands of m3',
 			tip: (r) => `${nf.format(r.m3 || 0)} m3 packaged per unit × ${nf.format(orderQty(r))}` },
 		{ key: 'activeDaysFraction', label: 'active days', val: (r) => num(r.report.activeDaysFraction), fmt: fmtRoi,
-			help: `fraction of the last ${DAYS_CONSIDERED} days with sell-side trades at the destination that would have been profitable (below 0.2 is filtered). Red when below 0.2`,
+			help: `fraction of the last ${DAYS_CONSIDERED} days with sell-side trades at the destination that would have been profitable. Red when outside the column's min/max (the default min is the old filter limit, 0.2)`,
 			tip: (r) => `${r.report.activeDays} of ${DAYS_CONSIDERED} days` },
 		{ key: 'costPerItemMil', label: 'cost/item', val: (r) => num(r.report.costPerItemMil), fmt: fmtMil,
 			help: `average source price over the orders bought, plus ${pct(HAULING_REWARD_FRACTION)} hauling reward`,
@@ -593,8 +603,22 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 
 	//--- column filters: min/max per numeric column (blank = no limit); persisted globally.
 	// Empty values pass. Selected rows and search matches ignore column filters.
+	// A filter hides a row by its recommendation's figures (baseView), so a factor never makes a row vanish;
+	// the cells are marked red by the displayed figures (colFilterBreaches).
 	const FILTERABLE = (col) => !['select', 'name', 'factor'].includes(col.key);
 	let colFilters = lsGet('colFilters', {});
+	// The single-column limits the estimate used to hard-code are seeded once as these columns' mins: daily
+	// profit 1M/day, the min ROI, active days 0.2. The flag keeps a bound the user clears from coming back.
+	if (!lsGet('colFiltersSeeded', false)) {
+		for (const [key, min] of [['dailyProfitMil', 1], ['roi', minRoi], ['activeDaysFraction', 0.2]]) {
+			const f = colFilters[key] || (colFilters[key] = { min: null, max: null });
+			if (f.min === null || f.min === undefined) f.min = min;
+		}
+		lsSet('colFilters', colFilters);
+		lsSet('colFiltersSeeded', true);
+	}
+	// the row as its recommendation shows it (factor 1): what the column filters test
+	const baseView = (row) => row.report === row.base ? row : { ...row, report: row.base };
 	const passesColFilters = (row) => {
 		for (const col of COLUMNS) {
 			const f = colFilters[col.key];
@@ -605,6 +629,25 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			if (f.max !== null && f.max !== undefined && v > f.max) return false;
 		}
 		return true;
+	};
+	// The columns whose displayed figure is outside its min/max: Map column key -> why.
+	const colFilterBreaches = (row) => {
+		const breaches = new Map();
+		for (const col of COLUMNS) {
+			const f = colFilters[col.key];
+			if (!f || !FILTERABLE(col)) continue;
+			const v = col.val(row);
+			if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+			if (f.min !== null && f.min !== undefined && v < f.min) breaches.set(col.key, `below the column's min ${f.min}`);
+			else if (f.max !== null && f.max !== undefined && v > f.max) breaches.set(col.key, `above the column's max ${f.max}`);
+		}
+		return breaches;
+	};
+	// "ROI below the column's min 1.5": the first column (in table order) the row's figures are outside of
+	const firstColFilterText = (row) => {
+		const breaches = colFilterBreaches(row);
+		const col = COLUMNS.find(c => breaches.has(c.key));
+		return col ? `${col.label} ${breaches.get(col.key)}` : '';
 	};
 	// Each filterable column shows "min - max" where each side is a clickable label (the set value, or
 	// "min"/"max" when unset). Clicking turns it into a number field: it saves on every keystroke,
@@ -628,10 +671,17 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		if (f.min === null && f.max === null) delete colFilters[key];
 		lsSet('colFilters', colFilters);
 	};
+	// every row that has a <tr> follows the filters: dimming, the name tooltip and the red cells depend on them
+	const refreshRowEls = () => {
+		for (const row of rows) {
+			const tr = trByTypeId.get(row.typeId);
+			if (tr) updateRowEl(tr, row);
+		}
+	};
 	let colFilterTimer = null;
 	const scheduleFilterRender = () => {
 		clearTimeout(colFilterTimer);
-		colFilterTimer = setTimeout(render, 150);
+		colFilterTimer = setTimeout(() => { refreshRowEls(); render(); }, 150);
 	};
 	const openBoundEditor = (span) => {
 		const { key, bound } = span.dataset;
@@ -677,6 +727,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		colFilters = {};
 		lsSet('colFilters', colFilters);
 		buildFilterRow();
+		refreshRowEls();
 		render();
 	});
 
@@ -699,22 +750,27 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	const FAILED_ICON = svgIcon('<path d="M3 3l6 6M9 3l-6 6"/>');
 
 	const updateRowEl = (tr, row) => {
-		const filtered = !!row.report.filteredReason;
+		// hidden (or dimmed, with show filtered) by the estimate's filter, or by a column filter on the recommendation's figures
+		const base = baseView(row);
+		const colHidden = !passesColFilters(base);
+		const filtered = !!row.report.filteredReason || colHidden;
 		tr.classList.toggle('filtered', filtered);
 		tr.classList.toggle('dim', filtered);
 		tr.classList.toggle('alwaysShowItem', !!row.isAlwaysShow);
 		const nameCell = tr.querySelector('td.nameCell');
-		nameCell.title = row.report.filteredReason || '';
-		// the figures that break a limit (a filter's, or the days-to-clear horizon) turn red, the tooltip says which
-		const breaches = new Set(estimate.limitBreaches(row.report, reportConfig({ typeId: row.typeId, isAlwaysShow: row.isAlwaysShow, daysToComplete: row.daysToComplete })));
+		nameCell.title = row.report.filteredReason || (colHidden ? firstColFilterText(base) : '');
+		// the displayed figures that break a limit turn red, the tooltip says which: the estimate's (seller idle
+		// too briefly, too many rivals, days to clear beyond the horizon) and the columns' own min/max
+		const breaches = new Set(estimate.limitBreaches(row.report, reportConfig({ typeId: row.typeId, isAlwaysShow: row.isAlwaysShow, daysToComplete: row.daysToComplete, minRoi: row.minRoi })));
+		const colBreaches = colFilterBreaches(row);
 		for (const cell of tr.querySelectorAll('td[data-col]')) {
 			const col = COLUMNS.find(c => c.key === cell.dataset.col);
 			cell.textContent = col.fmt(col.val(row));
 			const tip = col.tip ? col.tip(row) : '';
-			const breach = breaches.has(col.key);
-			cell.classList.toggle('breach', breach);
-			const text = breach ? BREACH_TEXT[col.key] : null;
-			const why = typeof text === 'function' ? text(row) : text;
+			const text = breaches.has(col.key) ? BREACH_TEXT[col.key] : null;
+			const reasons = [typeof text === 'function' ? text(row) : text, colBreaches.get(col.key)].filter(Boolean);
+			cell.classList.toggle('breach', reasons.length > 0);
+			const why = reasons.join('; ');
 			cell.title = why ? (tip ? `${tip}; ${why}` : why) : tip;
 		}
 		const factorInput = tr.querySelector('input.factor');
@@ -778,11 +834,13 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		return tr;
 	};
 
-	// selected rows are always visible; else a search matches every row (filtered ones too); else the estimate filter applies
+	// selected rows are always visible; else a search matches every row (filtered ones too); else the estimate's
+	// filter and the column filters (on the recommendation's figures, so a factor never hides a row) apply,
+	// unless show filtered reveals what they hide (dimmed, see updateRowEl)
 	const isRowVisible = (row, query) => {
 		if (selected.has(row.typeId) || row.isAlwaysShow) return true;
 		if (query) return row.name.toLowerCase().includes(query);
-		return (showFiltered || !row.report.filteredReason) && passesColFilters(row);
+		return showFiltered || (!row.report.filteredReason && passesColFilters(baseView(row)));
 	};
 
 	const searchQuery = () => searchInput.value.trim().toLowerCase();
@@ -810,7 +868,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	const updateSums = () => {
 		let cost = 0, revenue = 0, km3 = 0, count = 0, hiddenByColFilters = 0;
 		for (const row of rows) {
-			if (!selected.has(row.typeId) && !row.isAlwaysShow && !row.report.filteredReason && !passesColFilters(row)) hiddenByColFilters++;
+			if (!selected.has(row.typeId) && !row.isAlwaysShow && !row.report.filteredReason && !passesColFilters(baseView(row))) hiddenByColFilters++;
 			if (!selected.has(row.typeId)) continue;
 			cost += orderCost(row);
 			revenue += orderRevenue(row);
@@ -821,7 +879,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			`${roundNonZero(revenue - cost)}` +
 			`<span class="dim"> (-${roundNonZero(cost)} + ${roundNonZero(revenue)}) </span>` +
 			`${roundNonZero(km3)}km3 <span class="dim">&middot; ${count} selected</span>` +
-			(hiddenByColFilters ? `<span class="dim"> &middot; ${hiddenByColFilters} hidden by column filters</span>` : '');
+			(hiddenByColFilters ? `<span class="dim"> &middot; ${hiddenByColFilters} ${showFiltered ? 'outside' : 'hidden by'} column filters</span>` : '');
 	};
 
 	const render = () => {
@@ -1054,11 +1112,12 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		rowBuffer = [];
 		currentBooks = null; // (before the await below, so a search lookup in the meantime fetches fresh orders)
 		runDaysToComplete = daysToClear; // fixed for this run
+		runMinRoi = minRoi;
 		horizonFromRun = true;
 		reportGeneratedAt = moment().format('MMM. Do, h:mm a');
 		reportGeneratedAtIso = new Date().toISOString();
 		const horizon = `${runDaysToComplete} day${runDaysToComplete === 1 ? '' : 's'} to clear`;
-		headerElem.innerHTML = `${esc(startSel.value)} &rarr; ${esc(endSel.value)} <span class="dim">&middot;</span> ${horizon} <span class="dim">&middot; ${reportGeneratedAt}</span>`;
+		headerElem.innerHTML = `${esc(startSel.value)} &rarr; ${esc(endSel.value)} <span class="dim">&middot;</span> ${horizon} <span class="dim">&middot;</span> min ROI ${runMinRoi}x <span class="dim">&middot; ${reportGeneratedAt}</span>`;
 		render();
 		scheduleSearchLookup(); // a standing search keeps finding its item in the new table
 
@@ -1073,6 +1132,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 				alwaysShowIds,
 				isAlwaysShow: (id) => alwaysShowIds.has(id),
 				daysToComplete: runDaysToComplete,
+				minRoi: runMinRoi,
 				signal: controller.signal,
 				onRow: addRow,
 				onProgress: showProgress,
@@ -1115,6 +1175,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		// the table no longer holds a run's rows: the horizon follows the input again until the next Run
 		horizonFromRun = false;
 		runDaysToComplete = daysToClear;
+		runMinRoi = minRoi;
 		render();
 		scheduleSearchLookup();
 	};
@@ -1154,6 +1215,27 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	// on commit, an invalid entry (blank, 0, 2.5) snaps back to the last valid value
 	daysToClearInput.addEventListener('change', () => { daysToClearInput.value = daysToClear; });
 
+	minRoiInput.value = minRoi;
+	minRoiInput.addEventListener('input', () => {
+		const d = parseMinRoi(minRoiInput.value);
+		if (d === null) return;
+		// the ROI column's min follows the input until the user sets their own (blank or another value stays)
+		const f = colFilters.roi;
+		if (f && f.min === minRoi) {
+			setBound('roi', 'min', d);
+			buildFilterRow();
+			scheduleFilterRender();
+		}
+		minRoi = d;
+		lsSet('minRoi', d);
+		if (!horizonFromRun && rows.length === 0) {
+			runMinRoi = d;
+			renderHead();
+		}
+	});
+	// on commit, an invalid entry (blank, 0.5) snaps back to the last valid value
+	minRoiInput.addEventListener('change', () => { minRoiInput.value = minRoi; });
+
 	showFilteredChk.checked = showFiltered;
 	showFilteredChk.addEventListener('change', () => {
 		showFiltered = showFilteredChk.checked;
@@ -1181,7 +1263,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			reportGeneratedAt: reportGeneratedAtIso,
 			route: { start: startSel.value, end: endSel.value, startStationId: start.stationId, endStationId: end.stationId, startRegionId: start.regionId, endRegionId: end.regionId },
 			horizonDays: runDaysToComplete,
-			config: { SELL_TAX, SALES_TAX, BROKER_FEE, HAULING_REWARD_FRACTION, MIN_ROI },
+			config: { SELL_TAX, SALES_TAX, BROKER_FEE, HAULING_REWARD_FRACTION, MIN_ROI: runMinRoi },
 			rows: copiedRows().map(r => ({
 				typeId: r.typeId, name: r.name, m3: r.m3, qty: orderQty(r), factor: r.factor, base: r.base, report: r.report, context: r.context,
 				orderCostMil: orderCost(r), orderRevenueMil: orderRevenue(r), km3: km3Of(r)
@@ -1268,7 +1350,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			const end = STATIONS[endSel.value];
 			await Promise.all([...added, ...removed].map(async (typeId) => {
 				try {
-					const row = await buildRow({ start, end, typeId, isAlwaysShow: alwaysShowIds.has(typeId), books: currentBooks, options: liveOptions, daysToComplete: runDaysToComplete });
+					const row = await buildRow({ start, end, typeId, isAlwaysShow: alwaysShowIds.has(typeId), books: currentBooks, options: liveOptions, daysToComplete: runDaysToComplete, minRoi: runMinRoi });
 					if (row.report) addRow(row);
 				} catch (e) {
 					if (!isAbort(e)) console.error(`always-show refresh failed (typeId: ${typeId})`, e);
@@ -1321,7 +1403,8 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 				isAlwaysShow: alwaysShowIds.has(typeId),
 				books: currentBooks,
 				options: liveOptions,
-				daysToComplete: runDaysToComplete
+				daysToComplete: runDaysToComplete,
+				minRoi: runMinRoi
 			});
 			if (stale()) return;
 			if (row.report) {
