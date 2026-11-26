@@ -7,8 +7,8 @@ rework. New: `lib/` (server modules, including `lib/derive.js`), `scripts/sync.j
 `.env.example`. Changed: `server.js`, `.gitignore`, `package.json`, `public/export.js` (Copy
 persists the run and its market context), `README.md`. Retired at the end:
 `public/exportAndSold.*`, `public/env.js`, util.js wallet getters. Out of scope: `index.*`,
-`jack.js`, `missing.*`, `resell.*`, `reprocess.js` (removed on 2026-11-26, after this plan; `/` now
-redirects to `export.html`).
+`jack.js`, `missing.*`, `resell.*`, `reprocess.js` (removed on 2026-11-26, after this plan; `/` is now
+a page of links to the four pages).
 
 Goal and principle: after an export run (Copy orders → multibuy at the source → item-exchange
 hand-off from buyer to seller → courier → list at the destination), show what really happened:
@@ -780,7 +780,7 @@ Done 2026-11-19: `exportAndSold.*` deleted, `env.js` gone from `.gitignore` (no 
 two util wallet getters removed (no caller left), README rewritten (setup with the new portal's scope
 groups, running, linking, syncing, the launchd job, the `data/` map, tests). The landing page
 `index.html` has no links at all, so none was added. (It was removed on 2026-11-26: it fetched
-hundreds of Jita books from ESI on load. `/` redirects to `export.html` now.)
+hundreds of Jita books from ESI on load. `/` is a page of links to the four pages now.)
 
 ### Phase 8 — insights page (sonnet; after 6)
 Scope: `public/insights.html`, `public/insights.js`, plus the inline bars in the results table.

@@ -67,19 +67,19 @@ test('server app', async (t) => {
 		assert.deepEqual(await res.json(), { ok: true });
 	});
 
-	await t.test('GET / redirects to the export page, with or without a query', async () => {
-		for (const url of ['/', '/?from=bookmark']) {
-			const res = await fetch(`${base}${url}`, { redirect: 'manual' });
-			assert.equal(res.status, 302, url);
-			assert.equal(res.headers.get('location'), '/export.html', url);
+	await t.test('GET / is the page of links to the four pages, with no script and no ESI call', async () => {
+		// The page that was here fetched hundreds of Jita books from ESI on load; this one is links only.
+		for (const url of ['/', '/?from=bookmark', '/index.html']) {
+			const res = await fetch(`${base}${url}`);
+			assert.equal(res.status, 200, url);
+			const text = await res.text();
+			for (const page of ['export.html', 'orders.html', 'results.html', 'insights.html']) assert.ok(text.includes(`href="${page}"`), `${url} links ${page}`);
+			assert.ok(!/<script|esi\.evetech\.net/i.test(text), `${url} loads no script and names no ESI host`);
 		}
 	});
 
-	await t.test('the pre-rework root page is gone, and the pages beside it still serve', async () => {
-		// The page that was here fetched hundreds of Jita books from ESI on load. The 200s show public/
-		// resolves from this working directory, so the 404 is the file missing and not the folder.
-		const gone = await fetch(`${base}/index.html`);
-		assert.equal(gone.status, 404);
+	await t.test('the pages beside the landing page still serve', async () => {
+		// The 200s show public/ resolves from this working directory, so a 404 below is a file missing, not the folder.
 		for (const page of ['export.html', 'orders.html', 'results.html', 'insights.html', 'util.js']) {
 			const res = await fetch(`${base}/${page}`);
 			assert.equal(res.status, 200, page);

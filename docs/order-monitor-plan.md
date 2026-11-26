@@ -8,7 +8,7 @@ Branch: `claude/order-monitoring-undercut-8e457f`, fast-forwarded onto `feature/
 `public/results-shared.js` (env notice, page links), `public/results.html`, `public/insights.html`
 (a link), `public/export.js` (env notice line), `scripts/sync.js` (`--watch`), `README.md`. Out of
 scope: `index.*`, `jack.js`, `missing.*`, `resell.*`, `reprocess.js` (these legacy pages and scripts
-were removed on 2026-11-26; `/` redirects to `export.html`), and everything under "Out of scope"
+were removed on 2026-11-26; `/` is a page of links to the four pages), and everything under "Out of scope"
 below.
 
 Goal: while the game is open, see at a glance what has sold recently and what it made; which sell
