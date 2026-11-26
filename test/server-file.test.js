@@ -89,6 +89,56 @@ test('cache routes', async (t) => {
 		assert.equal(fs.existsSync(path.join(cacheDir, 'pwned.json')), false);
 	});
 
+	await t.test('POST of a body that is not a JSON object or array is a short 400, not a stack trace', async () => {
+		// util.saveJson used to post the bare word null after a failed fetch; body-parser's strict mode
+		// refused it with a SyntaxError that Express printed in full ("Unexpected token 'n' ... is not valid JSON")
+		const warned = [];
+		const origError = console.error;
+		console.error = (...args) => { warned.push(args.join(' ')); };
+		try {
+			for (const body of ['null', '"text"', '42', 'not json at all']) {
+				const res = await fetch(`${base}/file/scalar.json`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+				assert.equal(res.status, 400, body);
+				assert.deepEqual(await res.json(), { error: 'body is not a JSON object or array' });
+			}
+		} finally {
+			console.error = origError;
+		}
+		assert.deepEqual(warned, [], 'nothing printed to stderr');
+		assert.equal(fs.existsSync(path.join(cacheDir, 'scalar.json')), false);
+		// the server is still fine afterwards
+		assert.equal((await post(base, 'after.json', { ok: 1 })).status, 200);
+	});
+
+	await t.test('GET of a cached file that is not valid JSON is a miss (404) and the next save replaces it', async () => {
+		fs.writeFileSync(path.join(cacheDir, 'corrupt.json'), '# not json');
+		const warned = [];
+		const log = { warn: (line) => warned.push(line) };
+		// the shared server logs through console; check the behaviour there, and the one-line log on a server given a log
+		const res = await fetch(`${base}/file/corrupt.json?hoursStaleLimit=-1`);
+		assert.equal(res.status, 404);
+		assert.equal((await post(base, 'corrupt.json', { fixed: true })).status, 200);
+		const again = await fetch(`${base}/file/corrupt.json?hoursStaleLimit=-1`);
+		assert.equal(again.status, 200);
+		assert.deepEqual(await again.json(), { fixed: true });
+
+		const own = express();
+		own.use(bodyParser.json({limit: '5mb'}));
+		const ownDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cache-files-log-'));
+		fs.writeFileSync(path.join(ownDir, 'bad.json'), '{"half":');
+		mountCacheRoutes(own, ownDir, { log });
+		const server = await new Promise(resolve => { const s = own.listen(0, '127.0.0.1', () => resolve(s)); });
+		try {
+			const r = await fetch(`http://127.0.0.1:${server.address().port}/file/bad.json?hoursStaleLimit=-1`);
+			assert.equal(r.status, 404);
+			assert.equal(warned.length, 1);
+			assert.match(warned[0], /^cache: bad\.json is not valid JSON/);
+		} finally {
+			await new Promise(resolve => server.close(resolve));
+			fs.rmSync(ownDir, { recursive: true, force: true });
+		}
+	});
+
 	await t.test('stale files answer 404 only when older than the limit', async () => {
 		await post(base, 'aged.json', { n: 1 });
 		const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);

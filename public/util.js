@@ -11,7 +11,10 @@
 // `name === 'AbortError'` and is never retried. Callers should catch it (check `e.name`).
 // Progress UI: `util.queueStats()` -> {inFlight, queued, done, failed, pausedUntil}.
 const util = (() => {
+	// Only a JSON object or array is cached: the server refuses anything else (body-parser strict mode),
+	// and a failed or not-found fetch resolves to null, which is nothing to keep.
 	const saveJson = async (path, data) => {
+		if (data === null || typeof data !== 'object') return;
 		await fetch(`/file/${path}`, {
 			method: 'POST',
 			headers: {
