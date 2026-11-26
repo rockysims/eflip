@@ -562,10 +562,15 @@ test('purging a character removes its ledger, raw and bookkeeping, and the next 
 	assert.ok(again.stored >= 11);
 	assert.equal(ledgerRows(dataDir, IVAN, 'transactions').length, 3);
 
+	// refused with code 'busy' (the route's 409) while a sync runs here or holds the lock elsewhere
+	const busy = (e) => /being synced/.test(e.message) && e.code === 'busy';
+	const pending = service.syncCharacter(IVAN, { force: true });
+	assert.throws(() => service.purgeCharacter(IVAN), busy);
+	await pending;
 	const lockDir = path.join(dataDir, 'locks');
 	fs.mkdirSync(lockDir, { recursive: true });
 	fs.writeFileSync(path.join(lockDir, `character-${IVAN}.lock`), JSON.stringify({ pid: process.ppid, at: Date.now() }));
-	assert.throws(() => service.purgeCharacter(IVAN), /being synced/);
+	assert.throws(() => service.purgeCharacter(IVAN), busy);
 });
 
 test('an unlinked character is reported, not synced', async (t) => {

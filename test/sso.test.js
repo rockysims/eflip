@@ -10,6 +10,7 @@ const { createSso, SsoError } = require('../lib/sso');
 const { createTokenStore } = require('../lib/tokenStore');
 const { createTokenManager, TokenError } = require('../lib/tokens');
 const { mountApi, SCOPES, safeReturnPath, probeDataDir } = require('../lib/api');
+const { acquireLock } = require('../lib/dataFiles');
 
 // Nothing here touches the network: every fetch goes to a stub that serves CCP's URLs.
 
@@ -912,6 +913,90 @@ test('a failed revoke still removes the character', async (t) => {
 	assert.equal(ctx.app.locals.tokenStore.get(CHARACTER_ID), null);
 	assert.ok(ctx.logs.some(line => /revoke .* failed/.test(line)));
 	assert.ok(!ctx.logs.join('\n').includes('refresh-ivan'));
+});
+
+// The purge unlinks the character under its lock before deleting anything, so a watch tick (or a sync)
+// that lands while the revoke is out finds the character gone instead of writing its files again.
+test('DELETE ?purge=1: a watch tick while the revoke is out finds the character unlinked and writes nothing for it', async (t) => {
+	let entered;
+	const revokeEntered = new Promise(resolve => { entered = resolve; });
+	let release;
+	const revokeGate = new Promise(resolve => { release = resolve; });
+	const ordersUrl = `https://esi.evetech.net/characters/${CHARACTER_ID}/orders`;
+	const ctx = await startApp(t, { handlers: {
+		[REVOKE_URL]: async () => { entered(); await revokeGate; return new Response('', { status: 200 }); },
+		[ordersUrl]: () => jsonResponse(200, []),
+	} });
+	const store = ctx.app.locals.tokenStore;
+	store.upsert(sampleRecord({ refreshToken: 'refresh-ivan' }));
+	ctx.app.locals.tokens.prime(CHARACTER_ID, 'access-ivan', NOW_S + 1200);
+	const dirs = ['raw', 'ledger', 'esi-cache'].map(kind => path.join(ctx.dataDir, kind, String(CHARACTER_ID)));
+	fs.mkdirSync(dirs[1], { recursive: true });
+	fs.writeFileSync(path.join(dirs[1], 'transactions.json'), '[]');
+
+	const deleting = ctx.del(`/api/characters/${CHARACTER_ID}?purge=1`);
+	let tick;
+	try {
+		await revokeEntered;
+		tick = await ctx.app.locals.sync.syncWatch({ characterIds: [CHARACTER_ID] });
+	} finally {
+		release(); // else the server never closes
+	}
+	assert.equal(tick.characters[CHARACTER_ID].status, 'failed');
+	assert.equal(tick.characters[CHARACTER_ID].reason, 'not linked');
+	const res = await deleting;
+	assert.equal(res.status, 200);
+	assert.deepEqual(res.json, { ok: true, purged: true });
+	for (const dir of dirs) assert.equal(fs.existsSync(dir), false, dir);
+	assert.equal(ctx.fetch.callsTo(ordersUrl).length, 0);
+	assert.equal(store.get(CHARACTER_ID), null);
+	assert.deepEqual(ctx.fetch.callsTo(REVOKE_URL).map(call => new URLSearchParams(call.body).get('token')), ['refresh-ivan']);
+});
+
+test('DELETE ?purge=1 while the character\'s lock is held answers 409 and leaves it linked, with its data', async (t) => {
+	const ctx = await startApp(t, { handlers: { [REVOKE_URL]: () => new Response('', { status: 200 }) } });
+	ctx.app.locals.tokenStore.upsert(sampleRecord());
+	const ledgerFile = path.join(ctx.dataDir, 'ledger', String(CHARACTER_ID), 'transactions.json');
+	fs.mkdirSync(path.dirname(ledgerFile), { recursive: true });
+	fs.writeFileSync(ledgerFile, '[]');
+	const hold = acquireLock(ctx.dataDir, `character-${CHARACTER_ID}`);
+	assert.ok(hold);
+	try {
+		const res = await ctx.del(`/api/characters/${CHARACTER_ID}?purge=1`);
+		assert.equal(res.status, 409);
+		assert.deepEqual(res.json, { error: 'a sync of this character is running; try again shortly' });
+	} finally {
+		hold();
+	}
+	assert.notEqual(ctx.app.locals.tokenStore.get(CHARACTER_ID), null);
+	assert.equal(fs.existsSync(ledgerFile), true);
+	assert.equal(ctx.fetch.callsTo(REVOKE_URL).length, 0);
+});
+
+// Any failure other than a running sync is a 500. The ESI bookkeeping goes first, so a failure there leaves
+// the ledger and raw in place (never etags and _sync.json with no raw to rebuild from). The character was
+// unlinked before the failure, so its grant is still revoked.
+test('DELETE ?purge=1: a purge that fails for another reason answers 500, is logged, and deletes nothing after the failure', { skip: process.platform === 'win32' || (process.getuid && process.getuid() === 0) }, async (t) => {
+	const ctx = await startApp(t, { handlers: { [REVOKE_URL]: () => new Response('', { status: 200 }) } });
+	ctx.app.locals.tokenStore.upsert(sampleRecord({ refreshToken: 'refresh-ivan' }));
+	const id = String(CHARACTER_ID);
+	for (const kind of ['esi-cache', 'ledger', 'raw']) {
+		fs.mkdirSync(path.join(ctx.dataDir, kind, id), { recursive: true });
+		fs.writeFileSync(path.join(ctx.dataDir, kind, id, 'x.json'), '{}');
+	}
+	const stuck = path.join(ctx.dataDir, 'esi-cache', id);
+	fs.chmodSync(stuck, 0o500);
+	try {
+		const res = await ctx.del(`/api/characters/${id}?purge=1`);
+		assert.equal(res.status, 500);
+		assert.deepEqual(res.json, { error: 'purge failed' });
+		assert.ok(ctx.logs.some(line => line.startsWith(`characters: purge of ${id} failed`)), ctx.logs.join('\n'));
+		for (const kind of ['ledger', 'raw']) assert.equal(fs.existsSync(path.join(ctx.dataDir, kind, id, 'x.json')), true, kind);
+		assert.equal(ctx.app.locals.tokenStore.get(CHARACTER_ID), null);
+		assert.equal(ctx.fetch.callsTo(REVOKE_URL).length, 1);
+	} finally {
+		fs.chmodSync(stuck, 0o700);
+	}
 });
 
 test('DELETE from another origin is refused by the guards', async (t) => {
