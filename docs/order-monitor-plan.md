@@ -68,6 +68,10 @@ Terms used below:
 - Modifying an order changes its price only; raising the quantity means cancelling and placing a
   new order (Rocky, 2026-11-25). So `volume_remain` never rises on a persisting `order_id`, and a
   drop is a fill.
+- Prices are not limited to four significant figures. Of 12,415 distinct Domain orders in the
+  books stored up to 2026-11-22, 38 carry more (81,000.01 and 81,000.02 among them, issued that
+  week), so the one-cent undercut of rule 6 (`bestPrice − 0.01`) is a real price. Most orders do
+  use four figures or fewer, which is habit, not a rule.
 - The fee for a price change is charged on the change, not at a rate: Grant's 214 `brokers_fee`
   rows in 13 days (up to 34 a day) ran from 0.1 % to 2.4 % of order value. Estimates come from an
   order's own past fees (rule 6), never from a rate.
@@ -149,9 +153,10 @@ Thresholds and defaults: `LEAVE_HOURS 8`, `UNDERCUT_DAYS 2`, `MIN_ROI` (the expo
    - `top`: nothing ahead.
    - `leave`: `daysBehind × 24 < LEAVE_HOURS`, or `unitsAhead ≤ typicalTrade`: the queue ahead
      clears on its own.
-   - `reconsider` (red): `matchPrice × (1 − tax) ≤ landedCost` ("below cost"), or `roiIfMatch <
-     MIN_ROI` ("below the ROI floor"). Without a landed cost this branch is skipped and the row
-     carries `nocost`.
+   - `reconsider` (red): `matchPrice × (1 − tax) ≤ landedCost` ("below cost"), or `matchPrice ×
+     (1 − tax) < MIN_ROI × landedCost` ("below the ROI floor"; `MIN_ROI` is the export page's net
+     revenue over cost, 1.5, so this is `roiIfMatch < MIN_ROI − 1`). Without a landed cost this
+     branch is skipped and the row carries `nocost`.
    - `undercut`: `daysBehind ≥ UNDERCUT_DAYS`. Demoted to `maybe` with the reason "others undercut
      within ~h; the fee outweighs the expected sales" when `expectedGainBeforeUndercut` is known and
      below `feeEstimate`.
@@ -274,6 +279,62 @@ Gate: `node --test test/*.test.js` passes. Live, with this worktree's server on 
 within five minutes reports no ESI call; `node scripts/sync.js --rebuild` leaves both logs
 unchanged; the next hourly sync still writes a snapshot.
 
+Done 2026-11-25: `lib/ledger.js` (order-log and book-log read/write, one order per line in numeric id
+order, keys sorted), `lib/derive.js` (`foldOrders`, `applyHistory`, `foldBook`, the builders and the
+`update*`/`ensure*` helpers sync.js calls), `lib/sync.js` (`syncWatch`, `watchStatus`, and the
+market snapshot's per-pair loop moved into `fetchPairs`, shared with the watch), `lib/api.js`
+(`POST|GET /api/watch`, `GET /api/order-log`, `/api/market?log=1`, `/api/config` `env`),
+`scripts/sync.js` (`--watch`, and `--rebuild` also rebuilds both logs and lists the order log's
+warnings), `test/watch.test.js` (13), `test/order-log.test.js` (13), four more API tests and five more
+script tests. 288 tests before, 323 after (not counting `test/orders-calc.test.js`). The gate's live
+half (`PORT=5002`, Grant's books) is not done here. As built, where it differs from the text above:
+- **Raw page names.** A book's second page is `markets-<region>-orders-page-2-type-id-<type>`
+  (`slugFor` sorts the query keys), not `...-type-id-<type>-page-2`.
+- **Order log.** The history rows are an overlay applied to the whole log after the `orders` answers
+  are folded, not interleaved by `fetchedAt`: history (cache 3600 s) can know of an ending before the
+  next `orders` answer (cache 1200 s) drops the order, and the ledger's rows are last-write-wins, so
+  the overlay is the same in a rebuild and step by step. `lastSeen` is the last stored answer that
+  lists the order (raw skips unchanged bodies, so an untouched order's `lastSeen` lags until
+  something changes; `end.at` is exact to a refresh). `warnings` come back from `buildOrderLog` and
+  `--rebuild` prints them: `volume-rise`, and `reappeared` (an ended order listed again, which
+  reopens it).
+- **Public sync log.** The watch and the market snapshot add `source: 'watch' | 'market'` and `books:
+  [{regionId, typeId, outcome, at, pages, stamps: {page: stamp of the raw file this check stored},
+  history}]`. `outcome` is `stored`, `not-modified` (a 304, or a 200 with the stored body), `not-due`,
+  or the failure's name; only the first two are samples, `at` is the first answer's time (a 304's
+  `checkedAt`), and `pages` is capped at `MARKET_MAX_PAGES`. A page the check did not store is read
+  as the newest file stored at or before the check's last stamp, so a book whose page 2 alone changed
+  still folds whole. Entries written before `books` count each type they list as checked at
+  `syncedAt` (stored when a page file falls in their window, and only for a type that has raw
+  before it); a stored page file no entry names is a check of its own. For those, and only those, a
+  book that shrank by a page is read with its stale page.
+- **Existing data.** A log that does not exist is built from raw first (`ensureOrderLog` on a
+  character's first fold, `ensureBookLog` on a type's first check), so the incremental and rebuilt
+  logs agree on a data directory that predates them; a type's log appears at its first check. A
+  crash between a raw write and its fold leaves a log one answer behind until `--rebuild`; a book log
+  that will not fold is reported as a `bookLog` error (the raw is stored, the run goes `partial`).
+- **Watch.** `_watch.json` is `{tickedAt, finishedAt, characters: {id: {name, status, reason?, orders,
+  checkedAt, expires, openSellOrders}}, market: {status, reason?, regionIds, calls, truncated, types:
+  [the `books` form], errors, stop}, stop}`. A tick writes a public sync log (unique `syncedAt`) only
+  when it called ESI, no character sync log, no `_sync.json`. A 401 ends that character's step, an
+  error-limit pause or a 420/429 ends the tick. `/api/market` without `regionIds` takes the regions of
+  the newest public sync log, which a watch entry can now be.
+- **`/api/config`** now carries `env.dataDir`, so `test/sso.test.js`'s "leaks nothing else" check
+  allows that one path; the flags are booleans, the values are never sent.
+- **`--watch`** is a usage error (exit 2) with `--rebuild`, `--market-only`, `--no-market` and
+  `--max-types`; it exits 1 when a character failed, was busy or needs re-linking, a stop ended the
+  tick or the market step was partial or failed; a busy or skipped market step is not a failure.
+
+Live gate 2026-11-26 (Fable, this worktree's server on `PORT=5002` against the inventory-ui-updates
+data): the first tick synced both characters and stored the books and history of Grant's four
+listed types (8 calls); a second tick inside five minutes made no call (`not-due` ×4);
+`order-log.json` appeared for both characters (Grant: 9 orders, 4 open, 5 ended, one of them already
+closed from history) and `market/10000043/<typeId>.json` for the four types (the 47771 log holds 7
+samples back to 2026-11-20, two of them 304s); `node scripts/sync.js --rebuild` left every existing
+ledger file byte-identical and added book logs for the 354 other types in raw; a forced hourly sync
+right after the tick wrote a snapshot whose refs name the tick's raw `orders` file. The market-order
+bucket never dipped below 11,900 of 12,000.
+
 ### Phase 2 — analysis module (opus: semantics need care; writes the tests), parallel with 1
 Scope: `public/orders-calc.js`, `test/orders-calc.test.js`. Hand-written fixtures shaped like the
 live samples (Grant's order 7467834499 at 21.12 M behind no one; 7464705828 with 2 of 31 left).
@@ -286,6 +347,34 @@ absorbs; sale clusters (two sales inside the gap merge, a third outside it start
 loss and a profit keep their signs in the total); share with and without history; `asOf` values.
 
 Gate: `node --test test/*.test.js`.
+
+Done 2026-11-25: `public/orders-calc.js` (UMD, `window.ordersCalc` / `require`, `defaultThresholds`),
+29 tests. `compute({characterIds, openOrders ({[characterId]: rows | {fetchedAt, orders}}),
+orderLogs, books, bookLogs, history, facts: {sells, lots, relists}, observedTaxRate, stations,
+thresholds, now})`, shapes as in Data model and the module header; output rule 10's plus `taxRate` and
+`thresholds`; rows carry `verdict`, `reason` and `badges` (`priceWar, nocost, nofee, est, nobook,
+nobooklog, nohistory, nolog`). As built, beyond the rules:
+
+- `minRoi` keeps the export page's meaning (net revenue ÷ cost, 1.5x): `reconsider` when `matchPrice
+  × (1 − tax) < minRoi × landedCost`, i.e. `roiIfMatch < minRoi − 1`; comparing the margin-based
+  `roiIfMatch` with 1.5 would demand 150 % profit.
+- Orders of any linked character are never competition: out of units ahead, best price, undercuts
+  and episodes, reported as `ownAhead`. `matchPrice` is null on a `top` row.
+- `undercutAt` dates the undercutter by its first logged price below ours issued after ours (its
+  current `issued` when unlogged), so a re-pricing undercutter does not move "undercut since"
+  forward. `reUndercuts` counts its changes after our `issued` that left it below us, the first
+  included.
+- `relistFees` is the fees after the first (`listingFee`, `feeTotal` beside it); `listedFor` runs
+  from the earliest of `firstSeen`, the first logged `issued` and the fee facts' `firstSeenAt`.
+- `expectedSalesBeforeUndercut` is capped at `volumeRemain`.
+- Sales are one per wallet transaction (results-calc rows merged by `sellTxId`). Sell facts carry no
+  location, so matching uses character, type and price (a location when a row has one).
+- Pending fills count from the log's first sighting (its `volumeRemain` then, less now) against the
+  matched sales after it: `volumeTotal − volumeRemain` would report fills from before the log, at
+  prices it never saw, as pending.
+- Share uses whole UTC days that have a history row, on both sides (today is not in the history yet).
+- No book: `maybe`, "no book yet". No book log: no episodes for the type. No observed tax rate: 8 %,
+  warned. `asOf.books` also counts book-log samples (a 304 confirms the book).
 
 ### Phase 3 — page (sonnet; loads `ui-patterns` and `dataviz` first; after 1 and 2)
 Scope: `public/orders.html`, `public/orders.js`, the env notice and links in `results-shared.js`,

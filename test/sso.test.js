@@ -573,14 +573,14 @@ test('GET /api/config tells whether SSO is configured and leaks nothing else', a
 	const on = await startApp(t);
 	const res = await on.get('/api/config');
 	assert.equal(res.status, 200);
-	assert.deepEqual(res.json, { configured: true, callbackUrl: `http://localhost:${on.port}/sso/callback`, scopes: [...SCOPES] });
+	assert.deepEqual(res.json, { configured: true, callbackUrl: `http://localhost:${on.port}/sso/callback`, scopes: [...SCOPES], env: { dataDir: on.dataDir, dataDirFromEnv: false, userAgentFromEnv: true } });
 	assert.ok(!res.text.includes(CLIENT_SECRET));
-	assert.ok(!res.text.includes(on.dataDir));
+	assert.equal(res.text.split(on.dataDir).length, 2, 'the data directory appears once, as env.dataDir (a local path, shown so the pages can remind the user)');
 
 	const off = await startApp(t, { configured: false });
 	const offRes = await off.get('/api/config');
 	assert.equal(offRes.status, 200);
-	assert.deepEqual(offRes.json, { configured: false, callbackUrl: 'http://localhost:5001/sso/callback', scopes: [...SCOPES] });
+	assert.deepEqual(offRes.json, { configured: false, callbackUrl: 'http://localhost:5001/sso/callback', scopes: [...SCOPES], env: { dataDir: off.dataDir, dataDirFromEnv: false, userAgentFromEnv: false } });
 
 	const foreign = await on.get('/api/config', { Host: 'evil.example' });
 	assert.equal(foreign.status, 403);

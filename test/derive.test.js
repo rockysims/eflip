@@ -170,7 +170,7 @@ test('a character with no raw data keeps the ledger it has', (t) => {
 	const result = derive.rebuildCharacter({ dataDir, characterId: 5 });
 	assert.deepEqual(result, { skipped: 'no raw data' });
 	assert.equal(fs.readFileSync(ledgerFile, 'utf8'), '[{"transaction_id":1}]\n');
-	assert.deepEqual(derive.rebuildAll({ dataDir, log: makeLog() }), { characters: {}, structures: null });
+	assert.deepEqual(derive.rebuildAll({ dataDir, log: makeLog() }), { characters: {}, structures: null, bookLogs: 0 });
 });
 
 test('a rebuild waits for a sync in progress instead of racing it', async (t) => {

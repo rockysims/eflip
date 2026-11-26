@@ -38,7 +38,7 @@ const request = (port, method, urlPath, { headers = {}, body } = {}) => new Prom
 	req.end();
 });
 
-const startApp = async (t, { configured = true, characters = [IVAN] } = {}) => {
+const startApp = async (t, { configured = true, characters = [IVAN], env: extraEnv = {} } = {}) => {
 	const dataDir = tmpDataDir(t);
 	const clock = makeClock();
 	const fake = createFakeEsi({ now: clock });
@@ -51,6 +51,7 @@ const startApp = async (t, { configured = true, characters = [IVAN] } = {}) => {
 	const env = configured
 		? { EVE_CLIENT_ID: 'client-id', EVE_CLIENT_SECRET: 'client-secret', EVE_CALLBACK_URL: `http://localhost:${port}/sso/callback`, ESI_USER_AGENT: 'eflip-test/1.0' }
 		: {};
+	Object.assign(env, extraEnv);
 	const log = makeLog();
 	mountApi(app, { env, dataDir, fetch: fake.fetch, now: clock, log });
 	app.locals.tokens = configured ? makeTokens() : null;
@@ -77,13 +78,13 @@ const fillIvan = (fake) => fake.character(IVAN, {
 
 test('without SSO credentials the data routes answer 503, and the guards still apply', async (t) => {
 	const off = await startApp(t, { configured: false, characters: [] });
-	for (const [method, p] of [['GET', '/api/sync'], ['POST', '/api/sync'], ['GET', '/api/ledger'], ['GET', '/api/snapshots'], ['GET', '/api/market?typeIds=34']]) {
+	for (const [method, p] of [['GET', '/api/sync'], ['POST', '/api/sync'], ['GET', '/api/ledger'], ['GET', '/api/snapshots'], ['GET', '/api/market?typeIds=34'], ['GET', '/api/watch'], ['POST', '/api/watch'], ['GET', '/api/order-log']]) {
 		const res = await request(off.port, method, p, method === 'POST' ? { body: {} } : {});
 		assert.equal(res.status, 503, `${method} ${p}`);
 		assert.deepEqual(res.json, { error: 'not configured' });
 	}
 	const on = await startApp(t);
-	for (const [method, p] of [['GET', '/api/ledger'], ['GET', '/api/snapshots'], ['GET', '/api/sync'], ['POST', '/api/sync'], ['GET', '/api/market?typeIds=34']]) {
+	for (const [method, p] of [['GET', '/api/ledger'], ['GET', '/api/snapshots'], ['GET', '/api/sync'], ['POST', '/api/sync'], ['GET', '/api/market?typeIds=34'], ['GET', '/api/watch'], ['POST', '/api/watch'], ['GET', '/api/order-log'], ['GET', '/api/config']]) {
 		const foreignHost = await request(on.port, method, p, { headers: { Host: 'evil.example' }, body: method === 'POST' ? {} : undefined });
 		assert.equal(foreignHost.status, 403, `${method} ${p} with a foreign Host`);
 		const foreignOrigin = await request(on.port, method, p, { headers: { Origin: 'http://evil.example' }, body: method === 'POST' ? {} : undefined });
@@ -234,4 +235,114 @@ test('a market sync can be requested for a named region', async (t) => {
 	assert.deepEqual(res.json.market.regionIds, [10000002]);
 	assert.ok(ctx.fake.callsTo(/markets\/10000002\/orders/).length > 0);
 	assert.equal(ctx.fake.callsTo(/markets\/10000043/).length, 0);
+});
+
+// ---- the order monitor: /api/watch, /api/order-log, /api/market?log=1, /api/config env
+
+const REGION = 10000043;
+const listed = (fake) => {
+	fillIvan(fake);
+	fake.market.orders.set(`${REGION}:35`, [{ order_id: 8001, type_id: 35, price: 1000, is_buy_order: false, volume_remain: 5, volume_total: 10, issued: '2026-11-18T10:00:00Z', duration: 90, range: 'region', location_id: 60008494, system_id: 30002187, min_volume: 1 }]);
+};
+
+test('POST /api/watch runs one tick and answers what it did; GET /api/watch answers the same, plus running', async (t) => {
+	const ctx = await startApp(t, { characters: [IVAN, GRANT] });
+	listed(ctx.fake);
+	assert.deepEqual((await ctx.get('/api/watch')).json, { tickedAt: null, finishedAt: null, characters: {}, market: null, stop: null, running: false });
+
+	// no hourly sync yet: our orders are taken, and there is no destination region to take books for
+	const early = await ctx.post('/api/watch', {});
+	assert.equal(early.status, 200);
+	assert.equal(early.json.characters[IVAN].status, 'ok');
+	assert.equal(early.json.market.status, 'skipped');
+
+	await ctx.post('/api/sync', { characterIds: [IVAN], market: false });
+	ctx.clock.advance(6 * 60 * 1000);
+	const first = await ctx.post('/api/watch', { characterIds: [IVAN] });
+	assert.equal(first.status, 200);
+	assert.deepEqual(Object.keys(first.json.characters), [String(IVAN)], 'only the character asked for');
+	assert.equal(first.json.characters[IVAN].openSellOrders, 1);
+	assert.deepEqual(first.json.market.regionIds, [REGION]);
+	assert.deepEqual(first.json.market.types.map(type => [type.typeId, type.outcome]), [[35, 'stored']]);
+	assert.ok(ctx.fake.callsTo(/markets\/10000043\/orders/).length > 0);
+	assert.ok(!first.text.includes('secret-refresh') && !first.text.includes('token-'), 'no token in the answer');
+
+	// inside the cache windows: no ESI call, said so
+	ctx.clock.advance(60 * 1000);
+	ctx.fake.reset();
+	const second = await ctx.post('/api/watch');
+	assert.equal(ctx.fake.callsTo(/^\/(characters|markets)\/.*orders$/).length, 0);
+	assert.equal(second.json.characters[IVAN].orders, 'not-due');
+	assert.deepEqual(second.json.market.types.map(type => type.outcome), ['not-due']);
+
+	const status = await ctx.get('/api/watch');
+	assert.equal(status.status, 200);
+	assert.deepEqual({ ...status.json, running: undefined }, { ...second.json, running: undefined });
+	assert.equal(status.json.running, false);
+});
+
+test('POST /api/watch rejects bad bodies and unknown characters before any ESI call', async (t) => {
+	const ctx = await startApp(t);
+	for (const body of [{ characterIds: 'x' }, { characterIds: ['abc'] }, { characterIds: [-1] }]) {
+		assert.equal((await ctx.post('/api/watch', body)).status, 400, JSON.stringify(body));
+	}
+	assert.equal((await ctx.post('/api/watch', '{not json')).status, 400);
+	assert.equal((await ctx.post('/api/watch', { characterIds: [4242] })).status, 404);
+	const big = await ctx.post('/api/watch', { characterIds: Array.from({ length: 5000 }, (_, i) => i + 1) });
+	assert.equal(big.status, 413, 'a body past 16 kb');
+	assert.equal(ctx.fake.calls.length, 0);
+});
+
+test('GET /api/order-log serves the log of each character, and the book log rides along on /api/market?log=1', async (t) => {
+	const ctx = await startApp(t, { characters: [IVAN, GRANT] });
+	listed(ctx.fake);
+	await ctx.post('/api/sync', { characterIds: [IVAN], market: false });
+	ctx.clock.advance(6 * 60 * 1000);
+	await ctx.post('/api/watch', { characterIds: [IVAN] });
+
+	const all = await ctx.get('/api/order-log');
+	assert.equal(all.status, 200);
+	assert.deepEqual(Object.keys(all.json.characters), [String(IVAN), String(GRANT)]);
+	assert.deepEqual(Object.keys(all.json.characters[IVAN]), ['8001']);
+	assert.deepEqual(all.json.characters[IVAN][8001].path.map(entry => entry.price), [1000]);
+	assert.deepEqual(all.json.characters[GRANT], {}, 'no log yet: empty');
+	const one = await ctx.get(`/api/order-log?characterIds=${IVAN}`);
+	assert.deepEqual(Object.keys(one.json.characters), [String(IVAN)]);
+	for (const bad of ['characterIds=abc', 'characterIds=1,,2', 'characterIds=0', `characterIds=${'1,'.repeat(101)}1`]) {
+		assert.equal((await ctx.get(`/api/order-log?${bad}`)).status, 400, bad);
+	}
+
+	const plain = await ctx.get('/api/market?typeIds=35,36');
+	assert.deepEqual(Object.keys(plain.json.types[35][REGION]), ['orders', 'history'], 'the log only comes when asked for');
+	const withLog = await ctx.get('/api/market?typeIds=35,36&log=1');
+	assert.equal(withLog.status, 200);
+	const log = withLog.json.types[35][REGION].log;
+	assert.deepEqual(Object.keys(log), ['samples', 'orders']);
+	assert.deepEqual(log.samples.map(sample => sample.stored), [true]);
+	assert.deepEqual(Object.keys(log.orders), ['8001']);
+	assert.equal(withLog.json.types[35][REGION].orders.rows[0].order_id, 8001);
+	assert.equal(withLog.json.types[36][REGION].log, null, 'a type with no log yet');
+	assert.equal((await ctx.get('/api/market?typeIds=35&log=0')).json.types[35][REGION].log, undefined);
+});
+
+test('GET /api/config says where the data is and whether EFLIP_DATA_DIR and ESI_USER_AGENT are set, and nothing secret', async (t) => {
+	const bare = await startApp(t);
+	const res = await bare.get('/api/config');
+	assert.equal(res.status, 200);
+	assert.deepEqual(res.json.env, { dataDir: bare.dataDir, dataDirFromEnv: false, userAgentFromEnv: true });
+	assert.equal(res.json.configured, true);
+
+	const set = await startApp(t, { env: { EFLIP_DATA_DIR: '/somewhere/shared' } });
+	assert.equal((await set.get('/api/config')).json.env.dataDirFromEnv, true);
+
+	// not configured for SSO: still answers, still no secret; no user agent set
+	const off = await startApp(t, { configured: false });
+	const offRes = await off.get('/api/config');
+	assert.equal(offRes.status, 200);
+	assert.equal(offRes.json.configured, false);
+	assert.deepEqual(offRes.json.env, { dataDir: off.dataDir, dataDirFromEnv: false, userAgentFromEnv: false });
+	const loud = await startApp(t, { env: { EVE_CLIENT_SECRET: 'client-secret-xyz', EFLIP_DATA_DIR: '/x', ESI_USER_AGENT: 'me@example.com' } });
+	const loudRes = await loud.get('/api/config');
+	assert.ok(!loudRes.text.includes('client-secret-xyz') && !loudRes.text.includes('me@example.com'), 'flags only, never the values');
+	assert.deepEqual(Object.keys(loudRes.json.env), ['dataDir', 'dataDirFromEnv', 'userAgentFromEnv']);
 });

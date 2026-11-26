@@ -10,14 +10,23 @@
 //   node scripts/sync.js --market-only      only the market snapshot
 //   node scripts/sync.js --region 10000043  snapshot that region's market (repeatable)
 //   node scripts/sync.js --rebuild          rebuild data/ledger/ from data/raw/; no ESI, no credentials
+//   node scripts/sync.js --watch            one watch refresh: our open orders, then the book and history
+//                                           of each type we have listed (what the orders page does every
+//                                           five minutes; optional here, for a launchd job while the game
+//                                           is open on a machine where the page is not). Takes --character
+//                                           and --region; contradicts --rebuild, --market-only,
+//                                           --no-market and --max-types.
 //
 // Always syncs (the page's "more than an hour ago" test is the server's business), but every route
 // still honours its Expires, so a run inside the cache windows makes no call.
 // Reads the same .env as the server (EVE_CLIENT_ID, EVE_CLIENT_SECRET, EVE_CALLBACK_URL,
 // ESI_USER_AGENT, ESI_COMPAT_DATE, EFLIP_DATA_DIR).
-// Prints one block per character and one for the market: calls made, 304s, rows added, tokens left.
+// Prints one block per character and one for the market: calls made, 304s, rows added, tokens left
+// (--watch: one line per character and per type, and what each answered). --rebuild also rebuilds the
+// order log and the book logs, and lists any warning the order log raised.
 // Exit code: 0 everything synced (or nothing was due), 1 a sync failed or stopped early, 2 usage or
-// configuration error.
+// configuration error. A watch tick exits 1 when a character failed, needs re-linking or was busy, a
+// stop ended it or the market step came back partial; a busy or skipped market step is not a failure.
 const path = require('path');
 const { createSso } = require('../lib/sso');
 const { createTokenStore, DEFAULT_DATA_DIR } = require('../lib/tokenStore');
@@ -28,7 +37,7 @@ const derive = require('../lib/derive');
 const DEFAULT_CALLBACK_URL = 'http://localhost:5001/sso/callback';
 const DEFAULT_USER_AGENT = 'eflip (local)';
 
-const USAGE = `usage: node scripts/sync.js [--character <id>]... [--region <id>]... [--no-market | --market-only] [--max-types <n>] [--rebuild]`;
+const USAGE = `usage: node scripts/sync.js [--character <id>]... [--region <id>]... [--no-market | --market-only] [--max-types <n>] [--rebuild | --watch]`;
 
 class UsageError extends Error {}
 
@@ -38,11 +47,12 @@ const positiveId = (text, flag) => {
 };
 
 const parseArgs = (argv) => {
-	const options = { characterIds: null, regionIds: null, market: true, marketOnly: false, rebuild: false, help: false, maxTypes: undefined };
+	const options = { characterIds: null, regionIds: null, market: true, marketOnly: false, rebuild: false, watch: false, help: false, maxTypes: undefined };
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === '--help' || arg === '-h') options.help = true;
 		else if (arg === '--rebuild') options.rebuild = true;
+		else if (arg === '--watch') options.watch = true;
 		else if (arg === '--no-market') options.market = false;
 		else if (arg === '--market-only') options.marketOnly = true;
 		else if (arg === '--character') (options.characterIds = options.characterIds || []).push(positiveId(argv[++i], arg));
@@ -51,6 +61,8 @@ const parseArgs = (argv) => {
 		else throw new UsageError(`unknown argument ${JSON.stringify(arg)}`);
 	}
 	if (options.marketOnly && !options.market) throw new UsageError('--market-only and --no-market contradict each other');
+	if (options.watch && options.rebuild) throw new UsageError('--watch and --rebuild contradict each other');
+	if (options.watch && (options.marketOnly || !options.market || options.maxTypes !== undefined)) throw new UsageError('--watch takes only --character and --region');
 	return options;
 };
 
@@ -116,6 +128,36 @@ const formatSummary = (result) => {
 	return lines.join('\n');
 };
 
+// The text a watch tick prints; also what the tests read.
+const formatWatch = (result) => {
+	const lines = [`watch tick ${result.tickedAt}`];
+	for (const [id, c] of Object.entries(result.characters || {})) {
+		const who = `${c.name || 'character'} (${id})`;
+		if (c.status === 'ok') lines.push(`${who}: ok, orders ${c.orders}, ${c.openSellOrders} open sell orders`);
+		else lines.push(`${who}: ${c.status}${c.reason ? ` - ${c.reason}` : ''}${c.orders ? `, orders ${c.orders}` : ''}`);
+	}
+	const m = result.market;
+	if (m) {
+		if (m.status === 'skipped' || m.status === 'busy' || m.status === 'failed') {
+			lines.push(`market: ${m.status}${m.reason ? ` - ${m.reason}` : ''}`);
+		} else {
+			lines.push(`market (region ${m.regionIds.join(', ')}): ${m.status}, ${m.types.length} types, ${m.calls} calls${m.truncated ? `, ${m.truncated} long books cut short` : ''}`);
+			for (const t of m.types) lines.push(`  type ${t.typeId}: book ${t.outcome}${t.pages > 1 ? ` (${t.pages} pages)` : ''}, history ${t.history === null ? 'not asked' : t.history}`);
+			for (const e of m.errors || []) lines.push(`  error: ${e.route}${e.status ? ` ${e.status}` : ''} ${e.message}`.trimEnd());
+		}
+	}
+	const stop = stopText(result.stop);
+	if (stop) lines.push(stop);
+	return lines.join('\n');
+};
+
+// A watch tick fails when a character failed, needs re-linking or was busy, something stopped it, or
+// the market step came back partial or failed. A busy or skipped market step does not count.
+const watchFailed = (result) => {
+	const bad = (status) => status === 'failed' || status === 'relink' || status === 'busy' || status === 'paused' || status === 'rate-limited';
+	return Object.values(result.characters || {}).some(c => bad(c.status)) || Boolean(result.stop) || Boolean(result.market && (result.market.status === 'partial' || result.market.status === 'failed'));
+};
+
 // Did anything fail or stop early? ('skipped' is not a failure: nothing was asked of it.)
 const hasFailure = (result) => {
 	const bad = (status) => status === 'failed' || status === 'partial' || status === 'busy' || status === 'relink';
@@ -152,9 +194,11 @@ const main = async (argv, deps = {}) => {
 		try {
 			const result = derive.rebuildAll({ dataDir, log });
 			for (const [id, counts] of Object.entries(result.characters)) {
-				out(counts.skipped ? `${id}: skipped (${counts.skipped})` : `${id}: ${counts.transactions} transactions, ${counts.journal} journal rows, ${counts.ordersHistory} orders, ${counts.contracts} contracts, ${counts.contractItems} contract item lists, ${counts.snapshots} snapshots`);
+				out(counts.skipped ? `${id}: skipped (${counts.skipped})` : `${id}: ${counts.transactions} transactions, ${counts.journal} journal rows, ${counts.ordersHistory} orders, ${counts.contracts} contracts, ${counts.contractItems} contract item lists, ${counts.snapshots} snapshots, ${counts.orderLog} logged orders`);
+				for (const w of counts.orderLogWarnings || []) out(`  warning: order ${w.orderId} ${w.kind} at ${w.at}${w.kind === 'volume-rise' ? ` (${w.from} -> ${w.to})` : ''}`);
 			}
 			out(`structures: ${result.structures === null ? 'none in raw' : result.structures}`);
+			out(`book logs: ${result.bookLogs}`);
 			return 0;
 		} catch (e) {
 			err(`rebuild failed: ${e.message}`);
@@ -191,6 +235,18 @@ const main = async (argv, deps = {}) => {
 		return 2;
 	}
 
+	if (options.watch) {
+		let tick;
+		try {
+			tick = await service.syncWatch({ characterIds: options.characterIds, regionIds: options.regionIds });
+		} catch (e) {
+			err(`watch failed: ${e.message}`);
+			return 1;
+		}
+		out(formatWatch(tick));
+		return watchFailed(tick) ? 1 : 0;
+	}
+
 	let result;
 	try {
 		result = await service.syncAll({
@@ -219,4 +275,4 @@ if (require.main === module) {
 	);
 }
 
-module.exports = { main, parseArgs, formatSummary, hasFailure, UsageError };
+module.exports = { main, parseArgs, formatSummary, formatWatch, hasFailure, watchFailed, UsageError };

@@ -3,7 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { main, parseArgs, formatSummary, UsageError } = require('../scripts/sync');
+const { main, parseArgs, formatSummary, formatWatch, watchFailed, UsageError } = require('../scripts/sync');
+const { acquireLock, createRawStore } = require('../lib/dataFiles');
 const { createTokenStore } = require('../lib/tokenStore');
 const {
 	ALL_SCOPES, makeClock, tmpDataDir, makeTokens, createFakeEsi,
@@ -40,12 +41,14 @@ const setup = (t, { link = true } = {}) => {
 };
 
 test('arguments: characters and regions repeat, flags combine, mistakes are usage errors', () => {
-	assert.deepEqual(parseArgs([]), { characterIds: null, regionIds: null, market: true, marketOnly: false, rebuild: false, help: false, maxTypes: undefined });
+	assert.deepEqual(parseArgs([]), { characterIds: null, regionIds: null, market: true, marketOnly: false, rebuild: false, watch: false, help: false, maxTypes: undefined });
 	const full = parseArgs(['--character', '1', '--character', '2', '--region', '10000043', '--no-market', '--max-types', '50']);
 	assert.deepEqual([full.characterIds, full.regionIds, full.market, full.maxTypes], [[1, 2], [10000043], false, 50]);
 	assert.equal(parseArgs(['--market-only']).marketOnly, true);
 	assert.equal(parseArgs(['--rebuild']).rebuild, true);
-	for (const bad of [['--bogus'], ['--character'], ['--character', 'abc'], ['--character', '0'], ['--market-only', '--no-market'], ['--region', '-3']]) {
+	const watch = parseArgs(['--watch', '--character', '1', '--region', '10000043']);
+	assert.deepEqual([watch.watch, watch.characterIds, watch.regionIds], [true, [1], [10000043]], '--watch goes with --character and --region');
+	for (const bad of [['--bogus'], ['--character'], ['--character', 'abc'], ['--character', '0'], ['--market-only', '--no-market'], ['--region', '-3'], ['--watch', '--rebuild'], ['--watch', '--market-only'], ['--watch', '--no-market'], ['--watch', '--max-types', '5']]) {
 		assert.throws(() => parseArgs(bad), UsageError, bad.join(' '));
 	}
 });
@@ -150,6 +153,121 @@ test('--rebuild re-derives the ledger from raw with no credentials and no ESI ca
 	assert.equal(ctx.fake.calls.length, 0);
 	assert.equal(fs.readFileSync(ledgerFile, 'utf8'), before);
 	assert.match(ctx.lines.join('\n'), /90000001: 2 transactions, 1 journal rows/);
+});
+
+// ---- --watch
+
+const REGION = 10000043;
+const bookOrder = (id, typeId, price) => ({ order_id: id, type_id: typeId, price, is_buy_order: false, volume_remain: 5, volume_total: 10, issued: '2026-11-18T10:00:00Z', duration: 90, range: 'region', location_id: 60008494, system_id: 30002187, min_volume: 1 });
+
+test('--watch runs one tick, prints each character and each type, and a second run inside the cache windows makes no call', async (t) => {
+	const ctx = setup(t);
+	ctx.fake.market.orders.set(`${REGION}:35`, [bookOrder(8001, 35, 1000)]);
+	const code = await ctx.run(['--watch', '--region', String(REGION)]);
+	assert.equal(code, 0, ctx.errors.join('\n'));
+	const text = ctx.lines.join('\n');
+	assert.match(text, /^watch tick 2026-11-20T12:00:00\.000Z/);
+	assert.match(text, /Ivan Tester \(90000001\): ok, orders stored, 1 open sell orders/);
+	assert.match(text, /market \(region 10000043\): ok, 1 types, 2 calls/);
+	assert.match(text, /type 35: book stored, history stored/);
+	assert.deepEqual(ctx.fake.calls.map(call => call.path), [`/characters/${IVAN}/orders`, `/markets/${REGION}/orders`, `/markets/${REGION}/history`], 'no wallet, no journal, no assets: just the watch');
+	assert.ok(!text.includes('secret-refresh') && !text.includes('token-'));
+	assert.deepEqual(ctx.errors, []);
+	assert.ok(fs.existsSync(path.join(ctx.dataDir, 'ledger', String(IVAN), 'order-log.json')));
+	assert.ok(fs.existsSync(path.join(ctx.dataDir, 'ledger', 'market', String(REGION), '35.json')));
+	assert.ok(fs.existsSync(path.join(ctx.dataDir, 'esi-cache', 'public', '_watch.json')));
+
+	ctx.fake.reset();
+	ctx.lines.length = 0;
+	ctx.clock.advance(60 * 1000);
+	assert.equal(await ctx.run(['--watch', '--region', String(REGION)]), 0);
+	assert.equal(ctx.fake.calls.length, 0);
+	assert.match(ctx.lines.join('\n'), /orders not-due/);
+	assert.match(ctx.lines.join('\n'), /type 35: book not-due, history not-due/);
+
+	// the hourly sync that follows is unaffected
+	ctx.fake.reset();
+	assert.equal(await ctx.run(['--no-market']), 0);
+	assert.match(ctx.lines.join('\n'), /snapshot: written/);
+});
+
+test('--watch takes --character, and knows what it cannot do', async (t) => {
+	const ctx = setup(t);
+	assert.equal(await ctx.run(['--watch', '--character', '4242']), 2);
+	assert.match(ctx.errors.join('\n'), /not linked: 4242/);
+	assert.equal(await ctx.run(['--watch', '--rebuild']), 2);
+	assert.match(ctx.errors.join('\n'), /--watch and --rebuild contradict each other/);
+	assert.equal(await ctx.run(['--watch', '--no-market']), 2);
+	assert.equal(ctx.fake.calls.length, 0);
+	assert.equal(await ctx.run(['--watch', '--character', String(IVAN)]), 0, 'no destination region yet is a skipped market step, not a failure');
+	assert.match(ctx.lines.join('\n'), /market: skipped - no destination region/);
+	assert.equal(await ctx.run(['--watch'], { env: {} }), 2);
+	assert.match(ctx.errors.join('\n'), /not configured/);
+});
+
+test('--watch exits 1 when a character failed or a stop ended it, and 0 when the market lock is merely busy', async (t) => {
+	const failing = setup(t);
+	failing.fake.character(IVAN).rejectToken = true;
+	assert.equal(await failing.run(['--watch', '--region', String(REGION)]), 1);
+	assert.match(failing.lines.join('\n'), /Ivan Tester \(90000001\): failed - .*, orders auth/);
+	assert.equal(failing.fake.calls.length, 1, 'a 401 is not retried');
+
+	const limited = setup(t);
+	limited.fake.errorLimitRemain = 5;
+	assert.equal(await limited.run(['--watch', '--region', String(REGION)]), 1, 'the error limit stops the tick');
+	assert.match(limited.lines.join('\n'), /stopped: error-limit/);
+
+	const busy = setup(t);
+	busy.fake.market.orders.set(`${REGION}:35`, [bookOrder(8001, 35, 1000)]);
+	const release = acquireLock(busy.dataDir, 'market');
+	assert.equal(await busy.run(['--watch', '--region', String(REGION)]), 0);
+	release();
+	assert.match(busy.lines.join('\n'), /market: busy - another market sync is running/);
+	assert.equal(busy.fake.callsTo(/markets/).length, 0);
+});
+
+test('formatWatch and watchFailed read a tick', () => {
+	const tick = {
+		tickedAt: 'T',
+		characters: { 1: { name: 'A', status: 'ok', orders: 'not-modified', openSellOrders: 3 }, 2: { name: 'B', status: 'busy', reason: 'another sync is running for this character' }, 3: { status: 'skipped', reason: 'the tick stopped (error-limit)' } },
+		market: { status: 'partial', regionIds: [10000043], calls: 3, truncated: 1, types: [{ typeId: 35, outcome: 'stored', pages: 3, history: 'stored' }, { typeId: 36, outcome: 'paused', pages: 1, history: null }], errors: [{ route: 'marketOrders', status: 500, message: 'boom' }] },
+		stop: { reason: 'paused', until: 5, group: 'market-order' },
+	};
+	const text = formatWatch(tick);
+	assert.match(text, /A \(1\): ok, orders not-modified, 3 open sell orders/);
+	assert.match(text, /B \(2\): busy - another sync is running/);
+	assert.match(text, /character \(3\): skipped - the tick stopped/);
+	assert.match(text, /market \(region 10000043\): partial, 2 types, 3 calls, 1 long books cut short/);
+	assert.match(text, /type 35: book stored \(3 pages\), history stored/);
+	assert.match(text, /type 36: book paused, history not asked/);
+	assert.match(text, /error: marketOrders 500 boom/);
+	assert.match(text, /stopped: paused/);
+	assert.equal(watchFailed(tick), true);
+	assert.equal(watchFailed({ characters: { 1: { status: 'ok' } }, market: { status: 'busy' }, stop: null }), false);
+	assert.equal(watchFailed({ characters: { 1: { status: 'ok' } }, market: { status: 'skipped' }, stop: null }), false);
+	assert.equal(watchFailed({ characters: { 1: { status: 'ok' } }, market: { status: 'partial' }, stop: null }), true);
+});
+
+test('--rebuild also rebuilds the order log and the book logs, and lists what the order log warns about', async (t) => {
+	const ctx = setup(t);
+	ctx.fake.market.orders.set(`${REGION}:35`, [bookOrder(8001, 35, 1000)]);
+	await ctx.run(['--watch', '--region', String(REGION)]);
+	const orderLog = path.join(ctx.dataDir, 'ledger', String(IVAN), 'order-log.json');
+	const bookLog = path.join(ctx.dataDir, 'ledger', 'market', String(REGION), '35.json');
+	const before = [fs.readFileSync(orderLog, 'utf8'), fs.readFileSync(bookLog, 'utf8')];
+	fs.rmSync(path.join(ctx.dataDir, 'ledger'), { recursive: true });
+	ctx.lines.length = 0;
+	assert.equal(await ctx.run(['--rebuild'], { env: {} }), 0);
+	assert.deepEqual([fs.readFileSync(orderLog, 'utf8'), fs.readFileSync(bookLog, 'utf8')], before, 'both logs, byte for byte');
+	assert.match(ctx.lines.join('\n'), /90000001: .*, 1 logged orders/);
+	assert.match(ctx.lines.join('\n'), /book logs: 1/);
+	assert.ok(!/warning:/.test(ctx.lines.join('\n')));
+
+	// a raw answer in which an order's volume rose: recorded, and reported
+	createRawStore({ dataDir: ctx.dataDir }).write(IVAN, 'orders', { fetchedAt: '2026-11-20T15:00:00.000Z', url: 'x', status: 200, headers: {}, body: [order(8001, { type_id: 35, volume_remain: 9 })] });
+	ctx.lines.length = 0;
+	assert.equal(await ctx.run(['--rebuild'], { env: {} }), 0);
+	assert.match(ctx.lines.join('\n'), /warning: order 8001 volume-rise at 2026-11-20T15:00:00\.000Z \(5 -> 9\)/);
 });
 
 test('formatSummary handles skipped, busy and error cases', () => {
