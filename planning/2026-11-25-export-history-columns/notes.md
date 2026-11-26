@@ -169,3 +169,19 @@ See the chat message of 2026-11-25 (batched, with suggested answers). Answers ge
   type carries its pace. If "orders in a day" meant book depth instead, say so: the swap is one
   input.
 - "go ahead when ready": M0 started 2026-11-25; M1 follows, stopping at P1.2's review gate.
+
+## P1.1 interpretations (agent, 2026-11-25; accepted at review)
+
+- The acceptable gap is inclusive: two samples at most the gap apart cover the time between them.
+- An event belongs to the pair of window samples it falls between, (previous, this], and counts
+  only when that pair is covered; so nothing first seen at the end of a long gap counts.
+- A `stored: false` sample (a 304) stands for the newest stored sample before it: an order is
+  present there when that stored time lies within firstSeen..lastSeen. The literal rule would mark
+  every order vanished at a 304 after its last stored check.
+- Only pairs with both samples inside the window count; the pair straddling the window start is
+  ignored, so a window that starts before the log's first sample has a fraction below 1.
+- A new order on an empty book is not an undercut; an order already best that lowers its price is.
+- With events coverage 0: `avgDaysIdle` null and `censored` false. Covered but nothing undercut:
+  `undercutsPerDay` 0. Bad inputs throw, so the route validates and catches per type.
+- Real logs on the dev machine are sampled about daily, so events coverage is mostly 0 at a pace of
+  2 orders a day; volume coverage is small but present. Expected until M2.

@@ -194,6 +194,26 @@
 		};
 	};
 
+	// How many orders a day the destination region sees for a type: the recency-weighted mean of the
+	// history's order_count over ages 1..DAYS_CONSIDERED, formed like calcDemand's demand (the same
+	// weights; age 0, today's partial day, counts as age 1; a day missing from history counts 0, so
+	// the denominator sums the weight of every calendar day in the window). Floored at 1 and rounded to
+	// 2 decimals. The page sends it with each type to /api/market-stats, where it sets how close two
+	// book-log samples must be to count as watching the book (half the typical interval between orders).
+	const typicalOrdersPerDay = (destDays, now = new Date(), config = {}) => {
+		const c = { ...defaultConfig, ...config };
+		let weighted = 0;
+		for (const day of Array.isArray(destDays) ? destDays : []) {
+			const age = dayAge(day.date, now);
+			if (age > c.DAYS_CONSIDERED) continue;
+			const count = Number(day.order_count);
+			if (Number.isFinite(count) && count > 0) weighted += recencyWeight(Math.max(1, age), c.RECENCY_HALF_LIFE_DAYS) * count;
+		}
+		let weightTotal = 0;
+		for (let age = 1; age <= c.DAYS_CONSIDERED; age++) weightTotal += recencyWeight(age, c.RECENCY_HALF_LIFE_DAYS);
+		return round2(Math.max(1, weightTotal > 0 ? weighted / weightTotal : 0));
+	};
+
 	// sellerCount = sell orders issued within 24h of the most recent one (minus one
 	// if ignoreOneActiveSeller); daysSinceSellerUpdate = whole hours since the most
 	// recent order / 24, to 2dp. Both are null when there are no orders. The caller
@@ -222,10 +242,17 @@
 	//   targetVolume: when a non-negative integer, the walk buys toward this many units instead of the
 	//     demand cap, ignoring the ROI floor (the spend cap still applies). Used by the page for a factor
 	//     other than 1. stopReason is then 'target' when the target was reached, else 'book' or 'cost'.
+	//   observed: what the destination's book log saw for this type (public/market-stats.js computeMarketStats's
+	//     answer; the page gets it from POST /api/market-stats), or null. It is blended in by covered time
+	//     (plan: planning/2026-11-25-export-history-columns, decisions 1 and 4): daily demand =
+	//     fV x fillsPerDay + (1 - fV) x the history model, rivals = fE x (undercutsPerDay x max(days to clear, 1))
+	//     + (1 - fE) x the per-order model, where fV and fE are the volume and events coverage fractions. A null
+	//     rate (nothing to blend) or a fraction of 0 leaves the model's figure; without `observed` every number
+	//     is the model's. Never mutated.
 	// Returns a report object, or null when there is nothing to buy (no source
 	// sell orders) or the calculation fails (the reason is logged). A recommendation of 0 units is shown
 	// as 1 unit from the cheapest source order (report.floored), filtered as 'nothing to buy'.
-	const computeItemReport = ({ srcOrders = [], destOrders = [], destDays = [], typeId = null, now = new Date(), config = {}, targetVolume = null } = {}) => {
+	const computeItemReport = ({ srcOrders = [], destOrders = [], destDays = [], typeId = null, now = new Date(), config = {}, targetVolume = null, observed = null } = {}) => {
 		try {
 			const c = { ...defaultConfig, ...config };
 
@@ -246,7 +273,21 @@
 			const ordinaryDays = daysAsc.filter(day => dayAge(day.date, now) <= c.ORDINARY_PRICE_DAYS);
 			const ordinaryPrice = getOrdinaryPrice(ordinaryDays) || 0;
 
-			const { dailyDemand, activeDays, destSellPrices } = calcDemand(daysAsc, ordinaryPrice, srcBestSellPrice, destBestBuyPrice, now, c);
+			const { dailyDemand: dailyDemandModel, activeDays, destSellPrices } = calcDemand(daysAsc, ordinaryPrice, srcBestSellPrice, destBestBuyPrice, now, c);
+
+			//observed figures (null when the type has no book log or none is passed): how much of the window
+			//each kind of figure was observed over, and the observed rates. Demand blends here, so the cap,
+			//the walk, days to clear, daily profit and days of supply all follow; rivals blend after the walk.
+			const coverageFraction = (part) => {
+				const f = observed && observed.coverage && observed.coverage[part] ? observed.coverage[part].fraction : 0;
+				return Number.isFinite(f) ? Math.min(1, Math.max(0, f)) : 0;
+			};
+			const fV = coverageFraction('volume');
+			const fE = coverageFraction('events');
+			const dailyDemandObserved = observed && Number.isFinite(observed.fillsPerDay) ? observed.fillsPerDay : null;
+			const dailyDemand = dailyDemandObserved !== null && fV > 0
+				? fV * dailyDemandObserved + (1 - fV) * dailyDemandModel
+				: dailyDemandModel;
 
 			//calc sellPrice (undercut the best dest order, but never above the recent average)
 			const destRecentAverageSellPrice = destSellPrices.length > 0
@@ -272,7 +313,7 @@
 				const weight = recency * proximity;
 				return weight < 0.001 ? 0 : weight; // noise cutoff
 			};
-			const rivals = destSellOrders.reduce((acc, order) => acc + rivalWeight(order), 0);
+			const rivalsModel = destSellOrders.reduce((acc, order) => acc + rivalWeight(order), 0);
 
 			//calc competingVolume: dest stock priced within COMPETE_BAND of our sellPrice sells before or
 			//alongside ours whatever its age; stock priced above that joins in only if its seller undercuts
@@ -406,12 +447,36 @@
 
 			const daysToClearRaw = dailyDemand > 0 ? (total.volume + competingVolume) / dailyDemand : null;
 			const daysOfSupplyRaw = dailyDemand > 0 && sellPrice !== null ? supplyVolume / dailyDemand : null;
+
+			//rivals: the observed undercuts per day over the days our units take to clear (at least a day),
+			//blended with the per-order model by the share of the window the events were observed over
+			const rivalsObserved = observed && Number.isFinite(observed.undercutsPerDay)
+				? observed.undercutsPerDay * Math.max(daysToClearRaw ?? 1, 1)
+				: null;
+			const rivals = rivalsObserved !== null && fE > 0
+				? fE * rivalsObserved + (1 - fE) * rivalsModel
+				: rivalsModel;
 			const common = {
 				daysToClear: daysToClearRaw === null ? null : round2(daysToClearRaw),
 				daysOfSupply: daysOfSupplyRaw === null ? null : round2(daysOfSupplyRaw),
 				competingVolume: round2(competingVolume),
 				rivals: round2(rivals),
 				dailyDemand: round2(dailyDemand),
+				//the blend's parts: the share of the window each kind of figure was observed over (0 without
+				//observation), and each figure's model and observed value (observed null where there is none)
+				observedFractionEvents: round2(fE),
+				observedFractionVolume: round2(fV),
+				dailyDemandModel: round2(dailyDemandModel),
+				dailyDemandObserved: dailyDemandObserved === null ? null : round2(dailyDemandObserved),
+				rivalsModel: round2(rivalsModel),
+				rivalsObserved: rivalsObserved === null ? null : round2(rivalsObserved),
+				//observed alone, never blended: mean days between price moves of the sellers within SUPPLY_BAND
+				//of the best price (a lower bound when censored: nobody moved in the observed time), the in-band
+				//stock's trend (units/day) and the coverage the observed figures stand on
+				avgDaysIdle: observed && Number.isFinite(observed.avgDaysIdle) ? observed.avgDaysIdle : null,
+				avgDaysIdleCensored: !!observed && observed.censored === true,
+				stockTrendPerDay: observed && Number.isFinite(observed.stockTrendPerDay) ? observed.stockTrendPerDay : null,
+				observedCoverage: observed && observed.coverage ? observed.coverage : null,
 				activeSellers: destSellers.sellerCount,
 				daysSinceSellerUpdate: destSellers.daysSinceSellerUpdate,
 				daysSinceInBandSellerUpdate: inBandSellers.daysSinceSellerUpdate,
@@ -525,6 +590,7 @@
 		applyFilters,
 		limitBreaches,
 		getOrdinaryPrice,
+		typicalOrdersPerDay,
 		// exposed for tests
 		_internal: { roundNonZero, roundMils, avg, dayAge, recencyWeight }
 	};

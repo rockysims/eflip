@@ -34,6 +34,12 @@
 		'costPerItemMil', 'revenuePerItemMil', 'sellPriceMil', 'profitPerItemMil', 'dailyProfitMil',
 		'daysToClear', 'dailyDemand', 'competingVolume'
 	]);
+	// The observed-figure fields a run keeps per row, from the row's report (numbers, or null without observation):
+	// the share of the window the events and the volume were observed over (0 without), the observed mean days
+	// between price moves, and the observed demand and rivals the report blended with its model figures.
+	const OBSERVED_FIELDS = Object.freeze([
+		'observedFractionEvents', 'observedFractionVolume', 'avgDaysIdle', 'dailyDemandObserved', 'rivalsObserved'
+	]);
 	// Which limit bound the volume of a saved recommendation (estimate.js stopReason).
 	const STOP_REASONS = Object.freeze(['horizon', 'roi', 'book', 'cost', 'target']);
 	const CONFIG_FIELDS = Object.freeze(['SELL_TAX', 'SALES_TAX', 'BROKER_FEE', 'HAULING_REWARD_FRACTION', 'MIN_ROI']);
@@ -119,7 +125,8 @@
 	//   rows: the copied rows, {typeId, name, m3, qty, factor, base, report, context, orderCostMil,
 	//     orderRevenueMil, km3}; the page works out qty and the order figures (it owns those formulas).
 	//     base is the factor-1 estimate (the recommendation), report the estimate for the quantity (the
-	//     same object at factor 1); a row without base falls back to report.
+	//     same object at factor 1); a row without base falls back to report. A row keeps its report's
+	//     OBSERVED_FIELDS after the prediction fields.
 	// Rows of quantity 0 are no order and are left out; null when nothing is left to save.
 	const buildRun = ({ copiedAt, reportGeneratedAt, route, horizonDays, config, rows }) => {
 		const kept = rows.filter(row => row.qty >= 1);
@@ -144,7 +151,8 @@
 					factor: row.factor,
 					recommended: base.volume,
 					recommendation: recommendationOf(base),
-					...Object.fromEntries(PREDICTION_FIELDS.map(key => [key, numOrNull(row.report[key])]))
+					...Object.fromEntries(PREDICTION_FIELDS.map(key => [key, numOrNull(row.report[key])])),
+					...Object.fromEntries(OBSERVED_FIELDS.map(key => [key, numOrNull(row.report[key])]))
 				};
 			}),
 			totals: {
@@ -181,6 +189,7 @@
 		ORDER_FIELDS,
 		HISTORY_FIELDS,
 		PREDICTION_FIELDS,
+		OBSERVED_FIELDS,
 		STOP_REASONS,
 		CONFIG_FIELDS,
 		ROUTE_ID_FIELDS,

@@ -1,6 +1,7 @@
 // export.js: pipeline (runReport) + page UI for export.html.
-// Every displayed number comes from ESI (station orders + region history) via estimate.js.
-// Fuzzwork aggregates are used ONLY for triage (deciding which types get a full report).
+// Every displayed number comes from ESI (station orders + region history) via estimate.js, blended where
+// the server's book log covers the window with what that log observed (POST /api/market-stats; the log is
+// ESI data the server stored). Fuzzwork aggregates are used ONLY for triage (deciding which types get a full report).
 const {
 	roundNonZero,
 	constants: {
@@ -77,6 +78,88 @@ const DEFAULT_ALWAYS_SHOW_NAMES = [
 
 const isAbort = (e) => !!e && e.name === 'AbortError';
 
+//--- observed figures
+
+// The window the observed figures cover: max(days to clear, 3) days, and no more than the 60 the route takes.
+const STATS_MIN_WINDOW_DAYS = 3;
+const STATS_MAX_WINDOW_DAYS = 60;
+const STATS_FLUSH_MS = 250;
+const STATS_MAX_BATCH = 500; // types a call to /api/market-stats takes
+const statsWindowDays = (daysToComplete) => Math.min(STATS_MAX_WINDOW_DAYS, Math.max(daysToComplete, STATS_MIN_WINDOW_DAYS));
+
+// Fetches the observed figures (public/market-stats.js, served by POST /api/market-stats) of types at one
+// destination station, batched: get(typeId, ordersPerDay) queues the type and resolves with its answer (the
+// object computeMarketStats returns) or null (no book log for it, or no observation); the queue is sent as one
+// request 250 ms after its first type, or at once at 500 types. A type asked for twice while queued shares one
+// entry. It never rejects. When the route answers anything but 200 (503: SSO is not set up) or the request
+// fails, every queued and later type resolves null, one line is logged and the route is not called again;
+// an aborted signal resolves everything null quietly. Made once per run, and once per live refresh or
+// lookup, so a route that was down is tried again by the next one.
+const createStatsFetcher = ({ regionId, stationId, windowDays, signal = null, log = console }) => {
+	let queue = new Map(); // typeId -> {typeId, ordersPerDay, resolvers}
+	let timer = null;
+	let unavailable = false;
+	const isAborted = () => !!signal && signal.aborted;
+
+	const settle = (entries, types) => {
+		for (const entry of entries) {
+			const answer = types ? types[entry.typeId] : null;
+			const value = answer === undefined ? null : answer;
+			for (const resolve of entry.resolvers) resolve(value);
+		}
+	};
+	const takeQueue = () => {
+		clearTimeout(timer);
+		timer = null;
+		const entries = [...queue.values()];
+		queue = new Map();
+		return entries;
+	};
+	const giveUp = (reason) => {
+		if (unavailable) return;
+		unavailable = true;
+		log.warn(`market stats unavailable (${reason}): observed figures off for this run`);
+	};
+
+	const flush = async () => {
+		const batch = takeQueue();
+		if (batch.length === 0) return;
+		if (unavailable || isAborted()) { settle(batch, null); return; }
+		try {
+			const response = await fetch('/api/market-stats', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ regionId, stationId, windowDays, types: batch.map(({ typeId, ordersPerDay }) => ({ typeId, ordersPerDay })) }),
+				signal
+			});
+			if (!response.ok) {
+				giveUp(response.status);
+				settle(batch, null);
+				return;
+			}
+			const answer = await response.json();
+			settle(batch, answer && answer.types && typeof answer.types === 'object' ? answer.types : null);
+		} catch (e) {
+			if (!isAbort(e) && !isAborted()) giveUp('request failed');
+			settle(batch, null);
+		}
+	};
+
+	const get = (typeId, ordersPerDay) => {
+		if (unavailable || isAborted()) return Promise.resolve(null);
+		return new Promise((resolve) => {
+			let entry = queue.get(typeId);
+			if (!entry) queue.set(typeId, entry = { typeId, ordersPerDay, resolvers: [] });
+			entry.resolvers.push(resolve);
+			if (queue.size >= STATS_MAX_BATCH) flush();
+			else if (timer === null) timer = setTimeout(flush, STATS_FLUSH_MS);
+		});
+	};
+
+	if (signal) signal.addEventListener('abort', () => settle(takeQueue(), null), { once: true });
+	return { get, flush };
+};
+
 //--- pipeline
 
 // Runs one report. Calls onRow({typeId, name, m3, report, isAlwaysShow, daysToComplete, inputs}) for every report (filtered ones too).
@@ -134,7 +217,11 @@ const reportConfig = ({ typeId, isAlwaysShow, daysToComplete, minRoi }) => ({
 // With `books` (from loadBooks) the orders come from memory; otherwise one request per station.
 // daysToComplete: the horizon the recommended quantity covers (days of demand minus competing stock).
 // minRoi: the ROI floor the walk stops at (a source order that returns less is not bought).
-const buildRow = async ({ start, end, typeId, isAlwaysShow, books = null, options = {}, daysToComplete = DEFAULT_DAYS_TO_COMPLETE, minRoi = DEFAULT_MIN_ROI }) => {
+// stats: a stats fetcher (createStatsFetcher) for the end station, or null for a row without observed figures.
+// With it the type's observed figures are fetched once the history is in (its pace sets how close two book-log
+// samples must be to count), passed to the estimate, and kept in inputs with the pace so a re-estimate for
+// another quantity blends the same way.
+const buildRow = async ({ start, end, typeId, isAlwaysShow, books = null, options = {}, daysToComplete = DEFAULT_DAYS_TO_COMPLETE, minRoi = DEFAULT_MIN_ROI, stats = null }) => {
 	// 'all' returns buy and sell orders in one request; the estimate uses dest buy orders to spot buy-fill days.
 	const srcOrders = books
 		? (books.src.get(typeId) || [])
@@ -146,16 +233,19 @@ const buildRow = async ({ start, end, typeId, isAlwaysShow, books = null, option
 	const m3 = await util.getTypeM3(typeId, options);
 	const name = await util.getTypeName(typeId, options);
 	const now = new Date();
+	const ordersPerDay = estimate.typicalOrdersPerDay(destDays, now);
+	const observed = stats ? await stats.get(typeId, ordersPerDay) : null;
 	const report = estimate.computeItemReport({
 		srcOrders,
 		destOrders,
 		destDays,
 		typeId,
 		now,
+		observed,
 		config: reportConfig({ typeId, isAlwaysShow, daysToComplete, minRoi })
 	});
 	const context = report ? exportPersist.marketContext({ srcOrders, destOrders, destDays, now, historyDays: CONTEXT_HISTORY_DAYS }) : null;
-	return { typeId, name, m3, report, isAlwaysShow, context, daysToComplete, minRoi, inputs: { srcOrders, destOrders, destDays, now } };
+	return { typeId, name, m3, report, isAlwaysShow, context, daysToComplete, minRoi, inputs: { srcOrders, destOrders, destDays, now, observed, ordersPerDay } };
 };
 
 // Resolves item names to type ids. Resolves {ids: Set, unresolved: [names]}.
@@ -202,6 +292,9 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	util.setAbortSignal(signal);
 	try {
 		emit();
+		// One fetcher for the run: every report task asks it for its type's observed figures once its history is in,
+		// and it sends them to the server in batches (the end station's region and station, the run's window).
+		const stats = createStatsFetcher({ regionId: end.regionId, stationId: end.stationId, windowDays: statsWindowDays(daysToComplete), signal });
 		// Order books load alongside the type list and triage; report tasks wait for them.
 		const booksPromise = loadBooks({
 			start,
@@ -247,7 +340,8 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 					if (aborted()) return;
 					const books = await booksPromise;
 					if (aborted()) return;
-					const row = await buildRow({ start, end, typeId, isAlwaysShow: isAlwaysShow(typeId), books, daysToComplete, minRoi });
+					const row = await buildRow({ start, end, typeId, isAlwaysShow: isAlwaysShow(typeId), books, daysToComplete, minRoi, stats });
+					if (aborted()) return; // (a stopped run's stats answer null: no row without its observed figures)
 					progress.reportsDone++;
 					if (!row.report) {
 						progress.noReport++;
@@ -516,13 +610,49 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		rivals: 'too much competition',
 		daysToClear: (row) => `beyond the ${row.daysToComplete}-day horizon`
 	};
+	// Observed figures (the book log's, blended into the estimate by covered time; estimate.js, public/market-stats.js).
+	// observedGap: "events gap 3 h" / "volume gap 24 h" from the coverage the report carries.
+	const observedGap = (report, part) => {
+		const hours = report.observedCoverage && report.observedCoverage[part] ? report.observedCoverage[part].gapHours : null;
+		return hours === null || hours === undefined ? '' : ` (${part} gap ${nf2.format(hours)} h)`;
+	};
+	const orQ = (v, unit = '') => v === null || v === undefined ? '?' : `${nf2.format(v)}${unit}`;
+	// What a cell blended with observation says beside its own tooltip, or null when none of it was observed.
+	const rivalsMark = (r) => r.report.observedFractionEvents > 0
+		? `observed f=${r.report.observedFractionEvents.toFixed(2)}${observedGap(r.report, 'events')}: ${orQ(r.report.rivalsObserved)} observed · ${orQ(r.report.rivalsModel)} model`
+		: null;
+	const demandMark = (r) => r.report.observedFractionVolume > 0
+		? `demand observed f=${r.report.observedFractionVolume.toFixed(2)}${observedGap(r.report, 'volume')}: ${orQ(r.report.dailyDemandObserved, '/day')} observed · ${orQ(r.report.dailyDemandModel, '/day')} model`
+		: null;
+	// "observed 2.6 of 3 days (events gap 3 h, 61 samples, median gap 1 h)": what the observed figures stand on
+	const coverageWords = (r) => {
+		const cov = r.report.observedCoverage;
+		if (!cov) return 'no observation';
+		const events = cov.events || {};
+		const parts = [];
+		if (events.gapHours !== null && events.gapHours !== undefined) parts.push(`events gap ${nf2.format(events.gapHours)} h`);
+		parts.push(`${nf.format(cov.samples)} sample${cov.samples === 1 ? '' : 's'}`);
+		if (cov.medianGapHours !== null && cov.medianGapHours !== undefined) parts.push(`median gap ${nf2.format(cov.medianGapHours)} h`);
+		return `observed ${orQ(events.coveredDays)} of ${nf2.format(cov.windowDays)} days (${parts.join(', ')})`;
+	};
+	const nf1 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
+	// "+12", "-3.4": signed, one decimal at most, no minus zero
+	const signed1 = (v) => {
+		const r = Math.round(v * 10) / 10;
+		return r > 0 ? `+${nf1.format(r)}` : nf1.format(r === 0 ? 0 : r);
+	};
+	const BLENDED_HELP = 'Blended with what the book log observed when it covers part of the window; dotted underline marks it, the tooltip shows both figures';
 	// `help` is a string, or a function for text that depends on the run (read on every header render).
+	// `display(row)` replaces fmt(val(row)) as the cell's text where the number alone is not enough (avg days idle
+	// reads "≥ 1.5" for a censored value); sorting and the column filters still use val. `mark(row)` is the cell's
+	// observed-figure sentence (null when nothing was observed): it adds the dotted underline and ends the tooltip.
 	const COLUMNS = [
 		{ key: 'select', label: '', sort: (r) => selected.has(r.typeId) ? 1 : 0, help: 'checked rows are always shown, summed in the totals and included in Copy orders. Greyed rows are stocked items.' },
 		{ key: 'name', label: 'name', sort: (r) => r.name.toLowerCase(), text: true, help: 'dim rows were filtered out; hover the name for the reason' },
 		{ key: 'dailyProfitMil', label: 'daily profit', val: (r) => num(r.report.dailyProfitMil), fmt: fmtMil,
-			help: "profit on the quantity ÷ max(days to clear, 1), in millions. Red when outside the column's min/max (the default min is the old filter limit, 1M/day)",
-			tip: (r) => `${mil(r.report.profitPerItemMil)} profit/item × ${nf.format(orderQty(r))} = ${mil(Math.round(r.report.profitPerItemMil * r.report.volume * 100) / 100)}, over max(${r.report.daysToClear ?? '?'} days to clear, 1)` },
+			help: `profit on the quantity ÷ max(days to clear, 1), in millions. Red when outside the column's min/max (the default min is the old filter limit, 1M/day). ${BLENDED_HELP}`,
+			tip: (r) => `${mil(r.report.profitPerItemMil)} profit/item × ${nf.format(orderQty(r))} = ${mil(Math.round(r.report.profitPerItemMil * r.report.volume * 100) / 100)}, over max(${r.report.daysToClear ?? '?'} days to clear, 1)`,
+			mark: demandMark },
 		{ key: 'roi', label: 'ROI', val: (r) => num(r.report.roi), fmt: fmtRoi,
 			help: () => `revenue/item ÷ cost/item for the quantity. The recommendation stops at the min ROI (${runMinRoi}x), so only a factor above 1 or a 1-unit 'nothing to buy' row goes below it. Red when outside the column's min/max (its min starts at the min ROI and follows that input until you set your own)`,
 			tip: (r) => `${mil(r.report.revenuePerItemMil)} ÷ ${mil(r.report.costPerItemMil)}` },
@@ -544,19 +674,28 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			} },
 		{ key: 'daysOfSupply', label: 'days of supply left', val: (r) => num(r.report.daysOfSupply), fmt: fmtRoi,
 			help: `units listed at the destination ${SUPPLY_BAND_TXT} ÷ demand per day: how long until the cheap stock is gone and the price steps up`,
-			tip: (r) => `${nf.format(r.report.supplyVolume)} units listed ${SUPPLY_BAND_TXT} (${mil(r.report.sellPriceMil)}) ÷ ${r.report.dailyDemand}/day` },
+			tip: (r) => `${nf.format(r.report.supplyVolume)} units listed ${SUPPLY_BAND_TXT} (${mil(r.report.sellPriceMil)}) ÷ ${r.report.dailyDemand}/day`
+				+ (r.report.stockTrendPerDay === null || r.report.stockTrendPerDay === undefined ? '' : `; stock trend ${signed1(r.report.stockTrendPerDay)}/day`) },
 		{ key: 'activeSellers', label: 'active sellers', val: (r) => num(r.report.activeSellers), fmt: fmtNum,
 			help: 'destination sell orders at any price that were placed or changed within 24h of the newest one; empty when the station has no sell orders. Rivals weights these by price and recency',
 			tip: (r) => `${nf.format(r.report.destSellOrderCount)} sell orders at the station, cheapest ${mil(r.report.destBestSellPriceMil)}; ${r.report.activeSellers ?? 0} active; best buy order ${mil(r.report.destBestBuyPriceMil)}` },
 		{ key: 'rivals', label: 'rivals', val: (r) => num(r.report.rivals), fmt: fmtRoi,
-			help: `expected number of sellers who will undercut you: every sell order at the station counts its chance = ${cfg.RIVAL_RECENCY_DECAY} per idle day since it was touched × 1 within ${pct(cfg.SUPPLY_BAND)} above the sell price, falling as 1/multiple² beyond that. Drives the "too much competition" filter and weights out-of-band stock in competing volume. Red when there is too much competition`,
-			tip: (r) => `${r.report.rivals ?? '?'} expected rivals among ${nf.format(r.report.destSellOrderCount)} sell orders (sell price ${mil(r.report.sellPriceMil)})` },
+			help: `expected number of sellers who will undercut you: every sell order at the station counts its chance = ${cfg.RIVAL_RECENCY_DECAY} per idle day since it was touched × 1 within ${pct(cfg.SUPPLY_BAND)} above the sell price, falling as 1/multiple² beyond that. Drives the "too much competition" filter and weights out-of-band stock in competing volume. Red when there is too much competition. ${BLENDED_HELP}`,
+			tip: (r) => `${r.report.rivals ?? '?'} expected rivals among ${nf.format(r.report.destSellOrderCount)} sell orders (sell price ${mil(r.report.sellPriceMil)})`,
+			mark: rivalsMark },
 		{ key: 'daysSinceSellerUpdate', label: 'days idle', val: (r) => num(r.report.daysSinceSellerUpdate), fmt: fmtRoi,
 			help: `days since the newest destination sell order at any price was placed or changed. The cell tooltip gives the same figure for the orders ${SUPPLY_BAND_TXT}`,
 			tip: (r) => {
 				const idle = r.report.daysSinceInBandSellerUpdate;
 				return `${SUPPLY_BAND_TXT}: ${idle === null || idle === undefined ? 'no orders' : `${idle} days idle`}`;
 			} },
+		{ key: 'avgDaysIdle', label: 'avg days idle', val: (r) => num(r.report.avgDaysIdle), fmt: fmtRoi,
+			display: (r) => {
+				const text = fmtRoi(num(r.report.avgDaysIdle));
+				return text !== '' && r.report.avgDaysIdleCensored ? `≥ ${text}` : text;
+			},
+			help: () => `mean days between price moves of the destination sellers priced within ${pct(cfg.SUPPLY_BAND)} above the cheapest listing, over the observed part of the last ${statsWindowDays(runDaysToComplete)} days (max(days to clear, 3)); blank without observation; ≥ when nobody moved in the observed time`,
+			tip: coverageWords },
 		{ key: 'km3', label: 'km3', val: km3Of, fmt: fmtNum, help: 'packaged volume of the order quantity, in thousands of m3',
 			tip: (r) => `${nf.format(r.m3 || 0)} m3 packaged per unit × ${nf.format(orderQty(r))}` },
 		{ key: 'activeDaysFraction', label: 'active days', val: (r) => num(r.report.activeDaysFraction), fmt: fmtRoi,
@@ -748,6 +887,21 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	const COPIED_ICON = svgIcon('<path d="M2 6.5l2.5 2.5L10 3"/>');
 	const FAILED_ICON = svgIcon('<path d="M3 3l6 6M9 3l-6 6"/>');
 
+	// One body cell as the row shows it: its text, its tooltip (the column's working, then its observed-figure
+	// sentence, then why it is red), and whether it is red (`breach`) or blended with observation (`observed`).
+	// `breaches` is the Set of columns past a limit of the estimate, `colBreaches` colFilterBreaches(row).
+	const cellView = (col, row, breaches, colBreaches) => {
+		const mark = col.mark ? col.mark(row) : null;
+		const text = breaches.has(col.key) ? BREACH_TEXT[col.key] : null;
+		const reasons = [typeof text === 'function' ? text(row) : text, colBreaches.get(col.key)].filter(Boolean);
+		return {
+			text: col.display ? col.display(row) : col.fmt(col.val(row)),
+			title: [col.tip ? col.tip(row) : '', mark, ...reasons].filter(Boolean).join('; '),
+			breach: reasons.length > 0,
+			observed: mark !== null
+		};
+	};
+
 	const updateRowEl = (tr, row) => {
 		// hidden (or dimmed, with show filtered) by the estimate's filter, or by a column filter on the recommendation's figures
 		const base = baseView(row);
@@ -764,13 +918,11 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		const colBreaches = colFilterBreaches(row);
 		for (const cell of tr.querySelectorAll('td[data-col]')) {
 			const col = COLUMNS.find(c => c.key === cell.dataset.col);
-			cell.textContent = col.fmt(col.val(row));
-			const tip = col.tip ? col.tip(row) : '';
-			const text = breaches.has(col.key) ? BREACH_TEXT[col.key] : null;
-			const reasons = [typeof text === 'function' ? text(row) : text, colBreaches.get(col.key)].filter(Boolean);
-			cell.classList.toggle('breach', reasons.length > 0);
-			const why = reasons.join('; ');
-			cell.title = why ? (tip ? `${tip}; ${why}` : why) : tip;
+			const view = cellView(col, row, breaches, colBreaches);
+			cell.textContent = view.text;
+			cell.classList.toggle('breach', view.breach);
+			cell.classList.toggle('observed', view.observed);
+			cell.title = view.title;
 		}
 		const factorInput = tr.querySelector('input.factor');
 		if (document.activeElement !== factorInput && factorInput.value !== String(row.factor)) factorInput.value = row.factor;
@@ -1325,6 +1477,10 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	// Own small queue, so live edits are not stuck behind a running report's backlog.
 	const liveQueue = util.createQueue({ concurrency: 4 });
 	const liveOptions = { queue: liveQueue };
+	// A stats fetcher for live work (always-show edits, search lookups) at an end station, with the table's
+	// horizon. Short-lived: one per refresh or lookup, so each asks the server once (a lookup waits up to the
+	// fetcher's 250 ms flush) and a server that answers 503 is only found out, and logged, per refresh or lookup.
+	const liveStats = (end) => createStatsFetcher({ regionId: end.regionId, stationId: end.stationId, windowDays: statsWindowDays(runDaysToComplete) });
 	const syncAlwaysShow = ({ refreshRows = true } = {}) => {
 		alwaysShowSyncChain = alwaysShowSyncChain.then(async () => {
 			const names = alwaysShowNamesFromUi();
@@ -1347,9 +1503,11 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			if (!refreshRows || !reportGeneratedAt) return;
 			const start = STATIONS[startSel.value];
 			const end = STATIONS[endSel.value];
+			// one short-lived stats fetcher for the refreshed types (a run's own is gone when the run ends)
+			const stats = liveStats(end);
 			await Promise.all([...added, ...removed].map(async (typeId) => {
 				try {
-					const row = await buildRow({ start, end, typeId, isAlwaysShow: alwaysShowIds.has(typeId), books: currentBooks, options: liveOptions, daysToComplete: runDaysToComplete, minRoi: runMinRoi });
+					const row = await buildRow({ start, end, typeId, isAlwaysShow: alwaysShowIds.has(typeId), books: currentBooks, options: liveOptions, daysToComplete: runDaysToComplete, minRoi: runMinRoi, stats });
 					if (row.report) addRow(row);
 				} catch (e) {
 					if (!isAbort(e)) console.error(`always-show refresh failed (typeId: ${typeId})`, e);
@@ -1403,7 +1561,8 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 				books: currentBooks,
 				options: liveOptions,
 				daysToComplete: runDaysToComplete,
-				minRoi: runMinRoi
+				minRoi: runMinRoi,
+				stats: liveStats(STATIONS[endKey]) // (a lookup is one type: its own short-lived fetcher)
 			});
 			if (stale()) return;
 			if (row.report) {
