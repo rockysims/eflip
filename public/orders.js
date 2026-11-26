@@ -153,6 +153,7 @@
 	const refreshChk = $('#refreshOpen');
 	const tickNoteEl = $('#tickNote');
 	const thNoteEl = $('#thNote');
+	const feeRatesEl = $('#feeRates');
 	const openCountEl = $('#openCount');
 	const openNoteEl = $('#openNote');
 	const defaultOrderBtn = $('#defaultOrder');
@@ -691,7 +692,7 @@
 	const BADGES = {
 		priceWar: { label: 'price war', help: 'the order that undercut this one changed its price at least twice within 24 hours', cls: 'war' },
 		nocost: { label: 'no cost', help: 'no lot of this item covers the unsold units, so margins and the ROI floor cannot be checked' },
-		nofee: { label: 'no fee', help: 'no earlier price-change fee of this order or this item to estimate from' },
+		nofee: { label: 'no fee', get help() { return hasFeeRates() ? 'no relist of yours is on record to take a relist-fee rate from, so no fee is estimated' : 'no earlier price-change fee of this order or this item to estimate from'; } },
 		est: { label: 'est', help: 'time on top rests on fewer than three undercut episodes' },
 		nobook: { label: 'no book', help: 'no book is stored for this item yet; the next refresh takes one' },
 		nobooklog: { label: 'no book log', help: 'no book log for this item yet: when it was undercut and how fast others undercut are unknown' },
@@ -706,14 +707,29 @@
 	const roiOf = (r) => (isNum(r.roiIfMatch) ? 1 + r.roiIfMatch : null); // net revenue / cost, the export page's "x"
 	const blank = (title = '') => ({ t: `<span class="dim">${DASH}</span>`, title });
 
+	// The module's relist-fee rate (plan decision 15) adds `feeRates` at the top level; before it does, the page
+	// keeps the older wording. The rate is a flat share of an order's remaining value, shown with three decimals.
+	const hasFeeRates = () => !!(data.result && data.result.feeRates !== undefined);
+	const pct3 = (rate) => `${(rate * 100).toFixed(3)} %`;
+	const dayText = (ms) => (hasMoment() ? moment(ms).format('MMM D') : new Date(ms).toLocaleDateString());
+	const FEW_RELISTS = 5; // fewer observations than this and the rate is flagged as thin
+	const feeRateTip = (r) => {
+		const value = isNum(r.feeEstimate) && isNum(r.feeRate) && r.feeRate > 0 ? r.feeEstimate / r.feeRate : null; // the value the fee was taken on
+		const unit = value !== null && value > 0 && r.volumeRemain > 0 ? value / r.volumeRemain : r.price;
+		const n = r.feeRateRows;
+		const since = r.feeRateSince ? ` since ${dayText(Date.parse(r.feeRateSince))}` : '';
+		const who = r.feeRateScope === 'character' ? `by ${charName(r.characterId)} at other stations` : `at ${stationOf(r)}`;
+		const rows = isNum(n) ? plural(n, 'relist') : 'relists';
+		return `${fmtExact(r.feeEstimate)}: ${pct3(r.feeRate)} of the remaining value (${price(unit)} × ${fmtQty(r.volumeRemain)}), the rate from ${rows} ${who}${since}${isNum(n) && n < FEW_RELISTS ? ' (few observations)' : ''}`;
+	};
 	const verdictTip = (r) => {
 		const lines = [`${r.verdict}: ${r.reason}.`, VERDICT_HELP[r.verdict]];
 		if (r.ordersAhead !== null) {
-			lines.push(`${fmtQty(r.unitsAhead)} ${r.unitsAhead === 1 ? 'unit' : 'units'} ahead in ${plural(r.ordersAhead, 'order')}${isNum(r.dailyVolume) ? ` at ${fmtRate(r.dailyVolume)} units a day in the region` : ''}${isNum(r.daysBehind) ? ` = ${behindText(r.daysBehind)} behind` : ''}.`);
+			lines.push(`${fmtQty(r.unitsAhead)} ${r.unitsAhead === 1 ? 'unit' : 'units'} ahead in ${plural(r.ordersAhead, 'order')}${isNum(r.dailyVolume) ? ` at ${fmtRate(r.dailyVolume)} units a day in the region` : ''}${isNum(r.daysBehind) && r.daysBehind > 0 ? ` = ${behindText(r.daysBehind)} behind` : ''}.`);
 			lines.push(`Limits: leave under ${thresholds.leaveHours} h, undercut over ${thresholds.undercutDays} d, ROI floor ${thresholds.minRoi}x.`);
 		}
 		if (isNum(r.expectedSalesBeforeUndercut)) {
-			lines.push(`Others undercut after about ${dur(r.medianTimeOnTop)}: ~${nf2.format(Math.round(r.expectedSalesBeforeUndercut * 10) / 10)} ${Math.round(r.expectedSalesBeforeUndercut * 10) / 10 === 1 ? 'unit sells' : 'units sell'} before then${isNum(r.expectedGainBeforeUndercut) ? `, worth ~${fmtExact(r.expectedGainBeforeUndercut)}` : ''}${isNum(r.feeEstimate) ? ` against a fee of ~${fmtExact(r.feeEstimate)}.` : '. The relist fee is not known yet (no relist of this order or this item in the ledger), so it is not weighed.'}`);
+			lines.push(`Others undercut after about ${dur(r.medianTimeOnTop)}: ~${nf2.format(Math.round(r.expectedSalesBeforeUndercut * 10) / 10)} ${Math.round(r.expectedSalesBeforeUndercut * 10) / 10 === 1 ? 'unit sells' : 'units sell'} before then${isNum(r.expectedGainBeforeUndercut) ? `, worth ~${fmtExact(r.expectedGainBeforeUndercut)}` : ''}${isNum(r.feeEstimate) ? ` against a fee of ~${fmtExact(r.feeEstimate)}.` : hasFeeRates() ? '. No relist of yours at this station is on record yet, so the fee is not weighed.' : '. The relist fee is not known yet (no relist of this order or this item in the ledger), so it is not weighed.'}`);
 		}
 		if (r.priceWar) lines.push(`Price war: the order that undercut this one changed its price ${r.reUndercuts} times since.`);
 		return lines.filter(Boolean).join('\n');
@@ -825,10 +841,17 @@
 				return { t: `${money(r.marginIfMatch, true)} <span class="${below ? 'below' : 'dim'}">(${below ? '▼ ' : ''}${roi.toFixed(2)}x)</span>`, title: lines.join('\n') };
 			} },
 		{ key: 'fee', label: 'fee est.', val: (r) => r.feeEstimate,
-			help: 'what changing this order’s price probably costs: the median of its own past price-change fees, else of the same item’s',
-			cell: (r) => (isNum(r.feeEstimate)
-				? { t: `~${esc(fmtIsk(r.feeEstimate))}`, title: `${fmtExact(r.feeEstimate)}: the median of ${r.feeEstimateFrom === 'order' ? 'this order’s own' : 'this character’s fees for this item’s'} past price changes` }
-				: blank('no earlier price-change fee to estimate from')) },
+			help: () => (hasFeeRates()
+				? 'what changing this order\u2019s price probably costs: the relist fee is a flat share of the remaining order value, the same for every item, fitted from your newest relists at that station'
+				: 'what changing this order\u2019s price probably costs: the median of its own past price-change fees, else of the same item\u2019s'),
+			cell: (r) => {
+				if (isNum(r.feeEstimate)) {
+					if (r.feeEstimateFrom === 'rate' && isNum(r.feeRate)) return { t: `~${esc(fmtIsk(r.feeEstimate))}`, title: feeRateTip(r) };
+					return { t: `~${esc(fmtIsk(r.feeEstimate))}`, title: `${fmtExact(r.feeEstimate)}: the median of ${r.feeEstimateFrom === 'order' ? 'this order\u2019s own' : 'this character\u2019s fees for this item\u2019s'} past price changes` };
+				}
+				if (isNum(r.feeRate)) return blank(`${pct3(r.feeRate)} of the remaining value at the new price, but there is no new price to work out (nothing is ahead)`);
+				return blank(hasFeeRates() ? `no relist fee observed yet for ${charName(r.characterId)} anywhere` : 'no earlier price-change fee to estimate from');
+			} },
 		{ key: 'relists', label: 'relists (count · fees)', val: (r) => r.relistCount,
 			help: 'price changes of this order seen in its log, and the fees they cost (the listing fee is not counted)',
 			cell: (r) => (r.relistCount === null
@@ -891,7 +914,7 @@
 			const active = sort.key === col.key;
 			const arrow = active ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : '';
 			const stick = col.key === 'verdict' ? ' stickV' : col.key === 'item' ? ' stickI' : '';
-			return `<th class="${col.text ? 'text' : 'numeric'}${active ? ' sorted' : ''}${stick}" data-key="${col.key}" data-fk="th-${col.key}" tabindex="0" aria-sort="${active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}" title="${esc(col.help)}">${esc(col.label)}${arrow}</th>`;
+			return `<th class="${col.text ? 'text' : 'numeric'}${active ? ' sorted' : ''}${stick}" data-key="${col.key}" data-fk="th-${col.key}" tabindex="0" aria-sort="${active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}" title="${esc(typeof col.help === 'function' ? col.help() : col.help)}">${esc(col.label)}${arrow}</th>`;
 		}).join('');
 		setHtml(sortRowEl, head);
 		const body = sortedRows(rows).map(r => {
@@ -916,6 +939,33 @@
 		const vTh = sortRowEl.querySelector('th.stickV');
 		if (vTh) document.documentElement.style.setProperty('--stick-i', `${vTh.offsetWidth}px`);
 		renderNotes();
+	};
+
+	// One dim line per linked character that has a relist-fee rate: where it applies and what it rests on.
+	const renderFeeRates = () => {
+		const rates = data.result && data.result.feeRates;
+		const stations = stationsInput();
+		const lines = [];
+		if (rates && typeof rates === 'object') {
+			for (const c of state.characters || []) {
+				const byStation = rates[c.characterId];
+				if (!byStation || typeof byStation !== 'object') continue;
+				const parts = [];
+				const tips = [];
+				for (const [locationId, f] of Object.entries(byStation)) {
+					if (!f || !isNum(f.rate)) continue;
+					const where = stations[locationId] ? stations[locationId].name : `station ${locationId}`;
+					const since = f.since ? ` since ${dayText(Date.parse(f.since))}` : '';
+					parts.push(`relist fee ${pct3(f.rate)} of the remaining value at ${esc(where)} (${isNum(f.rows) ? plural(f.rows, 'relist') : 'relists'}${since})`);
+					if (isNum(f.rows) && f.rows < FEW_RELISTS) tips.push(`${where}: few observations`);
+					const obs = asArray(f.observations).filter(o => o && isNum(o.rate)).slice().sort((x, y) => Date.parse(y.date) - Date.parse(x.date)).slice(0, 8);
+					if (obs.length > 0) tips.push(`${where}, newest relists: ${obs.map(o => `${isNum(Date.parse(o.date)) ? localTime(Date.parse(o.date)) : DASH} ${pct3(o.rate)} (${nameOf(o.typeId)})`).join('; ')}`);
+				}
+				if (parts.length > 0) lines.push(`<div title="${esc(tips.join('\n'))}">${esc(c.name || `character ${c.characterId}`)}: ${parts.join('; ')}</div>`);
+			}
+		}
+		setHtml(feeRatesEl, lines.join(''));
+		feeRatesEl.hidden = lines.length === 0;
 	};
 
 	const renderNotes = () => {
@@ -1342,6 +1392,7 @@
 		if (!live) return;
 		renderRefresh();
 		renderStatusLine();
+		renderFeeRates();
 		renderOpen();
 		renderSold();
 	};

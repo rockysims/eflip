@@ -34,8 +34,8 @@
 //                   `facts`; fields used: sells {date, typeId, characterId, sellTxId, qty, unitPrice,
 //                   gross, tax, brokerShare, relistShare, profit, lotId, daysSinceListed, locationId?},
 //                   lots {typeId, qty, soldQty, remainingQty, unitPrice, haulPerUnit, buyFeePerUnit},
-//                   relists {orderId, characterId, typeId, isBuy, firstSeenAt, fees: [{id, date,
-//                   amount (negative)}], feeTotal}).
+//                   relists {orderId, characterId, typeId, locationId, isBuy, firstSeenAt, pricePath:
+//                   [{at, price, volumeRemain, issued}], fees: [{id, date, amount (negative)}], feeTotal}).
 //   observedTaxRate results-calc's, a fraction; null falls back to 0.08 (results-calc SALES_TAX), warned.
 //   stations        {[locationId]: {name, regionId, systemId}} (optional; names, and a region fallback).
 //   thresholds      overrides for defaultThresholds (below); the page may pass estimate.defaultConfig's
@@ -44,8 +44,8 @@
 //   now             ms since the epoch (or an ISO string). Required: compute throws without it.
 //
 // OUTPUT (rule 10): {rows, sales, salesClusters, pending, salesByTypeDay, share, timeOnTop: {overall,
-//   byType}, totals, asOf: {orders, books, transactions}, warnings, taxRate, thresholds}. Dates are ISO
-//   strings, durations ms, prices and amounts ISK, nothing rounded (the page formats).
+//   byType}, totals, feeRates, asOf: {orders, books, transactions}, warnings, taxRate, thresholds}.
+//   Dates are ISO strings, durations ms, prices and amounts ISK, nothing rounded (the page formats).
 //   rows, one per open sell order of characterIds, sorted per rule 7 (undercut, maybe, reconsider,
 //   leave, top; then daysBehind descending, nulls last; then orderId):
 //     rule 1  orderId, characterId, typeId, locationId, regionId, stationName, price, volumeRemain,
@@ -70,8 +70,13 @@
 //     rule 5  episodes, undercutEpisodes, medianTimeOnTop, timeOnTopEst (of the type at this station),
 //             onTopFor (nothing ahead and the current episode not undercut: now - issued).
 //     rule 6  taxRate, landedCost, landedUnits, marginNow, matchPrice (null when nothing is ahead),
-//             marginIfMatch, roiIfMatch = marginIfMatch / landedCost, feeEstimate, feeEstimateFrom
-//             ('order' | 'type' | null), expectedSalesBeforeUndercut, expectedGainBeforeUndercut.
+//             marginIfMatch, roiIfMatch = marginIfMatch / landedCost, expectedSalesBeforeUndercut,
+//             expectedGainBeforeUndercut, and the fee (decision 15): feeRate (the character's relist-fee
+//             rate at this station, feeRateScope 'station', else over all its stations, 'character';
+//             null without one), feeRateRows (observations behind it, at most 5), feeRateSince (the
+//             oldest of those), feeRateEst (fewer than 5), feeEstimate = feeRate × (matchPrice, or price
+//             on a top row) × volumeRemain with feeEstimateFrom 'rate'; without a rate the median of this
+//             order's relist fees ('order'), else of the character's on the type ('type'), else null.
 //     rule 7  verdict, reason (short phrase), badges: subset of priceWar, nocost, nofee, est (time on
 //             top from under three episodes), nobook, nobooklog, nohistory, nolog (no order log). The
 //             typical-trade `leave` needs a known daysBehind under undercutDays (decision 14).
@@ -100,6 +105,13 @@
 //     same plus onTopFor, bookLogSince and list (episodes {orderId, characterId, locationId, price,
 //     start, end, current, undercut, undercutAt, undercutBy, undercutPrice, timeOnTop}).
 //   totals: {count, units, gross, net, profit, relistFees, pendingUnits, share} for the window.
+//   feeRates (decision 15): {[characterId]: {[locationId]: {rate, rows, since, est, observations:
+//     [{date, rate, orderId, typeId}]}}} per pooled character with an observation: observations are
+//     every observed rate at the station, newest first; rate is the median of the first `rows` (at
+//     most 5), since the oldest of those. An observation is a fee row of facts.relists within 2.5 s
+//     of a logged price cut (path entry priced below the one before; the order log's path, else the
+//     relist's pricePath) of one of the character's sell orders: fee / (price × volumeRemain) there,
+//     kept when in (0, 5 %].
 //   asOf: orders = newest openOrders fetchedAt / order-log lastSeen; books = newest book fetchedAt or
 //     book-log sample; transactions = newest sale date (any age). warnings: strings.
 (function (root, factory) {
@@ -128,6 +140,9 @@
 	const FALLBACK_TAX = 0.08;        // results-calc defaultOptions.SALES_TAX
 	const PRICE_EPS = 0.005;          // a transaction's unit_price equals a logged price within half a cent
 	const ORDERS_CACHE_MS = 20 * MINUTE_MS; // /characters/{id}/orders cache: the first logged answer may be this old
+	const FEE_MATCH_MS = 2500;        // decision 15: a brokers_fee row within this of a logged price cut's issued
+	const FEE_RATE_MAX = 0.05;        // ...a rate outside (0, 5 %] is a mismatch
+	const FEE_RATE_ROWS = 5;          // ...the rate is the median of the newest this many; fewer flag est
 	const VERDICTS = ['undercut', 'maybe', 'reconsider', 'leave', 'top'];
 
 	//--- helpers
@@ -411,6 +426,50 @@
 		.filter(f => isObj(f) && num(f.amount) !== null)
 		.map(f => ({ ms: toMs(f.date), cost: -f.amount, id: idNum(f.id) }))
 		.sort((a, b) => (a.ms === null ? 0 : a.ms) - (b.ms === null ? 0 : b.ms) || (a.id === null ? 0 : a.id) - (b.id === null ? 0 : b.id));
+
+	// Rule 6 / decision 15: the relist-fee rates one order shows. Each fee row is paired (closest first,
+	// one each) with a path entry whose `issued` is within 2.5 s of it and whose price is below the
+	// entry before (a price cut); the rate is the fee over that entry's price × volumeRemain. A rate
+	// outside (0, 5 %] is a mismatch and dropped.
+	const feeObservationsOf = (relist, path) => {
+		const fees = feesOf(relist).filter(f => f.ms !== null && f.cost > 0);
+		const cuts = [];
+		for (let i = 1; i < path.length; i++) {
+			const e = path[i];
+			const prev = path[i - 1];
+			if (e.issuedMs === null || e.price === null || prev.price === null || !(e.price < prev.price) || !(e.volumeRemain > 0)) continue;
+			cuts.push(e);
+		}
+		const pairs = [];
+		fees.forEach((f, fi) => cuts.forEach((c, ci) => {
+			const d = Math.abs(f.ms - c.issuedMs);
+			if (d <= FEE_MATCH_MS) pairs.push({ fi, ci, d });
+		}));
+		pairs.sort((a, b) => a.d - b.d || a.fi - b.fi || a.ci - b.ci);
+		const feeTaken = new Set();
+		const cutTaken = new Set();
+		const out = [];
+		for (const p of pairs) {
+			if (feeTaken.has(p.fi) || cutTaken.has(p.ci)) continue;
+			feeTaken.add(p.fi);
+			cutTaken.add(p.ci);
+			const cut = cuts[p.ci];
+			const rate = fees[p.fi].cost / (cut.price * cut.volumeRemain);
+			if (rate > 0 && rate <= FEE_RATE_MAX) out.push({ ms: fees[p.fi].ms, rate });
+		}
+		return out;
+	};
+
+	// The rate of a set of observations: the median of the newest five by fee date, so a step (the
+	// clone state changing the broker rate) is followed rather than averaged.
+	const feeRateOf = (observations) => {
+		const newest = observations.slice().sort((a, b) => b.ms - a.ms || a.orderId - b.orderId);
+		const used = newest.slice(0, FEE_RATE_ROWS);
+		return {
+			rate: median(used.map(o => o.rate)), rows: used.length, since: iso(Math.min(...used.map(o => o.ms))), est: used.length < FEE_RATE_ROWS,
+			observations: newest.map(o => ({ date: iso(o.ms), rate: o.rate, orderId: o.orderId, typeId: o.typeId }))
+		};
+	};
 
 	// The median of this order's relist fees, else of the character's relist fees on the type, else null.
 	const feeEstimateOf = (relists, orderId, characterId, typeId) => {
@@ -770,6 +829,32 @@
 		const newestSaleByOrder = new Map();
 		for (const s of allSales) if (s.orderId !== null && (!newestSaleByOrder.has(s.orderId) || s.ms > newestSaleByOrder.get(s.orderId))) newestSaleByOrder.set(s.orderId, s.ms);
 
+		// rule 6 / decision 15: each pooled character's relist-fee rate, per station and over all of them,
+		// from its sell orders' fee rows (facts.relists) against their price paths (the order log, else
+		// the relist facts' own pricePath)
+		const observationsByChar = new Map();
+		for (const r of relists) {
+			const cid = idNum(r.characterId);
+			const orderId = idNum(r.orderId);
+			if (r.isBuy === true || !charSet.has(cid) || orderId === null) continue;
+			const rec = logById.get(orderId);
+			const logged = rec !== undefined && !rec.synthetic && rec.characterId === cid;
+			const path = logged ? rec.path : parsePath(r.pricePath);
+			const locationId = logged && rec.locationId !== null ? rec.locationId : idNum(r.locationId);
+			const typeId = logged && rec.typeId !== null ? rec.typeId : idNum(r.typeId);
+			for (const ob of feeObservationsOf(r, path)) {
+				if (!observationsByChar.has(cid)) observationsByChar.set(cid, []);
+				observationsByChar.get(cid).push({ ...ob, orderId, typeId, locationId });
+			}
+		}
+		const feeRates = {};
+		const feeRateAll = new Map();
+		for (const [cid, list] of observationsByChar) {
+			feeRates[cid] = {};
+			for (const [locationId, atStation] of groupBy(list, ob => ob.locationId)) feeRates[cid][locationId] = feeRateOf(atStation);
+			feeRateAll.set(cid, feeRateOf(list));
+		}
+
 		// rows (rules 1-7)
 		const landedByType = new Map();
 		const landedOf = (typeId) => {
@@ -846,9 +931,16 @@
 			// rule 6
 			const { landedCost, units: landedUnits } = landedOf(typeId);
 			if (landedCost === null) badges.push('nocost');
-			const fee = feeEstimateOf(relists, o.orderId, x.characterId, typeId);
-			if (fee.feeEstimate === null) badges.push('nofee');
 			const matchPrice = pos !== null && pos.ordersAhead > 0 ? pos.bestPrice - 0.01 : null;
+			// decision 15: the character's rate at this station, else over all its stations, times the
+			// value left at the match price (the order's own price on a top row); else the old medians
+			const stationRates = feeRates[x.characterId] || {};
+			const rate = stationRates[o.locationId] !== undefined ? { ...stationRates[o.locationId], scope: 'station' }
+				: feeRateAll.has(x.characterId) ? { ...feeRateAll.get(x.characterId), scope: 'character' } : null;
+			const fee = rate !== null && x.volumeRemain !== null
+				? { feeEstimate: rate.rate * (matchPrice !== null ? matchPrice : o.price) * x.volumeRemain, from: 'rate' }
+				: feeEstimateOf(relists, o.orderId, x.characterId, typeId);
+			if (fee.feeEstimate === null) badges.push('nofee');
 			const marginNow = landedCost === null ? null : o.price * (1 - taxRate) - landedCost;
 			const marginIfMatch = landedCost === null || matchPrice === null ? null : matchPrice * (1 - taxRate) - landedCost;
 			const roiIfMatch = marginIfMatch === null || !(landedCost > 0) ? null : marginIfMatch / landedCost;
@@ -888,6 +980,9 @@
 
 				taxRate, landedCost, landedUnits, marginNow, matchPrice, marginIfMatch, roiIfMatch,
 				feeEstimate: fee.feeEstimate, feeEstimateFrom: fee.from,
+				feeRate: rate === null ? null : rate.rate, feeRateRows: rate === null ? 0 : rate.rows,
+				feeRateSince: rate === null ? null : rate.since, feeRateScope: rate === null ? null : rate.scope,
+				feeRateEst: rate !== null && rate.est,
 				expectedSalesBeforeUndercut, expectedGainBeforeUndercut
 			};
 			const v = verdictOf(row, t);
@@ -1033,7 +1128,7 @@
 		const txAsOf = allSales.reduce((acc, s) => maxOf(acc, s.ms), null);
 
 		return {
-			rows, sales, salesClusters, pending, salesByTypeDay, share, timeOnTop, totals,
+			rows, sales, salesClusters, pending, salesByTypeDay, share, timeOnTop, totals, feeRates,
 			asOf: { orders: iso(ordersAsOf), books: iso(booksAsOf), transactions: iso(txAsOf) },
 			warnings, taxRate, thresholds: t
 		};
@@ -1045,7 +1140,7 @@
 		// exposed for tests
 		_internal: {
 			toMs, iso, median, recencyWeight, dayAge, priceAt, priceChanges, openSpanOf, dropsOf, episodesOf, firstUndercut,
-			reUndercutsOf, positionOf, dailyVolumeOf, typicalTradeOf, landedCostOf, feeEstimateOf, verdictOf,
+			reUndercutsOf, positionOf, dailyVolumeOf, typicalTradeOf, landedCostOf, feeObservationsOf, feeRateOf, feeEstimateOf, verdictOf,
 			compareRows, mergeSales, clusterSales, windowDays
 		}
 	};

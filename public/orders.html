@@ -231,6 +231,9 @@
 		#thresholds input[aria-invalid=true] {
 			border: 2px solid #b3261e;
 		}
+		#feeRates {
+			margin: 0 0 6px;
+		}
 		#tickNote.bad {
 			color: #b3261e;
 		}
@@ -791,6 +794,7 @@
 			<label title="who counts as competition: sell orders at the order's own station, or anywhere in its region">competition <select id="thScope"><option value="station">this station</option><option value="region">whole region</option></select></label>
 			<span id="thNote" class="muted" role="status"></span>
 		</div>
+		<div id="feeRates" class="block dim" hidden></div>
 		<section id="openSection" aria-labelledby="openHead">
 			<h2 class="sectionHead" id="openHead">Open sell orders <span id="openCount" class="dim"></span> <button type="button" class="linkish" id="defaultOrder" hidden>back to the default order</button></h2>
 			<div id="openNote" class="block muted"></div>

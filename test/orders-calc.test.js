@@ -455,6 +455,135 @@ test('fee estimate: this order\'s relist fees, else the character\'s on the type
 	assert.equal(r83.relistFees, null);
 });
 
+//--- the relist-fee rate (rule 6, decision 15)
+
+// One of our sell orders cut from price + 10 (price - 10 with `rise`) to `price`, `cutAgo` before now,
+// with its listing fee and the fee row of that cut `feeLag` after its issued: `rate` of price × remain
+// unless `fee` is given. Its path is in the order log, or only in the relist facts' pricePath.
+const cutOrder = ({ id, char = GRANT, type = T2, loc = D, cutAgo, rate, price = 1000, remain = 10, fee, rise = false, logged = true, feeLag = 1000 }) => {
+	const path = [
+		[ago(cutAgo + 2 * HOUR), rise ? price - 10 : price + 10, remain, ago(cutAgo + 3 * HOUR)],
+		[ago(cutAgo - 10 * MIN), price, remain, ago(cutAgo)]
+	];
+	const relist = { ...relistFact({ orderId: id, char, type, fees: [[ago(cutAgo + 3 * HOUR), 99], [iso(NOW_MS - cutAgo + feeLag), fee !== undefined ? fee : rate * price * remain]] }), locationId: loc };
+	if (!logged) relist.pricePath = pathOf(path);
+	return { id, char, log: logged ? logEntry({ type, loc, path }) : null, relist };
+};
+const feeInput = (cuts, open = [], books = {}) => {
+	const orderLogs = { [GRANT]: {} };
+	for (const c of cuts) if (c.log) (orderLogs[c.char] = orderLogs[c.char] || {})[c.id] = c.log;
+	return { characterIds: [GRANT, IVAN], openOrders: { [GRANT]: open }, orderLogs, books, facts: { sells: [], lots: [], relists: cuts.map(c => c.relist) } };
+};
+// Our order alone in the book, or behind `ahead` at `aheadPrice`.
+const bookFor = (order, ahead = 0, aheadPrice = null) => ({ [order.type_id]: { [REGION]: bookOf([
+	theirs({ id: order.order_id, type: order.type_id, price: order.price, remain: order.volume_remain, issued: order.issued, loc: order.location_id }),
+	...(ahead > 0 ? [theirs({ id: 990000, type: order.type_id, price: aheadPrice, remain: ahead, issued: ago(50 * HOUR), loc: order.location_id })] : [])
+]) } });
+
+test("fee rate on Grant's real numbers: 135,879 for a cut to 37,190 with 695 left is 0.525 %", () => {
+	const order = mine({ id: 7471777610, type: SKIN, price: 37190, remain: 652, total: 1000, issued: '2026-11-25T07:55:00Z' });
+	const relist = { ...relistFact({ orderId: 7471777610, type: SKIN, fees: [['2026-11-21T09:00:01Z', 140000], ['2026-11-25T07:55:01Z', 135879]] }), locationId: D };
+	const input = {
+		openOrders: { [GRANT]: [order] },
+		orderLogs: { [GRANT]: { 7471777610: logEntry({ type: SKIN, total: 1000, path: [
+			['2026-11-24T12:00:00Z', 37240, 695, '2026-11-21T09:00:00Z'],
+			['2026-11-25T08:00:00Z', 37190, 695, '2026-11-25T07:55:00Z']
+		] }) } },
+		facts: { sells: [], lots: [], relists: [relist] }
+	};
+	const rate = 135879 / (37190 * 695);
+	approx(rate, 0.00525, 1e-5);
+	const top = run({ ...input, books: bookFor(order) });
+	const r = rowOf(top, 7471777610);
+	assert.equal(r.verdict, 'top');
+	assert.equal(r.feeRate, rate);
+	assert.equal(r.feeRateRows, 1);
+	assert.equal(r.feeRateSince, '2026-11-25T07:55:01Z');
+	assert.equal(r.feeRateScope, 'station');
+	assert.equal(r.feeRateEst, true);
+	assert.equal(r.feeEstimateFrom, 'rate');
+	assert.equal(r.feeEstimate, rate * 37190 * 652); // a top row: its own price, what is left now
+	assert.deepEqual(top.feeRates, { [GRANT]: { [D]: {
+		rate, rows: 1, since: '2026-11-25T07:55:01Z', est: true,
+		observations: [{ date: '2026-11-25T07:55:01Z', rate, orderId: 7471777610, typeId: SKIN }]
+	} } });
+
+	const behind = rowOf(run({ ...input, books: bookFor(order, 3, 37100) }), 7471777610);
+	assert.equal(behind.matchPrice, 37100 - 0.01);
+	assert.equal(behind.feeEstimate, rate * (37100 - 0.01) * 652);
+});
+
+test('fee rate: the median of the newest five follows a step (0.525 % to 0.600 %) rather than averaging it', () => {
+	const older = [4, 5, 6, 7, 8, 9, 10, 11].map((days, i) => cutOrder({ id: 300 + i, type: 700 + i, cutAgo: days * DAY, rate: 0.00525 }));
+	const newer = [2, 4, 8, 12].map((hours, i) => cutOrder({ id: 400 + i, type: 800 + i, cutAgo: hours * HOUR, rate: 0.006 }));
+	const order = mine({ id: 500, type: T2, price: 1000, remain: 10, issued: ago(DAY) });
+	const out = run(feeInput([...older, ...newer], [order], bookFor(order)));
+	const atD = out.feeRates[GRANT][D];
+	assert.equal(atD.rate, 0.006); // 0.006 × 4 and the newest 0.00525
+	assert.equal(atD.rows, 5);
+	assert.equal(atD.est, false);
+	assert.equal(atD.since, iso(NOW_MS - 4 * DAY + 1000));
+	assert.equal(atD.observations.length, 12);
+	assert.deepEqual(atD.observations.slice(0, 5).map(o => o.rate), [0.006, 0.006, 0.006, 0.006, 0.00525]);
+	const r = rowOf(out, 500);
+	assert.equal(r.feeRate, 0.006);
+	assert.equal(r.feeRateEst, false);
+	approx(r.feeEstimate, 60, 1e-9);
+
+	// four observations: est
+	const few = run(feeInput(newer, [order], bookFor(order)));
+	assert.equal(few.feeRates[GRANT][D].est, true);
+	assert.equal(rowOf(few, 500).feeRateRows, 4);
+	assert.equal(rowOf(few, 500).feeRateEst, true);
+});
+
+test('fee rate: a price rise, a fee more than 2.5 s off and a rate over 5 % are not observations', () => {
+	const cuts = [
+		cutOrder({ id: 601, cutAgo: 2 * HOUR, rate: 0.006 }),                     // the one observation
+		cutOrder({ id: 602, cutAgo: 3 * HOUR, rate: 0.006, rise: true }),         // matched in time, but a rise
+		cutOrder({ id: 603, cutAgo: 4 * HOUR, rate: 0.006, feeLag: 3000 }),       // 3 s after the issued
+		cutOrder({ id: 604, cutAgo: 5 * HOUR, rate: 0.06 }),                      // 6 %: a mismatch
+		cutOrder({ id: 605, cutAgo: 6 * HOUR, rate: 0.00525, logged: false })     // known from its pricePath only
+	];
+	const out = run(feeInput(cuts));
+	assert.deepEqual(out.feeRates[GRANT][D].observations.map(o => o.orderId), [601, 605]);
+	assert.equal(out.feeRates[GRANT][D].rate, (0.006 + 0.00525) / 2);
+});
+
+test('fee rate: a station without observations borrows the character\'s; fee scales with what is left; medians only without a rate', () => {
+	const cuts = [
+		cutOrder({ id: 701, cutAgo: 2 * HOUR, rate: 0.006 }),
+		cutOrder({ id: 702, char: IVAN, cutAgo: 2 * HOUR, rate: 0.01 }) // Ivan's rate is his own
+	];
+	const full = mine({ id: 710, price: 1000, remain: 10, issued: ago(DAY) });
+	const half = mine({ id: 711, price: 1000, remain: 5, total: 10, issued: ago(DAY) });
+	const away = mine({ id: 712, price: 1000, remain: 10, issued: ago(DAY), loc: ELSEWHERE });
+	const input = feeInput(cuts, [full, half, away]);
+	input.facts.relists.push(relistFact({ orderId: 710, fees: [[ago(30 * HOUR), 100], [ago(20 * HOUR), 77]] })); // its own relist fee
+	const out = run(input);
+	const rFull = rowOf(out, 710);
+	const rHalf = rowOf(out, 711);
+	const rAway = rowOf(out, 712);
+	assert.equal(rFull.feeEstimateFrom, 'rate'); // its own median (77) is only a fallback
+	approx(rFull.feeEstimate, 0.006 * 1000 * 10, 1e-9);
+	assert.equal(rHalf.feeEstimate, rFull.feeEstimate / 2); // a half-sold order pays half
+	assert.equal(rAway.feeRateScope, 'character');
+	assert.equal(rAway.feeRate, 0.006);
+	assert.equal(rAway.feeEstimateFrom, 'rate');
+	assert.deepEqual(Object.keys(out.feeRates).map(Number).sort(), [IVAN, GRANT].sort());
+	assert.equal(out.feeRates[IVAN][D].rate, 0.01);
+
+	// no observed rate anywhere: the old medians, then nofee
+	const none = run({ ...feeInput([], [full, half]), facts: { sells: [], lots: [], relists: [relistFact({ orderId: 710, fees: [[ago(30 * HOUR), 100], [ago(20 * HOUR), 77]] })] } });
+	assert.deepEqual(none.feeRates, {});
+	assert.equal(rowOf(none, 710).feeEstimateFrom, 'order');
+	assert.equal(rowOf(none, 710).feeEstimate, 77);
+	assert.equal(rowOf(none, 710).feeRate, null);
+	assert.equal(rowOf(none, 710).feeRateScope, null);
+	assert.equal(rowOf(none, 710).feeRateRows, 0);
+	assert.equal(rowOf(none, 711).feeEstimateFrom, 'type');
+});
+
 //--- verdict (rule 7)
 
 // One open order of `type` at 210 behind a competitor at 200.01 holding `ahead` units (issued before
