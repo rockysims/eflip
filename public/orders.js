@@ -709,11 +709,11 @@
 	const verdictTip = (r) => {
 		const lines = [`${r.verdict}: ${r.reason}.`, VERDICT_HELP[r.verdict]];
 		if (r.ordersAhead !== null) {
-			lines.push(`${fmtQty(r.unitsAhead)} units ahead in ${plural(r.ordersAhead, 'order')}${isNum(r.dailyVolume) ? ` at ${fmtRate(r.dailyVolume)} units a day in the region` : ''}${isNum(r.daysBehind) ? ` = ${behindText(r.daysBehind)} behind` : ''}.`);
+			lines.push(`${fmtQty(r.unitsAhead)} ${r.unitsAhead === 1 ? 'unit' : 'units'} ahead in ${plural(r.ordersAhead, 'order')}${isNum(r.dailyVolume) ? ` at ${fmtRate(r.dailyVolume)} units a day in the region` : ''}${isNum(r.daysBehind) ? ` = ${behindText(r.daysBehind)} behind` : ''}.`);
 			lines.push(`Limits: leave under ${thresholds.leaveHours} h, undercut over ${thresholds.undercutDays} d, ROI floor ${thresholds.minRoi}x.`);
 		}
 		if (isNum(r.expectedSalesBeforeUndercut)) {
-			lines.push(`Others undercut after about ${dur(r.medianTimeOnTop)}: ~${nf2.format(Math.round(r.expectedSalesBeforeUndercut * 10) / 10)} units sell before then${isNum(r.expectedGainBeforeUndercut) ? `, worth ~${fmtExact(r.expectedGainBeforeUndercut)}` : ''}${isNum(r.feeEstimate) ? ` against a fee of ~${fmtExact(r.feeEstimate)}.` : '. The relist fee is not known yet (no relist of this order or this item in the ledger), so it is not weighed.'}`);
+			lines.push(`Others undercut after about ${dur(r.medianTimeOnTop)}: ~${nf2.format(Math.round(r.expectedSalesBeforeUndercut * 10) / 10)} ${Math.round(r.expectedSalesBeforeUndercut * 10) / 10 === 1 ? 'unit sells' : 'units sell'} before then${isNum(r.expectedGainBeforeUndercut) ? `, worth ~${fmtExact(r.expectedGainBeforeUndercut)}` : ''}${isNum(r.feeEstimate) ? ` against a fee of ~${fmtExact(r.feeEstimate)}.` : '. The relist fee is not known yet (no relist of this order or this item in the ledger), so it is not weighed.'}`);
 		}
 		if (r.priceWar) lines.push(`Price war: the order that undercut this one changed its price ${r.reUndercuts} times since.`);
 		return lines.filter(Boolean).join('\n');
@@ -756,7 +756,7 @@
 		{ key: 'ahead', label: 'units ahead', val: (r) => r.unitsAhead, pos: true,
 			help: 'units listed at a lower price (or the same price, earlier) ahead of this order in the scope; hover for the orders, our own orders and cheaper stock elsewhere',
 			cell: (r) => {
-				const lines = [`${fmtQty(r.unitsAhead)} units in ${plural(r.ordersAhead, 'order')} ahead ${scopeWord()}; this order is number ${r.rank} in the queue`];
+				const lines = [`${fmtQty(r.unitsAhead)} ${r.unitsAhead === 1 ? 'unit' : 'units'} in ${plural(r.ordersAhead, 'order')} ahead ${scopeWord()}; this order is number ${r.rank} in the queue`];
 				if (r.ownAhead && r.ownAhead.orders > 0) lines.push(`${plural(r.ownAhead.orders, 'order')} of ours (${fmtQty(r.ownAhead.units)} units) are also ahead and not counted`);
 				if (r.cheaperElsewhere && r.cheaperElsewhere.orders > 0) lines.push(`${plural(r.cheaperElsewhere.orders, 'order')} (${fmtQty(r.cheaperElsewhere.units)} units) cheaper at other stations of the region, not counted`);
 				return { t: fmtQty(r.unitsAhead), title: lines.join('\n'), cls: r.unitsAhead === 0 ? 'dim' : '' };
