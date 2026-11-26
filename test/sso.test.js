@@ -531,6 +531,52 @@ test('a refreshed token for another owner marks the character relink', async (t)
 	assert.equal(store.get(CHARACTER_ID).status, 'relink');
 });
 
+// A re-link while a refresh with the old refresh token is out stores a new token; what the old grant gets
+// back must not mark that fresh link.
+const gatedEndpoint = (first) => {
+	let entered;
+	const posted = new Promise(resolve => { entered = resolve; });
+	let release;
+	const gate = new Promise(resolve => { release = resolve; });
+	const issue = issuingEndpoint();
+	const handler = (call, n) => {
+		if (n > 1) return issue();
+		entered();
+		return gate.then(first);
+	};
+	return { handler, posted, release };
+};
+
+test('a grant refused after the character was re-linked meanwhile leaves the new link alone', async (t) => {
+	const endpoint = gatedEndpoint(() => jsonResponse(400, { error: 'invalid_grant', error_description: 'Invalid refresh token. Token missing/expired.' }));
+	const { store, fetch, tokens } = managerFixture(t, endpoint.handler);
+	const refreshing = tokens.accessTokenFor(CHARACTER_ID);
+	await endpoint.posted;
+	store.upsert(sampleRecord({ refreshToken: 'refresh-relinked' }));
+	endpoint.release();
+	await assert.rejects(refreshing, (e) => e instanceof TokenError && e.code !== 'relink');
+	const record = store.get(CHARACTER_ID);
+	assert.equal(record.status, 'ok');
+	assert.equal(record.lastError, null);
+	assert.equal(record.refreshToken, 'refresh-relinked');
+
+	assert.equal(typeof await tokens.accessTokenFor(CHARACTER_ID), 'string');
+	assert.equal(new URLSearchParams(fetch.callsTo(TOKEN_URL)[1].body).get('refresh_token'), 'refresh-relinked');
+});
+
+test('an old grant\'s token for the previous owner, answered after a re-link by the new one, leaves the new link alone', async (t) => {
+	const endpoint = gatedEndpoint(() => jsonResponse(200, tokenBody(signJwt(claimsFor()), 'refresh-rotated')));
+	const { store, tokens } = managerFixture(t, endpoint.handler);
+	const refreshing = tokens.accessTokenFor(CHARACTER_ID);
+	await endpoint.posted;
+	store.upsert(sampleRecord({ refreshToken: 'refresh-relinked', ownerHash: 'new-owner' }));
+	endpoint.release();
+	await assert.rejects(refreshing, (e) => e instanceof TokenError && e.code !== 'relink');
+	const record = store.get(CHARACTER_ID);
+	assert.equal(record.status, 'ok');
+	assert.equal(record.refreshToken, 'refresh-relinked');
+});
+
 test('an unlinked character throws without calling the endpoint', async (t) => {
 	const { fetch, tokens } = managerFixture(t, issuingEndpoint());
 	await assert.rejects(tokens.accessTokenFor(12345), (e) => e instanceof TokenError && e.code === 'not-linked');
