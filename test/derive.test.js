@@ -375,3 +375,59 @@ test('a plain rebuild leaves the book logs as they are and says how far back the
 	assert.equal(asked.bookLogRawFrom, null);
 	assert.notDeepEqual(treeOf(marketDir), live, 'rebuilt from raw: A\'s samples are gone');
 });
+
+test('a stored check that read an unchanged page from a file the typeBooks trim removed is skipped and counted, not replayed with half its book', async (t) => {
+	const storage = require('../lib/storage');
+	const { createLedger } = require('../lib/ledger');
+	const dataDir = tmpDataDir(t);
+	const raw = createRawStore({ dataDir });
+	const ledger = createLedger({ dataDir });
+	const R = MARKET_REGION;
+	const D = (day) => `2026-11-${day}T12:00:00.000Z`;
+	const page = (n, stamp, rows) => raw.write('public', derive.bookSlug(R, 35, n), { fetchedAt: stamp, url: 'x', status: 200, headers: {}, body: rows });
+	const check = (at, stamps) => raw.writeSyncLog('public', { syncedAt: at, finishedAt: at, source: 'market', regionIds: [R], typeIds: [35], status: 'ok', errors: [], stop: null, books: [{ regionId: R, typeId: 35, outcome: 'stored', at, pages: 2, stamps, history: 'not-modified' }] });
+	// a two-page book: Ca stores both pages, Cb page 1 (page 2 unchanged: Ca's file), Cc page 2 (page 1
+	// unchanged: Cb's file), Cd page 1 (page 2: Cc's file)
+	page(1, D(10), [bookRow(1, 35, 100)]);
+	page(2, D(10), [bookRow(2, 35, 110)]);
+	check(D(10), { 1: D(10), 2: D(10) });
+	page(1, D(11), [bookRow(1, 35, 99)]);
+	check(D(11), { 1: D(11) });
+	page(2, D(12), [bookRow(2, 35, 109)]);
+	check(D(12), { 2: D(12) });
+	page(1, D(20), [bookRow(1, 35, 98)]);
+	check(D(20), { 1: D(20) });
+	assert.equal(derive.buildBookLogs({ raw, ledger }).checksSkipped, 0);
+	assert.deepEqual(ledger.readBookLog(R, 35).samples.map(sample => sample.at), [D(10), D(11), D(12), D(20)]);
+
+	// the budget cuts the per-type raw at the 13th: each route keeps its newest file before it, so Ca's
+	// two files go, and Cb's page 2 with them; the storage run's entry records the cutoff
+	const removed = await storage.applyTrims({ raw, ledger, plan: { trims: { typeBooks: { itemIds: [], cutoffAt: '2026-11-13T00:00:00.000Z' } } }, kinds: [], log: makeLog(), now: Date.parse(D(21)) });
+	assert.equal(removed.typeBooks.files, 2);
+	raw.writeSyncLog('public', { kind: 'storage', syncedAt: D(21), finishedAt: D(21), reason: 'manual', trims: removed });
+	const result = derive.buildBookLogs({ raw, ledger });
+	assert.equal(result.checksSkipped, 2, 'Ca, whose own files are gone, and Cb, whose page 2 is');
+	const log = ledger.readBookLog(R, 35);
+	assert.deepEqual(log.samples.map(sample => sample.at), [D(12), D(20)], 'no sample at the 11th');
+	assert.deepEqual(log.orders[1].path.map(entry => [entry.at, entry.price]), [[D(12), 99], [D(20), 98]]);
+	assert.deepEqual(log.orders[2].path.map(entry => [entry.at, entry.price]), [[D(12), 109]], 'the last check before the cutoff is whole');
+});
+
+test('with nothing trimmed, a check the order-call budget cut short (it names more pages than it read) is replayed as it was folded', async (t) => {
+	const ctx = setup(t);
+	const R = MARKET_REGION;
+	ctx.fake.character(IVAN, { orders: [order(8001, { type_id: 35 })] });
+	ctx.fake.market.orders.set(`${R}:35`, [1, 2, 3, 4, 5].map(id => bookRow(id, 35, 100 + id))); // three pages at two a page
+	await ctx.service.syncCharacter(IVAN, { force: true });
+	const market = await ctx.service.syncMarket({ force: true, concurrency: 1, regionIds: [R] });
+	assert.equal(market.stop.reason, 'budget', 'two order calls for one type: page 3 is not asked');
+	const marketDir = path.join(ctx.dataDir, 'ledger', 'market');
+	const live = treeOf(marketDir);
+	assert.equal(Object.keys(JSON.parse(live[`${R}/35.json.gz`]).orders).length, 4, 'pages 1 and 2');
+
+	const fresh = tmpDataDir(t);
+	copyDir(path.join(ctx.dataDir, 'raw'), path.join(fresh, 'raw'));
+	const result = derive.rebuildAll({ dataDir: fresh, log: makeLog(), bookLogs: true });
+	assert.equal(result.bookChecksSkipped, 0);
+	assert.deepEqual(treeOf(path.join(fresh, 'ledger', 'market')), live);
+});
