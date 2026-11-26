@@ -513,7 +513,6 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	// Why a cell is red for a limit of the estimate (limitBreaches names the columns): appended to the cell's
 	// tooltip. A function takes the row. A cell outside its column's min/max says so itself (colFilterBreaches).
 	const BREACH_TEXT = {
-		daysSinceSellerUpdate: 'seller updated too recently',
 		rivals: 'too much competition',
 		daysToClear: (row) => `beyond the ${row.daysToComplete}-day horizon`
 	};
@@ -553,7 +552,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			help: `expected number of sellers who will undercut you: every sell order at the station counts its chance = ${cfg.RIVAL_RECENCY_DECAY} per idle day since it was touched × 1 within ${pct(cfg.SUPPLY_BAND)} above the sell price, falling as 1/multiple² beyond that. Drives the "too much competition" filter and weights out-of-band stock in competing volume. Red when there is too much competition`,
 			tip: (r) => `${r.report.rivals ?? '?'} expected rivals among ${nf.format(r.report.destSellOrderCount)} sell orders (sell price ${mil(r.report.sellPriceMil)})` },
 		{ key: 'daysSinceSellerUpdate', label: 'days idle', val: (r) => num(r.report.daysSinceSellerUpdate), fmt: fmtRoi,
-			help: `days since the newest destination sell order at any price was placed or changed. The 'seller updated too recently' filter looks only at orders ${SUPPLY_BAND_TXT} (see the cell tooltip). Red when a seller updated too recently`,
+			help: `days since the newest destination sell order at any price was placed or changed. The cell tooltip gives the same figure for the orders ${SUPPLY_BAND_TXT}`,
 			tip: (r) => {
 				const idle = r.report.daysSinceInBandSellerUpdate;
 				return `${SUPPLY_BAND_TXT}: ${idle === null || idle === undefined ? 'no orders' : `${idle} days idle`}`;
@@ -759,8 +758,8 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 		tr.classList.toggle('alwaysShowItem', !!row.isAlwaysShow);
 		const nameCell = tr.querySelector('td.nameCell');
 		nameCell.title = row.report.filteredReason || (colHidden ? firstColFilterText(base) : '');
-		// the displayed figures that break a limit turn red, the tooltip says which: the estimate's (seller idle
-		// too briefly, too many rivals, days to clear beyond the horizon) and the columns' own min/max
+		// the displayed figures that break a limit turn red, the tooltip says which: the estimate's (too many
+		// rivals, days to clear beyond the horizon) and the columns' own min/max
 		const breaches = new Set(estimate.limitBreaches(row.report, reportConfig({ typeId: row.typeId, isAlwaysShow: row.isAlwaysShow, daysToComplete: row.daysToComplete, minRoi: row.minRoi })));
 		const colBreaches = colFilterBreaches(row);
 		for (const cell of tr.querySelectorAll('td[data-col]')) {

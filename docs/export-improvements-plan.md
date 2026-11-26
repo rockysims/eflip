@@ -52,8 +52,10 @@ orders, destination region history. Changes:
 5. **Buy cap**: units to buy over the horizon =
    `max(0, dailyDemand * DAYS_TO_COMPLETE - competingVolume)`, cumulative per
    day as today. This replaces the `sellerCount` share divisor. `sellerCount`
-   and `daysSinceSellerUpdate` are still computed and shown, and the
-   "seller updated too recently" filter stays.
+   and `daysSinceSellerUpdate` are still computed and shown. The "seller
+   updated too recently" filter is gone (2026-11-25: it made the best picks
+   come and go as sellers re-priced; see `docs/ui-decisions/`); the idle
+   figures stay as information only.
 6. **Marginal stop rule**: while walking the source book, stop when the next
    order's `revenuePerItem / (price * (1 + HAULING_REWARD_FRACTION)) < MIN_ROI`.
    Replaces the `profitPerDayEstimate < 2000000` test. The page sets `MIN_ROI`
@@ -75,7 +77,10 @@ orders, destination region history. Changes:
 10. Report shape (all Mil values via `roundMils`): `volume`, `costPerItemMil`,
     `revenuePerItemMil`, `profitPerItemMil`, `roi`, `dailyProfitMil`,
     `dailyProfitOldMil`, `daysToClear`, `competingVolume`, `dailyDemand`,
-    `activeSellers`, `daysSinceSellerUpdate`, `activeDaysFraction`,
+    `activeSellers`, `daysSinceSellerUpdate` (idle days over every destination
+    sell order), `daysSinceInBandSellerUpdate` (the same over the orders within
+    `SUPPLY_BAND` above the sell price; the "days idle" cell tooltip),
+    `activeDaysFraction`,
     `stopReason` (`'horizon' | 'roi' | 'book' | 'cost' | 'target'`: which
     limit bound the volume; `'target'` when a `targetVolume` was given and
     reached), `stopPriceMil` (the source order the walk stopped at, for
@@ -87,11 +92,12 @@ orders, destination region history. Changes:
     config)` returning a reason string or null, so filtered items can be shown
     with their reason. Reasons, in the order they are checked: `no report`,
     `nothing to buy`, `not profitable` (for a volume of 0 only: an empty
-    source book, no sell price, a target of 0), `seller updated too
-    recently`, `too much competition`. The single-column limits (daily profit
-    1M/day, ROI, active days 0.2) are not estimate filters: they are the
-    page's min/max column filters, seeded once with those values (Phase 3,
-    item 12). The estimate keeps only what no one column can say.
+    source book, no sell price, a target of 0), `too much competition`. (A
+    `seller updated too recently` reason existed until 2026-11-25.) The
+    single-column limits (daily profit 1M/day, ROI, active days 0.2) are not
+    estimate filters: they are the page's min/max column filters, seeded once
+    with those values (Phase 3, item 12). The estimate keeps only what no one
+    column can say.
 12. **Floor of 1**: a recommendation of 0 units (a demand cap of 0, or the
     ROI floor on the cheapest order) shows 1 unit from the cheapest source
     order, so the row still has a real cost, ROI, days to clear and daily
@@ -104,11 +110,10 @@ orders, destination region history. Changes:
     within `COST_LIMIT`; otherwise (an empty source book, no sell price) the
     volume-0 raw-prices fallback stays and the filter says `not profitable`.
 13. `limitBreaches(report, config)` returns the report fields whose value
-    breaks a limit of the estimate, in column order: `daysSinceSellerUpdate`
-    (seller updated too recently), `rivals` (too much competition) and
-    `daysToClear` (beyond `DAYS_TO_COMPLETE`, the horizon: not a filter, a
-    limit the user set). It shares its predicates with `applyFilters` so the
-    two cannot drift, and ignores `isAlwaysShow` and `floored`: it describes
+    breaks a limit of the estimate, in column order: `rivals` (too much
+    competition) and `daysToClear` (beyond `DAYS_TO_COMPLETE`, the horizon: not
+    a filter, a limit the user set). It shares its predicates with
+    `applyFilters` so the two cannot drift, and ignores `isAlwaysShow` and `floored`: it describes
     the figures, not the row's filtered state. The column filters' limits
     (daily profit, ROI, active days) are the page's to check.
 
@@ -159,10 +164,9 @@ Fixtures are small hand-written order/history arrays.
 10. A cell turns dark red (`td.breach`) and its tooltip gains why when its
     displayed value is outside its column's min/max filter ("below the
     column's min 1.5", "above the column's max …"), or when `limitBreaches`
-    names it: seller updated too recently, too much competition, beyond the
-    N-day horizon. The colour marks the value, not the row's filtered state
-    (filtered rows keep their dimming); the column helps say when a column
-    goes red. A floored row's quantity tooltip says nothing was worth buying
+    names it: too much competition, beyond the N-day horizon. The colour marks
+    the value, not the row's filtered state (filtered rows keep their
+    dimming); the column helps say when a column goes red. A floored row's quantity tooltip says nothing was worth buying
     and the 1 unit is shown so the figures are real.
 11. Saved run (Copy orders, `docs/trade-results-plan.md`): `recommended` is the
     factor-1 volume (`row.base.volume`), not the factored re-estimate's, and

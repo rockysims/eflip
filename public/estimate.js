@@ -197,8 +197,7 @@
 	// sellerCount = sell orders issued within 24h of the most recent one (minus one
 	// if ignoreOneActiveSeller); daysSinceSellerUpdate = whole hours since the most
 	// recent order / 24, to 2dp. Both are null when there are no orders. The caller
-	// picks the order set: every dest sell order for the displayed figures, or only
-	// the in-band ones for the 'seller updated too recently' filter.
+	// picks the order set: every dest sell order, or only the in-band ones.
 	const calcDestSellers = (sellOrders, now, c) => {
 		if (sellOrders.length === 0) return { sellerCount: null, daysSinceSellerUpdate: null };
 
@@ -297,8 +296,9 @@
 				: inBandDestSellOrders.reduce((acc, order) => acc + order.volume_remain, 0);
 
 			//calc active sellers / days idle over ALL dest sell orders (the displayed figures count every
-			//seller at any price). The 'seller updated too recently' filter instead uses the in-band idle
-			//figure, so a far-above-market order that was just refreshed can't hide an item.
+			//seller at any price); the in-band idle figure (only sellers priced near our sell price) is
+			//reported beside it for the "days idle" tooltip. Neither hides a row: the page used to filter
+			//on the in-band figure, which made the list of best picks fluctuate.
 			const destSellers = calcDestSellers(destSellOrders, now, c);
 			const inBandSellers = calcDestSellers(inBandDestSellOrders, now, c);
 
@@ -478,20 +478,8 @@
 		}
 	};
 
-	// The limits behind the combined heuristics, shared by applyFilters (which names the first one a row
+	// The limits behind the combined heuristic, shared by applyFilters (which names the first one a row
 	// breaks) and limitBreaches (which names every figure that breaks one), so the two cannot drift.
-	const sellerUpdatedTooRecently = (report) => {
-		const hem = (min, val, max) => Math.min(Math.max(min, val), max);
-		const profitRating = hem(0, report.dailyProfitMil * 0.1, 1);
-		const tooRecentThresholdMin = 1 / 24;
-		const tooRecentThresholdMax = 30 / 24;
-		const tooRecentlyThreshold = Math.floor((tooRecentThresholdMax - (tooRecentThresholdMax - tooRecentThresholdMin) * profitRating) * 100) / 100;
-		//idle time of the in-band sellers (those priced near our sell price); far-above-market orders don't count here
-		const sellerIdleDays = report.daysSinceInBandSellerUpdate !== undefined
-			? report.daysSinceInBandSellerUpdate
-			: report.daysSinceSellerUpdate;
-		return sellerIdleDays !== null && sellerIdleDays !== undefined && sellerIdleDays < tooRecentlyThreshold;
-	};
 	//rivals = expected number of sellers who will undercut us (recency × proximity weighted)
 	const tooMuchCompetition = (report) => {
 		const rivals = report.rivals || 0;
@@ -502,7 +490,8 @@
 	// Page-level filters. Returns a short reason string, or null when the item
 	// passes (always-show items always pass). The single-column limits (daily profit, ROI, active days) are
 	// not here: they are the page's min/max column filters now. What stays is what no one column can say:
-	// nothing to buy, an empty source book, and the two heuristics that weigh several figures together.
+	// nothing to buy, an empty source book, and the one heuristic that weighs several figures together
+	// (too much competition).
 	const applyFilters = (report, config = {}) => {
 		const c = { ...defaultConfig, ...config };
 		if (c.isAlwaysShow) return null;
@@ -512,21 +501,19 @@
 		if (report.floored) return 'nothing to buy';
 
 		if (report.volume === 0) return 'not profitable';
-		if (sellerUpdatedTooRecently(report)) return 'seller updated too recently';
 		if (tooMuchCompetition(report)) return 'too much competition';
 
 		return null;
 	};
 
-	// The report fields whose value breaks a limit of the estimate, in column order: the two heuristics
-	// plus days to clear against the horizon (DAYS_TO_COMPLETE; not a filter, a limit the user set). The
+	// The report fields whose value breaks a limit of the estimate, in column order: the competition
+	// heuristic plus days to clear against the horizon (DAYS_TO_COMPLETE; not a filter, a limit the user set). The
 	// column filters' limits (daily profit, ROI, active days) are the page's to check. It describes the
 	// figures, not the row's filtered state, so isAlwaysShow and floored are ignored.
 	const limitBreaches = (report, config = {}) => {
 		const c = { ...defaultConfig, ...config };
 		const breaches = [];
 		if (!report) return breaches;
-		if (sellerUpdatedTooRecently(report)) breaches.push('daysSinceSellerUpdate');
 		if (tooMuchCompetition(report)) breaches.push('rivals');
 		if (report.daysToClear > c.DAYS_TO_COMPLETE) breaches.push('daysToClear');
 		return breaches;

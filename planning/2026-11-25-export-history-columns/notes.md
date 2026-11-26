@@ -157,3 +157,15 @@ See the chat message of 2026-11-25 (batched, with suggested answers). Answers ge
    activity into the "too much competition" filter.
 8. M2 touches `lib/sync.js`, `lib/derive.js`, `lib/ledger.js`, which the order-monitor session is
    still changing (its Phases 3–4): sequence M2 after that work lands, or coordinate the files.
+
+## Answers (Rocky, 2026-11-25, second round)
+
+- Covered time: "yes except rather than a fixed 2 hours it should depend on how many orders there
+  usually are in a day". Interpreted as the item's typical order activity per day, taken from the
+  ESI daily history's `order_count` (recency-weighted like demand; region-wide, so conservative),
+  which every row already has. Events (re-prices, undercuts) accept a gap of half the typical
+  interval between orders, clamped to 10 min–24 h; cumulative quantities (fills, stock trend)
+  accept 24 h. Plan decision 1 and M1's P1.1/P1.2 amended; the stats route became a POST so each
+  type carries its pace. If "orders in a day" meant book depth instead, say so: the swap is one
+  input.
+- "go ahead when ready": M0 started 2026-11-25; M1 follows, stopping at P1.2's review gate.

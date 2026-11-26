@@ -389,8 +389,10 @@ test('applyFilters reasons', () => {
 	assert.equal(applyFilters({ ...ok, activeDaysFraction: 0.1 }, {}), null);
 	// all three low at once, with units to buy, an idle seller and no rivals, still passes
 	assert.equal(applyFilters({ ...ok, roi: 1.2, revenuePerItemMil: 1.2, dailyProfitMil: 0.5, activeDaysFraction: 0.1 }, {}), null);
-	// dailyProfit 2 => threshold 1.00 day
-	assert.equal(applyFilters({ ...ok, dailyProfitMil: 2, daysSinceSellerUpdate: 0.5 }, {}), 'seller updated too recently');
+	// a seller who just updated is no reason to hide a row (that filter is gone), whichever idle figure is short
+	// and whatever the daily profit
+	assert.equal(applyFilters({ ...ok, dailyProfitMil: 2, daysSinceSellerUpdate: 0.5 }, {}), null);
+	assert.equal(applyFilters({ ...ok, dailyProfitMil: 2, daysSinceSellerUpdate: 0.01, daysSinceInBandSellerUpdate: 0.01 }, {}), null);
 	assert.equal(applyFilters({ ...ok, dailyProfitMil: 2, daysSinceSellerUpdate: 1.01 }, {}), null);
 	// 5 sellers updated 2 days ago => adjusted 4.55; 5.55 > ROI 3 and dailyProfit 10 < 13.65
 	assert.equal(applyFilters({ ...ok, revenuePerItemMil: 3, dailyProfitMil: 10, activeSellers: 5, daysSinceSellerUpdate: 2, rivals: 5 }, {}), 'too much competition');
@@ -415,10 +417,10 @@ test('limitBreaches names the fields that break a limit', () => {
 	assert.deepEqual(limitBreaches(healthy, { DAYS_TO_COMPLETE: 5 }), []);
 	assert.deepEqual(limitBreaches(healthy), [], 'the default config has the 5-day horizon');
 
-	// only the in-band idle figure is tiny (the all-orders figure is ignored when the in-band one exists)
-	assert.deepEqual(limitBreaches({ ...healthy, daysSinceInBandSellerUpdate: 0.01, daysSinceSellerUpdate: 9 }, {}), ['daysSinceSellerUpdate']);
+	// a seller who just updated breaks no limit: the idle figures, short or not, are never named
+	assert.deepEqual(limitBreaches({ ...healthy, daysSinceInBandSellerUpdate: 0.01, daysSinceSellerUpdate: 9 }, {}), []);
 	const { daysSinceInBandSellerUpdate, ...noInBand } = healthy;
-	assert.deepEqual(limitBreaches({ ...noInBand, daysSinceSellerUpdate: 0.01 }, {}), ['daysSinceSellerUpdate'], 'falls back to the all-orders figure on a hand-built report');
+	assert.deepEqual(limitBreaches({ ...noInBand, daysSinceSellerUpdate: 0.01 }, {}), []);
 
 	// too much competition: 5 rivals, ROI 3, daily profit 10 (the case applyFilters names above)
 	assert.deepEqual(limitBreaches({ ...healthy, revenuePerItemMil: 3, costPerItemMil: 1, dailyProfitMil: 10, rivals: 5 }, {}), ['rivals']);
@@ -614,9 +616,9 @@ test('active sellers and days idle count every dest sell order; the in-band idle
 	assert.equal(onlyJoke.daysOfSupply, 0);
 });
 
-test('seller updated too recently looks only at in-band sellers: a refreshed far-above-market order does not hide an item', () => {
-	// Modest-profit item (history 1M, source 0.1M, dailyProfit ~6.5M) so the too-recent threshold is ~0.46 day
-	// rather than the 1/24 floor that high-profit items get. In-band order at 0.9M, joke order at 9M.
+test('a recently updated seller does not hide an item, whether the fresh order is in band or far above the market', () => {
+	// Modest-profit item (history 1M, source 0.1M, dailyProfit ~6.5M): the old filter's threshold for it was ~0.46 day.
+	// In-band order at 0.9M, joke order at 9M.
 	const run = (inBandHoursAgo, jokeHoursAgo) => computeItemReport({
 		srcOrders: [sellOrder(0.1 * M, 1000)],
 		destOrders: [sellOrder(0.9 * M, 3, inBandHoursAgo), sellOrder(9 * M, 5, jokeHoursAgo)],
@@ -624,24 +626,25 @@ test('seller updated too recently looks only at in-band sellers: a refreshed far
 		now: NOW
 	});
 
-	// In-band seller idle 2 days, joke order refreshed 1h ago: the all-orders figure is 0.04 but the filter ignores it.
+	// In-band seller idle 2 days, joke order refreshed 1h ago: the all-orders figure is 0.04, the in-band one 2.
 	const jokeFresh = run(48, 1);
 	assert.equal(jokeFresh.daysSinceSellerUpdate, 0.04);
 	assert.equal(jokeFresh.daysSinceInBandSellerUpdate, 2);
-	assert.ok(jokeFresh.dailyProfitMil < 10, `dailyProfitMil ${jokeFresh.dailyProfitMil}`); // threshold well above 0.04 day
+	assert.ok(jokeFresh.dailyProfitMil < 10, `dailyProfitMil ${jokeFresh.dailyProfitMil}`);
 	assert.equal(jokeFresh.filteredReason, null);
 
-	// The same item with the in-band order refreshed 1h ago is filtered.
+	// The same item with the in-band order refreshed 1h ago used to be filtered; both idle figures stay reported, the row stays.
 	const inBandFresh = run(1, 1);
 	assert.equal(inBandFresh.daysSinceSellerUpdate, 0.04);
 	assert.equal(inBandFresh.daysSinceInBandSellerUpdate, 0.04);
-	assert.equal(inBandFresh.filteredReason, 'seller updated too recently');
+	assert.equal(inBandFresh.filteredReason, null);
+	assert.deepEqual(limitBreaches(inBandFresh, {}), []);
 
-	// Hand-built reports without the in-band field fall back to daysSinceSellerUpdate.
+	// Hand-built reports: no combination of the two idle figures filters a row.
 	const ok = { volume: 10, costPerItemMil: 1, revenuePerItemMil: 5, dailyProfitMil: 2, activeDaysFraction: 0.5, activeSellers: 0 };
-	assert.equal(applyFilters({ ...ok, daysSinceSellerUpdate: 0.5 }, {}), 'seller updated too recently');
+	assert.equal(applyFilters({ ...ok, daysSinceSellerUpdate: 0.5 }, {}), null);
 	assert.equal(applyFilters({ ...ok, daysSinceSellerUpdate: 0.5, daysSinceInBandSellerUpdate: 3 }, {}), null);
-	assert.equal(applyFilters({ ...ok, daysSinceSellerUpdate: 3, daysSinceInBandSellerUpdate: 0.5 }, {}), 'seller updated too recently');
+	assert.equal(applyFilters({ ...ok, daysSinceSellerUpdate: 3, daysSinceInBandSellerUpdate: 0.5 }, {}), null);
 	assert.equal(applyFilters({ ...ok, daysSinceSellerUpdate: 0.5, daysSinceInBandSellerUpdate: null }, {}), null);
 });
 
