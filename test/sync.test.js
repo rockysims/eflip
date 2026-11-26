@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const zlib = require('node:zlib');
 const { createSyncService, marketTypes, marketRegions, SCOPES } = require('../lib/sync');
 const { createTokenStore } = require('../lib/tokenStore');
 const { TokenError } = require('../lib/tokens');
@@ -62,12 +63,13 @@ const fillIvan = (fake) => fake.character(IVAN, {
 const pathsOf = (calls) => calls.map(call => call.path + (Object.keys(call.query).length ? `?${new URLSearchParams(call.query)}` : ''));
 const rawNames = (dataDir, owner, slug) => {
 	try {
-		return fs.readdirSync(path.join(dataDir, 'raw', String(owner), slug)).filter(name => name.endsWith('.json')).sort();
+		return fs.readdirSync(path.join(dataDir, 'raw', String(owner), slug)).filter(name => /\.json(?:\.gz)?$/.test(name)).sort();
 	} catch (e) {
 		return [];
 	}
 };
-const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
+// public market raw is gzipped (`.json.gz`)
+const readJson = (file) => JSON.parse(file.endsWith('.gz') ? zlib.gunzipSync(fs.readFileSync(file)).toString('utf8') : fs.readFileSync(file, 'utf8'));
 const ledgerRows = (dataDir, id, name) => readJson(path.join(dataDir, 'ledger', String(id), `${name}.json`));
 
 test('a first sync stores raw, builds the ledger, a snapshot and the profile, and names structures', async (t) => {
@@ -625,6 +627,7 @@ test('the market snapshot stores the destination orders and history raw, for the
 	assert.ok(fake.calls.every(call => call.headers.authorization === undefined));
 	assert.ok(fake.calls.every(call => /^\/markets\/10000043\/(orders|history)$/.test(call.path)));
 	assert.deepEqual(rawNames(dataDir, 'public', 'markets-10000043-orders-type-id-35').length, 1);
+	assert.match(rawNames(dataDir, 'public', 'markets-10000043-orders-type-id-35')[0], /\.json\.gz$/, 'a per-type book is stored gzipped');
 	const raw = readJson(path.join(dataDir, 'raw', 'public', 'markets-10000043-history-type-id-35', rawNames(dataDir, 'public', 'markets-10000043-history-type-id-35')[0]));
 	assert.equal(raw.body[0].average, 10);
 	assert.equal(rawNames(dataDir, 'public', 'markets-10000043-orders-type-id-36').length, 0);

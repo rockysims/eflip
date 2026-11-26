@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const zlib = require('node:zlib');
 const { createSyncService } = require('../lib/sync');
 const { createTokenStore } = require('../lib/tokenStore');
 const { acquireLock } = require('../lib/dataFiles');
@@ -59,16 +60,18 @@ const listIvan = (fake) => {
 	fake.market.history.set(`${REGION}:35`, [{ date: '2026-11-19', average: 1000, highest: 1100, lowest: 900, order_count: 4, volume: 40 }]);
 };
 
-const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
+// book logs and public market raw are gzipped (`.json.gz`)
+const readJson = (file) => JSON.parse(file.endsWith('.gz') ? zlib.gunzipSync(fs.readFileSync(file)).toString('utf8') : fs.readFileSync(file, 'utf8'));
 const rawNames = (dataDir, owner, slug) => {
 	try {
-		return fs.readdirSync(path.join(dataDir, 'raw', String(owner), slug)).filter(name => name.endsWith('.json')).sort();
+		return fs.readdirSync(path.join(dataDir, 'raw', String(owner), slug)).filter(name => /\.json(?:\.gz)?$/.test(name)).sort();
 	} catch (e) {
 		return [];
 	}
 };
 const orderLog = (dataDir, id = IVAN) => readJson(path.join(dataDir, 'ledger', String(id), 'order-log.json'));
-const bookLog = (dataDir, typeId, region = REGION) => readJson(path.join(dataDir, 'ledger', 'market', String(region), `${typeId}.json`));
+const logFile = (dataDir, typeId, region = REGION) => path.join(dataDir, 'ledger', 'market', String(region), `${typeId}.json.gz`);
+const bookLog = (dataDir, typeId, region = REGION) => readJson(logFile(dataDir, typeId, region));
 const publicLogs = (service) => service.raw.syncLogStamps('public').map(stamp => service.raw.readSyncLog('public', stamp));
 const marketCalls = (fake) => fake.callsTo(/^\/markets\//);
 
@@ -106,7 +109,7 @@ test('a tick stores our orders and a book per listed type, and nothing for unlis
 	// the logs: all four orders of the character, a book log for the two types
 	assert.deepEqual(Object.keys(orderLog(dataDir)), ['8001', '8002', '8003', '8004']);
 	assert.equal(orderLog(dataDir)[8003].isBuy, true);
-	assert.deepEqual(fs.readdirSync(path.join(dataDir, 'ledger', 'market', String(REGION))).sort(), ['35.json', '36.json']);
+	assert.deepEqual(fs.readdirSync(path.join(dataDir, 'ledger', 'market', String(REGION))).sort(), ['35.json.gz', '36.json.gz']);
 	const log35 = bookLog(dataDir, 35);
 	assert.deepEqual(log35.samples, [{ at: log35.samples[0].at, stored: true }]);
 	assert.deepEqual(Object.keys(log35.orders), ['8001', '9001']);
@@ -370,7 +373,7 @@ test('the market snapshot folds the book log too, and a tick after it reads 304 
 	assert.equal(snapshot.status, 'ok');
 	const log35 = bookLog(dataDir, 35);
 	assert.deepEqual(log35.samples.map(sample => sample.stored), [true]);
-	assert.ok(fs.existsSync(path.join(dataDir, 'ledger', 'market', String(REGION), '34.json')), 'every type of the snapshot, listed or not');
+	assert.ok(fs.existsSync(logFile(dataDir, 34)), 'every type of the snapshot, listed or not');
 	const entry = publicLogs(service)[0];
 	assert.equal(entry.source, 'market');
 	assert.ok(entry.books.length >= 4);
@@ -388,8 +391,7 @@ test('a book log that will not fold is reported but does not stop the tick; a da
 	const { fake, service, clock, dataDir, log } = setup(t);
 	listIvan(fake);
 	await service.syncWatch({ regionIds: [REGION] });
-	const bookFile = path.join(dataDir, 'ledger', 'market', String(REGION), '35.json');
-	fs.writeFileSync(bookFile, '{not json');
+	fs.writeFileSync(logFile(dataDir, 35), '{not gzip');
 	clock.advance(6 * MINUTE);
 	fake.market.orders.set(`${REGION}:35`, [bookOrder(8001, 35, 999), bookOrder(9001, 35, 1010)]);
 	const tick = await service.syncWatch({ regionIds: [REGION] });

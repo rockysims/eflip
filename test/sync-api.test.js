@@ -399,7 +399,7 @@ test('POST /api/market-stats: a type with a bad pace or id answers null without 
 	const ctx = await startApp(t);
 	writeBookLogs(ctx, [35, 37, 38, 39]);
 	// a broken file for two types: the batch still answers, each null, and the log says so once
-	for (const typeId of [38, 39]) fs.writeFileSync(path.join(ctx.dataDir, 'ledger', 'market', String(REGION), `${typeId}.json`), '{not json');
+	for (const typeId of [38, 39]) fs.writeFileSync(path.join(ctx.dataDir, 'ledger', 'market', String(REGION), `${typeId}.json.gz`), '{not gzip');
 	const types = [
 		{ typeId: 35, ordersPerDay: 1 },
 		{ typeId: 37, ordersPerDay: -1 },
@@ -510,7 +510,7 @@ test('POST /api/sync regionBook: true takes the destination region now, false ne
 	assert.equal(asked.json.regionBook.typesFolded, 2);
 	assert.equal(asked.json.regionBook.tokensUsed, 2);
 	assert.equal(regionCalls().length, 1);
-	assert.ok(fs.existsSync(path.join(ctx.dataDir, 'ledger', 'market', '10000043', '36.json')), 'the buy order counts: every type, both sides');
+	assert.ok(fs.existsSync(path.join(ctx.dataDir, 'ledger', 'market', '10000043', '36.json.gz')), 'the buy order counts: every type, both sides');
 	const status = (await ctx.get('/api/sync')).json.regionBook;
 	assert.equal(status.status, 'ok');
 	assert.equal(status.syncedAt, asked.json.regionBook.syncedAt);

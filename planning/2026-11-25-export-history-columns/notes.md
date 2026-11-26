@@ -274,3 +274,12 @@ Rough edges:
   assume `.json`).
 - `EFLIP_REGION_BOOK=1` makes a full sync take the region book too, but nothing schedules hourly
   runs; the 24-hour measurement runs as a shell loop of `node scripts/sync.js --region-book`.
+
+## Answers on the storage budget (Rocky, 2026-11-26)
+
+- Q1–Q6: "all suggested" (soft shares; character data outside; 1 GB with regionPages 40 / bookLogs
+  45 / typeBooks 10 / runContexts 5; gzip; the floors; `.env`).
+- Measurement: "I don't think I can do 24 hours straight. Maybe 8 hours (while I sleep)?" Agreed:
+  raw size and tokens per snapshot are fixed; seven hourly deltas give the log growth rate; a night
+  window understates daytime activity, which with a size-based budget only shortens how far back
+  history reaches. P2.2 starts without waiting for it; the report tunes the defaults afterwards.
