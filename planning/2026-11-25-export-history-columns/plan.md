@@ -2,9 +2,11 @@
 kind: plan
 size: lg
 depth: roadmap
-status: active
+status: done
 repo: eflip
 created: 2026-11-25
+completed: 2026-11-26
+commit: 0732b64
 adr: none
 ---
 
