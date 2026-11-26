@@ -9,7 +9,14 @@
 //   node scripts/sync.js --no-market        skip the market snapshot
 //   node scripts/sync.js --market-only      only the market snapshot
 //   node scripts/sync.js --region 10000043  snapshot that region's market (repeatable)
-//   node scripts/sync.js --rebuild          rebuild data/ledger/ from data/raw/; no ESI, no credentials
+//   node scripts/sync.js --rebuild          rebuild the character ledgers (and structure names) from
+//                                           data/raw/; no ESI, no credentials. The book logs are left
+//                                           as they are: once the storage budget has trimmed raw, the
+//                                           live logs hold history raw no longer does, and a rebuild
+//                                           would lose it. It says how far back their raw reaches.
+//   node scripts/sync.js --rebuild-book-logs   rebuild the book logs from raw too (alone, or with
+//                                           --rebuild): per-type checks and regional snapshots replayed
+//                                           in time order; history older than the raw left is lost.
 //   node scripts/sync.js --watch            one watch refresh: our open orders, then the book and history
 //                                           of each type we have listed (what the orders page does every
 //                                           five minutes; optional here, for a launchd job while the game
@@ -26,18 +33,27 @@
 //                                           public sync log as a table, with totals and per-hour
 //                                           averages (the measurement behind the retention rule). No
 //                                           ESI, no credentials, no other flag.
+//   node scripts/sync.js --storage          one run of the storage budget (EFLIP_STORAGE_BUDGET,
+//                                           EFLIP_STORAGE_SHARES; lib/storage.js): trims what is over,
+//                                           then prints the budget, each kind's bytes against its share,
+//                                           the share of the budget used and the last trim. Without a
+//                                           budget it only measures. No ESI, no credentials, no other flag.
+//   node scripts/sync.js --storage-report   the same from the last storage run, without running one.
 //
 // Always syncs (the page's "more than an hour ago" test is the server's business), but every route
 // still honours its Expires, so a run inside the cache windows makes no call.
 // Reads the same .env as the server (EVE_CLIENT_ID, EVE_CLIENT_SECRET, EVE_CALLBACK_URL,
 // ESI_USER_AGENT, ESI_COMPAT_DATE, EFLIP_DATA_DIR).
 // Prints one block per character and one for the market: calls made, 304s, rows added, tokens left
-// (--watch: one line per character and per type, and what each answered). --rebuild also rebuilds the
-// order log and the book logs, and lists any warning the order log raised.
-// Exit code: 0 everything synced (or nothing was due), 1 a sync failed or stopped early, 2 usage or
+// (--watch: one line per character and per type, and what each answered), and the storage block when
+// the budget ran. --rebuild also rebuilds each character's order log and lists any warning it raised;
+// --rebuild-book-logs rebuilds the book logs (replaying the regional snapshots whose pages raw still
+// holds, and saying how many it could not).
+// Exit code: 0 everything synced (or nothing was due), 1 a sync (or the storage step) failed or stopped early, 2 usage or
 // configuration error. A watch tick exits 1 when a character failed, needs re-linking or was busy, a
 // stop ended it or the market step came back partial; a busy or skipped market step is not a failure.
 // A --region-book run exits 1 when it came back partial, paused, busy or failed (a skip is not).
+// --storage exits 1 when the market lock was busy or the run failed; --storage-report never does.
 const path = require('path');
 const { createSso } = require('../lib/sso');
 const { createTokenStore, DEFAULT_DATA_DIR } = require('../lib/tokenStore');
@@ -45,13 +61,17 @@ const { createTokenManager } = require('../lib/tokens');
 const { createSyncService } = require('../lib/sync');
 const { createRawStore } = require('../lib/dataFiles');
 const derive = require('../lib/derive');
+const { KINDS } = require('../lib/storage-budget');
+const { readState: readStorageState } = require('../lib/storage');
+const { sizeText } = require('../public/storage-notice');
 
 const DEFAULT_CALLBACK_URL = 'http://localhost:5001/sso/callback';
 const DEFAULT_USER_AGENT = 'eflip (local)';
 
-const USAGE = `usage: node scripts/sync.js [--character <id>]... [--region <id>]... [--no-market | --market-only] [--max-types <n>] [--rebuild | --watch]
+const USAGE = `usage: node scripts/sync.js [--character <id>]... [--region <id>]... [--no-market | --market-only] [--max-types <n>] [--rebuild [--rebuild-book-logs] | --rebuild-book-logs | --watch]
        node scripts/sync.js --region-book [--region <id>]
-       node scripts/sync.js --region-book-report`;
+       node scripts/sync.js --region-book-report
+       node scripts/sync.js --storage | --storage-report`;
 
 class UsageError extends Error {}
 
@@ -61,14 +81,17 @@ const positiveId = (text, flag) => {
 };
 
 const parseArgs = (argv) => {
-	const options = { characterIds: null, regionIds: null, market: true, marketOnly: false, rebuild: false, watch: false, regionBook: false, regionBookReport: false, help: false, maxTypes: undefined };
+	const options = { characterIds: null, regionIds: null, market: true, marketOnly: false, rebuild: false, rebuildBookLogs: false, watch: false, regionBook: false, regionBookReport: false, storage: false, storageReport: false, help: false, maxTypes: undefined };
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === '--help' || arg === '-h') options.help = true;
 		else if (arg === '--rebuild') options.rebuild = true;
+		else if (arg === '--rebuild-book-logs') options.rebuildBookLogs = true;
 		else if (arg === '--watch') options.watch = true;
 		else if (arg === '--region-book') options.regionBook = true;
 		else if (arg === '--region-book-report') options.regionBookReport = true;
+		else if (arg === '--storage') options.storage = true;
+		else if (arg === '--storage-report') options.storageReport = true;
 		else if (arg === '--no-market') options.market = false;
 		else if (arg === '--market-only') options.marketOnly = true;
 		else if (arg === '--character') (options.characterIds = options.characterIds || []).push(positiveId(argv[++i], arg));
@@ -77,14 +100,21 @@ const parseArgs = (argv) => {
 		else throw new UsageError(`unknown argument ${JSON.stringify(arg)}`);
 	}
 	if (options.marketOnly && !options.market) throw new UsageError('--market-only and --no-market contradict each other');
-	if (options.watch && options.rebuild) throw new UsageError('--watch and --rebuild contradict each other');
+	if (options.watch && (options.rebuild || options.rebuildBookLogs)) throw new UsageError(`--watch and ${options.rebuild ? '--rebuild' : '--rebuild-book-logs'} contradict each other`);
 	if (options.watch && (options.marketOnly || !options.market || options.maxTypes !== undefined)) throw new UsageError('--watch takes only --character and --region');
 	if (options.regionBook && options.regionBookReport) throw new UsageError('--region-book and --region-book-report contradict each other');
-	if ((options.regionBook || options.regionBookReport) && (options.rebuild || options.watch || options.marketOnly || !options.market || options.maxTypes !== undefined || options.characterIds !== null)) {
+	if ((options.regionBook || options.regionBookReport) && (options.rebuild || options.rebuildBookLogs || options.watch || options.marketOnly || !options.market || options.maxTypes !== undefined || options.characterIds !== null)) {
 		throw new UsageError(`${options.regionBook ? '--region-book' : '--region-book-report'} takes ${options.regionBook ? 'only --region' : 'no other flag'}`);
 	}
 	if (options.regionBookReport && options.regionIds !== null) throw new UsageError('--region-book-report takes no other flag');
 	if (options.regionBook && options.regionIds !== null && options.regionIds.length > 1) throw new UsageError('--region-book takes one --region');
+	if (options.storage || options.storageReport) {
+		const flag = options.storage ? '--storage' : '--storage-report';
+		if (options.storage && options.storageReport) throw new UsageError('--storage and --storage-report contradict each other');
+		if (options.rebuild || options.rebuildBookLogs || options.watch || options.regionBook || options.regionBookReport || options.marketOnly || !options.market || options.maxTypes !== undefined || options.characterIds !== null || options.regionIds !== null) {
+			throw new UsageError(`${flag} takes no other flag`);
+		}
+	}
 	return options;
 };
 
@@ -148,6 +178,68 @@ const formatSummary = (result) => {
 		}
 	}
 	if (result.regionBook) lines.push(formatRegionBook(result.regionBook));
+	if (result.storage) lines.push(formatStorage(result.storage));
+	return lines.join('\n');
+};
+
+// ---- the storage budget
+
+const utc = (stamp) => `${String(stamp).slice(0, 19).replace('T', ' ')} UTC`;
+
+// The line a plain --rebuild prints for the book logs it left alone: how far back the raw behind them
+// reaches (derive.bookLogRawReach), which is what a --rebuild-book-logs would keep.
+const bookLogsLeftText = (reach) => {
+	const minute = (stamp) => `${String(stamp).slice(0, 16).replace('T', ' ')} UTC`;
+	const from = [];
+	if (reach && reach.regionSnapshotAt) from.push(`${minute(reach.regionSnapshotAt)} (the oldest regional snapshot)`);
+	if (reach && reach.typeBookAt) from.push(`${minute(reach.typeBookAt)} (the oldest per-type book)`);
+	if (from.length === 0) return 'book logs left as they are: no raw behind them (no regional snapshot or per-type book); pass --rebuild-book-logs to rebuild them from raw';
+	return `book logs left as they are: raw reaches back to ${from.join(' and ')}; pass --rebuild-book-logs to rebuild them from raw and lose what is older`;
+};
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+// What one trim removed, per kind: "regionPages 2 snapshots, 15.4 MB; bookLogs ..."; kinds that gave
+// nothing up are left out.
+const trimText = (trims) => {
+	const parts = [];
+	const t = trims || {};
+	const r = t.regionPages;
+	if (r && r.pieces > 0) parts.push(`regionPages ${[r.snapshots > 0 ? plural(r.snapshots, 'snapshot') : null, r.strayFiles > 0 ? plural(r.strayFiles, 'stray page') : null].filter(Boolean).join(' and ')}, ${sizeText(r.bytesFreed)}`);
+	const b = t.bookLogs;
+	if (b && b.pieces > 0) parts.push(`bookLogs ${plural(b.logs, 'log')} cut before ${utc(b.cutoffAt)} (${plural(b.samplesDropped, 'sample')}, ${plural(b.entriesDropped, 'path entry', 'path entries')}, ${plural(b.ordersDropped, 'order')} dropped), ${sizeText(b.bytesFreed)}`);
+	const y = t.typeBooks;
+	if (y && y.pieces > 0) parts.push(`typeBooks ${plural(y.files, 'file')} cut before ${utc(y.cutoffAt)}, ${sizeText(y.bytesFreed)}`);
+	const c = t.runContexts;
+	if (c && c.pieces > 0) parts.push(`runContexts ${plural(c.runs, 'run')}, ${sizeText(c.bytesFreed)}`);
+	return parts.length === 0 ? 'nothing' : parts.join('; ');
+};
+
+// The text of one storage run (service.runStorage's answer, or the last run's state for
+// --storage-report); also what the tests read. `heading` names where it came from.
+const formatStorage = (r, { heading = 'storage' } = {}) => {
+	if (!r) return `${heading}: no storage run yet (EFLIP_STORAGE_BUDGET sets a budget; node scripts/sync.js --storage runs one now)`;
+	if (r.status === 'busy' || r.status === 'failed') return `${heading}: ${r.status}${r.reason ? ` - ${r.reason}` : ''}`;
+	const usage = r.usage || {};
+	const total = KINDS.reduce((sum, kind) => sum + (usage[kind] || 0), 0);
+	const budget = r.budgetBytes === undefined ? null : r.budgetBytes;
+	const shares = r.shares || {};
+	const rows = budget === null ? [['kind', 'on disk']] : [['kind', 'on disk', 'share', 'share of budget']];
+	for (const kind of KINDS) {
+		const share = shares[kind] || 0;
+		rows.push(budget === null ? [kind, sizeText(usage[kind] || 0)] : [kind, sizeText(usage[kind] || 0), `${share} %`, sizeText((share / 100) * budget)]);
+	}
+	rows.push(budget === null ? ['total', sizeText(total)] : ['total', sizeText(total), '', '']);
+	const widths = rows[0].map((_, column) => Math.max(...rows.map(row => String(row[column]).length)));
+	const table = rows.map(row => `  ${row.map((cell, column) => (column === 0 ? String(cell).padEnd(widths[column]) : String(cell).padStart(widths[column]))).join('  ')}`.trimEnd());
+	if (budget === null) {
+		const why = r.error ? `EFLIP_STORAGE_BUDGET or EFLIP_STORAGE_SHARES did not parse: ${r.error}` : 'EFLIP_STORAGE_BUDGET is not set';
+		return [`${heading}: no budget (${why}), so nothing is trimmed`, ...table].join('\n');
+	}
+	const lines = [`${heading}: ${Math.round((total / budget) * 100)} % of the ${sizeText(budget)} budget used${r.syncedAt ? `, measured ${utc(r.syncedAt)}` : ''}${r.reason ? ` (after ${r.reason === 'regionBook' ? 'the region book' : r.reason === 'market' ? 'the market snapshot' : 'a request'})` : ''}`, ...table];
+	if (trimText(r.trims) !== 'nothing' && r.totalBefore !== undefined) lines.push(`  trimmed ${sizeText(r.totalBefore)} to ${sizeText(total)}`);
+	const last = r.lastTrim || null;
+	lines.push(last ? `  last trim ${utc(last.at)}: ${trimText(last.trims)}` : '  last trim: none yet');
+	if (r.unmet > 0) lines.push(`  over budget by ${sizeText(r.unmet)}: nothing left to trim above the floors`);
 	return lines.join('\n');
 };
 
@@ -255,10 +347,11 @@ const watchFailed = (result) => {
 	return Object.values(result.characters || {}).some(c => bad(c.status)) || Boolean(result.stop) || Boolean(result.market && (result.market.status === 'partial' || result.market.status === 'failed'));
 };
 
-// Did anything fail or stop early? ('skipped' is not a failure: nothing was asked of it.)
+// Did anything fail or stop early? ('skipped' is not a failure: nothing was asked of it.) A storage
+// step that failed counts: unattended, the disk would go on growing.
 const hasFailure = (result) => {
 	const bad = (status) => status === 'failed' || status === 'partial' || status === 'busy' || status === 'relink';
-	return (result.characters || []).some(c => bad(c.status)) || Boolean(result.market && bad(result.market.status)) || Boolean(result.regionBook && regionBookFailed(result.regionBook));
+	return (result.characters || []).some(c => bad(c.status)) || Boolean(result.market && bad(result.market.status)) || Boolean(result.regionBook && regionBookFailed(result.regionBook)) || Boolean(result.storage && result.storage.status === 'failed');
 };
 
 // A regional book run fails when it came back partial, paused, busy or failed; skipped and deferred are not failures.
@@ -290,15 +383,26 @@ const main = async (argv, deps = {}) => {
 	const dataDir = path.resolve(deps.dataDir || env.EFLIP_DATA_DIR || DEFAULT_DATA_DIR);
 	const log = { info: () => {}, warn: (line) => err(line) };
 
-	if (options.rebuild) {
+	if (options.rebuild || options.rebuildBookLogs) {
 		try {
-			const result = derive.rebuildAll({ dataDir, log });
+			const bookLines = (books) => {
+				out(`book logs: ${books.bookLogs}${books.regionSnapshots > 0 ? ` (${plural(books.regionSnapshots, 'regional snapshot')} replayed)` : ''}`);
+				if (books.regionSnapshotsSkipped > 0) out(`${plural(books.regionSnapshotsSkipped, 'regional snapshot')} not replayed: pages trimmed`);
+				if (books.bookChecksSkipped > 0) out(`${plural(books.bookChecksSkipped, 'per-type book check')} not replayed: raw trimmed`);
+			};
+			if (!options.rebuild) {
+				const books = derive.rebuildBookLogs({ dataDir });
+				bookLines({ bookLogs: books.logs, regionSnapshots: books.regionSnapshots, regionSnapshotsSkipped: books.regionSnapshotsSkipped, bookChecksSkipped: books.checksSkipped });
+				return 0;
+			}
+			const result = derive.rebuildAll({ dataDir, log, bookLogs: options.rebuildBookLogs });
 			for (const [id, counts] of Object.entries(result.characters)) {
 				out(counts.skipped ? `${id}: skipped (${counts.skipped})` : `${id}: ${counts.transactions} transactions, ${counts.journal} journal rows, ${counts.ordersHistory} orders, ${counts.contracts} contracts, ${counts.contractItems} contract item lists, ${counts.snapshots} snapshots, ${counts.orderLog} logged orders`);
 				for (const w of counts.orderLogWarnings || []) out(`  warning: order ${w.orderId} ${w.kind} at ${w.at}${w.kind === 'volume-rise' ? ` (${w.from} -> ${w.to})` : ''}`);
 			}
 			out(`structures: ${result.structures === null ? 'none in raw' : result.structures}`);
-			out(`book logs: ${result.bookLogs}`);
+			if (result.bookLogsRebuilt) bookLines(result);
+			else out(bookLogsLeftText(result.bookLogRawFrom));
 			return 0;
 		} catch (e) {
 			err(`rebuild failed: ${e.message}`);
@@ -314,6 +418,35 @@ const main = async (argv, deps = {}) => {
 			err(`report failed: ${e.message}`);
 			return 1;
 		}
+	}
+
+	if (options.storageReport) {
+		try {
+			out(formatStorage(readStorageState(dataDir), { heading: 'storage (last run)' }));
+			return 0;
+		} catch (e) {
+			err(`report failed: ${e.message}`);
+			return 1;
+		}
+	}
+
+	if (options.storage) {
+		// local files only: the service is built without the token manager, and no ESI call is made
+		const service = createSyncService({
+			dataDir, fetch, now, log, env,
+			userAgent: env.ESI_USER_AGENT || DEFAULT_USER_AGENT,
+			tokenStore: createTokenStore({ dataDir }),
+			tokens: { accessTokenFor: async () => { throw new Error('the storage run makes no ESI call'); }, forget: () => {} },
+		});
+		let result;
+		try {
+			result = await service.runStorage({ reason: 'manual' });
+		} catch (e) {
+			err(`storage failed: ${e.message}`);
+			return 1;
+		}
+		out(formatStorage(result));
+		return result.status === 'busy' || result.status === 'failed' ? 1 : 0;
 	}
 
 	const clientId = env.EVE_CLIENT_ID || '';
@@ -397,4 +530,4 @@ if (require.main === module) {
 	);
 }
 
-module.exports = { main, parseArgs, formatSummary, formatWatch, formatRegionBook, formatRegionBookReport, readRegionBookEntries, hasFailure, watchFailed, UsageError };
+module.exports = { main, parseArgs, formatSummary, formatWatch, formatRegionBook, formatRegionBookReport, formatStorage, readRegionBookEntries, hasFailure, watchFailed, UsageError };

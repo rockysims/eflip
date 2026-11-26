@@ -566,3 +566,44 @@ test('GET /api/config says where the data is and whether EFLIP_DATA_DIR and ESI_
 	assert.ok(!loudRes.text.includes('client-secret-xyz') && !loudRes.text.includes('me@example.com'), 'flags only, never the values');
 	assert.deepEqual(Object.keys(loudRes.json.env), ['dataDir', 'dataDirFromEnv', 'userAgentFromEnv', 'dataDirError']);
 });
+
+test('GET /api/config reports the storage budget, the shares and each kind\'s bytes now; POST /api/sync storage: true runs the step once; anything else is a 400', async (t) => {
+	const bare = await startApp(t);
+	assert.deepEqual((await bare.get('/api/config')).json.storage, {
+		budget: null, shares: { regionPages: 40, bookLogs: 45, typeBooks: 10, runContexts: 5 },
+		usage: { regionPages: 0, bookLogs: 0, typeBooks: 0, runContexts: 0 }, total: 0, measuredAt: '2026-11-20T12:00:00.000Z', lastTrimAt: null, unmet: 0,
+	});
+	const unconfigured = await startApp(t, { configured: false, env: { EFLIP_STORAGE_BUDGET: '1GB' } });
+	assert.equal((await unconfigured.get('/api/config')).json.storage.budget, 1e9, 'beside the other flags, without credentials');
+
+	const ctx = await startApp(t, { env: { EFLIP_STORAGE_BUDGET: '1GB', EFLIP_STORAGE_SHARES: 'regionPages:50,bookLogs:30,typeBooks:15,runContexts:5' } });
+	fillIvan(ctx.fake);
+	ctx.fake.market.regionOrders.set('10000043', regionRows);
+	for (const body of [{ storage: 'yes' }, { storage: 1 }, { storage: null }]) {
+		assert.equal((await ctx.post('/api/sync', body)).status, 400, JSON.stringify(body));
+	}
+	const asked = await ctx.post('/api/sync', { market: false, regionBook: true, storage: true });
+	assert.equal(asked.status, 200);
+	assert.equal(asked.json.regionBook.status, 'ok', JSON.stringify(asked.json.regionBook));
+	assert.equal(asked.json.regionBook.storage.reason, 'regionBook', 'the region book ran the step itself, with a budget set');
+	assert.equal(asked.json.storage.status, 'ok');
+	assert.equal(asked.json.storage.reason, 'manual', 'and storage: true ran it once more at the end');
+	assert.equal(asked.json.storage.budgetBytes, 1e9);
+	assert.ok(asked.json.storage.usage.regionPages > 0 && asked.json.storage.usage.bookLogs > 0);
+
+	const config = (await ctx.get('/api/config')).json.storage;
+	assert.deepEqual(Object.keys(config), ['budget', 'shares', 'usage', 'total', 'measuredAt', 'lastTrimAt', 'unmet']);
+	assert.equal(config.budget, 1e9);
+	assert.deepEqual(config.shares, { regionPages: 50, bookLogs: 30, typeBooks: 15, runContexts: 5 });
+	assert.deepEqual(config.usage, asked.json.storage.usage, 'measured afresh: nothing changed since');
+	assert.equal(config.total, Object.values(config.usage).reduce((a, b) => a + b, 0));
+	assert.equal(config.lastTrimAt, null, 'nothing over 1 GB to trim');
+	assert.equal(config.unmet, 0);
+
+	// without a budget the step only measures
+	const noBudget = await startApp(t);
+	fillIvan(noBudget.fake);
+	const measured = await noBudget.post('/api/sync', { market: false, storage: true });
+	assert.equal(measured.json.storage.status, 'no-budget');
+	assert.equal(measured.json.storage.budgetBytes, null);
+});

@@ -1,5 +1,5 @@
 // Pure market stats: the observed figures of one type at one destination station, from that
-// type's book log (data/ledger/market/<regionId>/<typeId>.json, built by lib/derive.js foldBook).
+// type's book log (data/ledger/market/<regionId>/<typeId>.json.gz, built by lib/derive.js foldBook).
 // Only sell orders at the station count. Over a window of `windowDays` ending at the newest sample
 // at or before `now`, it reports (plan: planning/2026-11-25-export-history-columns, decisions 1, 3):
 //   repriceEvents       path entries after an order's first whose price changed, while the order

@@ -734,3 +734,45 @@ test('syncAll runs the characters then the market, unless the market is deferred
 	assert.equal(service.status().market.status, 'ok');
 	assert.equal(service.status().characters[IVAN].status, 'ok');
 });
+
+test('with a storage budget the market step ends with the storage step; syncAll answers it, and storage: true runs one more', async (t) => {
+	const env = {};
+	const { dataDir, fake, clock, service } = marketSetup(t, { service: { env } });
+	const REGION = 10000043;
+	const slug = `markets-${REGION}-orders-type-id-35`;
+	const row = (price) => ({ order_id: 1, type_id: 35, price, is_buy_order: false, volume_remain: 5, volume_total: 10, issued: '2026-11-18T10:00:00Z', duration: 90, range: 'region', location_id: 60008494, system_id: 30002187, min_volume: 1 });
+	fake.market.orders.set(`${REGION}:35`, [row(100)]);
+	const first = await service.syncAll({ force: true });
+	assert.equal(first.market.status, 'ok');
+	assert.equal(first.market.storage, undefined, 'no budget: no storage step');
+	assert.equal(first.storage, null);
+	assert.equal(rawNames(dataDir, 'public', slug).length, 1);
+
+	// a second book of 35 is stored; with a budget the step after the market keeps only the newest
+	env.EFLIP_STORAGE_BUDGET = '1KB';
+	clock.advance(2 * HOUR);
+	fake.market.orders.set(`${REGION}:35`, [row(99)]);
+	const second = await service.syncAll({ force: true });
+	assert.equal(second.market.status, 'ok');
+	assert.equal(second.market.storage.status, 'ok', JSON.stringify(second.market.storage));
+	assert.equal(second.market.storage.reason, 'market');
+	assert.equal(second.storage, second.market.storage, 'the answer carries the step the market ran');
+	assert.ok(second.storage.trims.typeBooks.files >= 1);
+	assert.equal(rawNames(dataDir, 'public', slug).length, 1, 'the older book of 35 is gone, the newest stays');
+	assert.ok(second.storage.unmet > 0, 'what is left is floors: over 1 KB, nothing more to trim');
+	assert.equal(service.readMarket({ typeIds: [35], regionIds: [REGION] }).types[35][REGION].orders.rows[0].price, 99, 'the market reads still find the newest book');
+
+	// storage: true runs one more step at the end, without touching ESI
+	fake.reset();
+	const asked = await service.syncAll({ characterIds: [], market: false, storage: true });
+	assert.equal(asked.storage.status, 'ok');
+	assert.equal(asked.storage.reason, 'manual');
+	assert.equal(fake.calls.length, 0);
+	const entries = (() => {
+		const raw = service.raw;
+		return raw.syncLogStamps('public').map(stamp => raw.readSyncLog('public', stamp)).filter(entry => entry.kind === 'storage');
+	})();
+	assert.deepEqual(entries.map(entry => entry.reason), ['market', 'manual']);
+	// the market step still reads its regions from the newest market entry, past the storage entries
+	assert.deepEqual(service.readMarket({ typeIds: [35] }).regionIds, [REGION]);
+});

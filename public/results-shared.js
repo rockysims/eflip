@@ -3,10 +3,11 @@
 // calls, the window bar (run or since-date, route, "count hauler bonuses"), and the loader that reads the
 // linked characters' ledgers, runs, snapshots, destination prices and item names, then works the results
 // out with results-calc.js. It also fills a page's `#envNotice` container, when it has one, with the
-// notice for an unset EFLIP_DATA_DIR or ESI_USER_AGENT and the error for a data directory that cannot
-// be written (GET /api/config's `env`), and reads where an EVE sign-in came back from (?linked= and
-// ?ssoError=&ssoReason=, readSsoResult) so the results and orders pages word it alike. Plain script,
-// one global (`resultsShared`), no build step.
+// notice for an unset EFLIP_DATA_DIR or ESI_USER_AGENT, the error for a data directory that cannot
+// be written (GET /api/config's `env`) and the storage line (storage-notice.js, when the page loads
+// it: the budget used, or the hourly book running with no budget), and reads where an EVE sign-in
+// came back from (?linked= and ?ssoError=&ssoReason=, readSsoResult) so the results and orders pages
+// word it alike. Plain script, one global (`resultsShared`), no build step.
 //
 // Usage (after util.js and results-calc.js, before the page's own script):
 //   const shared = resultsShared.create({ render, renderStatus, typesChanged, reloaded });
@@ -785,10 +786,15 @@ const resultsShared = (() => {
 	// wording is the plan's (docs/order-monitor-plan.md, UI 2); the export page prints the same sentences.
 	// An unwritable directory is an error (red, "Error:"): nothing can be linked or synced until it is fixed;
 	// the two unset variables stay amber notes. `env` is `config.env`: {dataDir, dataDirFromEnv,
-	// userAgentFromEnv, dataDirError}. The lines are [{kind: 'err' | 'warn', html}], html already escaped.
-	const envNoticeLines = (env) => {
+	// userAgentFromEnv, dataDirError}; `config` the whole answer, for the storage line (storage-notice.js:
+	// an amber note while the hourly book runs with no budget or the budget is overrun, a plain line
+	// with the share of the budget used otherwise). The lines are [{kind: 'err' | 'warn' | 'info', html}],
+	// html already escaped.
+	const storageLines = (config) => (typeof storageNotice === 'undefined' ? [] : storageNotice.storageNoticeLines(config))
+		.map(line => ({ kind: line.kind, html: esc(line.text) }));
+	const envNoticeLines = (env, config) => {
 		const lines = [];
-		if (!env || typeof env !== 'object') return lines;
+		if (!env || typeof env !== 'object') return storageLines(config);
 		if (env.dataDirError && typeof env.dataDirError === 'object') {
 			const where = typeof env.dataDir === 'string' ? ` <code>${esc(env.dataDir)}</code>` : '';
 			const code = esc(env.dataDirError.code || 'error');
@@ -799,14 +805,16 @@ const resultsShared = (() => {
 			lines.push({ kind: 'warn', html: `Synced data is in <code>${esc(env.dataDir)}</code> because EFLIP_DATA_DIR is not set. Add <code>EFLIP_DATA_DIR=/path</code> to .env so every checkout shares one store.` });
 		}
 		if (env.userAgentFromEnv === false) lines.push({ kind: 'warn', html: 'ESI_USER_AGENT is not set; CCP asks for a contact in it.' });
-		return lines;
+		return lines.concat(storageLines(config));
 	};
-	const renderEnvNotice = (env, el = document.getElementById('envNotice')) => {
+	const renderEnvNotice = (env, el = document.getElementById('envNotice'), config = null) => {
 		if (!el) return;
-		const html = envNoticeLines(env)
+		const html = envNoticeLines(env, config)
 			.map(line => (line.kind === 'err'
 				? `<div class="envNote err"><span class="sev">Error:</span><span>${line.html}</span></div>`
-				: `<div class="envNote"><span class="sev"><span aria-hidden="true">⚠</span> Note:</span><span>${line.html}</span></div>`)).join('');
+				: line.kind === 'info'
+					? `<div class="envNote info"><span>${line.html}</span></div>`
+					: `<div class="envNote"><span class="sev"><span aria-hidden="true">⚠</span> Note:</span><span>${line.html}</span></div>`)).join('');
 		setHtml(el, html);
 	};
 	const initEnvNotice = async () => {
@@ -814,7 +822,7 @@ const resultsShared = (() => {
 		if (!el) return;
 		try {
 			const cfg = await api('/api/config');
-			renderEnvNotice(cfg && cfg.env, el);
+			renderEnvNotice(cfg && cfg.env, el, cfg);
 		} catch (e) { /* the page's own load reports an unreachable server */ }
 	};
 	if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initEnvNotice);

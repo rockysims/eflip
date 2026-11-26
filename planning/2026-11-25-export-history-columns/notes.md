@@ -283,3 +283,30 @@ Rough edges:
   raw size and tokens per snapshot are fixed; seven hourly deltas give the log growth rate; a night
   window understates daytime activity, which with a size-based budget only shortens how far back
   history reaches. P2.2 starts without waiting for it; the report tunes the defaults afterwards.
+
+## P2.2 as built (agents, 2026-11-26; accepted at review)
+
+- Gzip: raw records of owner `public` with slug `markets-…` and every book log are `.json.gz`;
+  readers take both forms; a plain log is replaced on its next write. 10.7x on 12,000 logs.
+- `lib/storage-budget.js` plans; `lib/storage.js` measures and applies, under the market lock, at
+  the end of a regional snapshot and of a full sync's market step when `EFLIP_STORAGE_BUDGET` is
+  set; a `kind: 'storage'` public sync-log entry records each run; `_storage.json` keeps the last
+  trim; `/api/config.storage` (usage cached 60 s, `measuredAt`); `scripts/sync.js --storage` and
+  `--storage-report`; `public/storage-notice.js` gives the pages' sentences ("Storage 62 % of 1 GB";
+  the no-budget nag when the hourly book is on; the over-budget line when only floors remain).
+- Book-log trim rule: samples before the cutoff go; an order last seen before the cutoff goes whole;
+  an order still listed keeps the newest entry before the cutoff (its state at the cutoff, so a
+  re-price just after still reads as a re-price). Bucket bytes are dated by when a cutoff frees them,
+  scaled to compressed size on disk; `unmet` is the real overage when only floors remain.
+- typeBooks trims by a day cutoff across all per-type slugs, keeping each route's newest file and
+  its newest file before the cutoff, so any later check still finds every page it read; the one
+  exception is the last check before the cutoff on a multi-page book.
+- regionPages trims whole snapshots; a 304 page's file belongs to the newest entry naming it; the
+  newest file of each regional page route is never deleted.
+- Rebuild: `--rebuild` leaves the book logs alone and says how far raw reaches; `--rebuild-book-logs`
+  replays per-type checks and regional snapshots in time order (byte-identical when all raw is
+  present) and counts snapshots whose pages were trimmed. The old README warning is gone.
+- Not done yet (P2.3): nothing schedules the hourly snapshot by itself; `EFLIP_REGION_BOOK=1` only
+  adds it to a full sync, which the pages do not request. P2.3 adds the server-side hourly timer
+  (and the `--watch` loop's), keeps the job opt-in through the flag rather than on by default, and
+  does the plan-doc cross-references.

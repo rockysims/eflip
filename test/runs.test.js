@@ -632,3 +632,29 @@ test('a saved run is what sync.js (the market region) and results-calc (the comp
 	assert.equal(calc.runs[0].route.endRegionId, 10000043);
 	assert.ok(Math.abs(calc.totals.predictedProfit - (older.totals.profitMil * 1e6)) < 1e-3, 'predicted profit is the run\'s totals.profitMil in ISK');
 });
+
+test('the storage budget reads each run\'s context size and can drop a context, keeping the rest of the run', async (t) => {
+	const dataDir = tmpDataDir(t);
+	const store = createRunStore({ dataDir, log: makeLog() });
+	assert.deepEqual(store.contexts(), []);
+	const first = await makeBody();
+	await store.save(first);
+	const second = await makeBody({ copiedAt: T2, reportGeneratedAt: G2 });
+	await store.save(second);
+	const sizes = store.contexts();
+	assert.deepEqual(sizes.map(run => run.id), [first.id, second.id], 'oldest copy first');
+	for (const run of sizes) assert.equal(run.bytes, Buffer.byteLength(JSON.stringify(store.list({ context: true }).find(saved => saved.id === run.id).context)));
+	assert.equal(store.contexts()[0], sizes[0], 'an unchanged file is not read again');
+
+	const freed = store.trimContext(first.id, { at: '2026-11-25T12:00:00.000Z' });
+	assert.equal(freed, sizes[0].bytes);
+	const trimmed = store.list({ context: true }).find(run => run.id === first.id);
+	assert.deepEqual(trimmed.context, {});
+	assert.equal(trimmed.contextTrimmedAt, '2026-11-25T12:00:00.000Z');
+	assert.equal(trimmed.rows.length, first.rows.length, 'the rows stay');
+	assert.deepEqual(store.contexts().map(run => run.id), [second.id], 'a run without a context is not counted');
+	assert.equal(store.trimContext(first.id, { at: '2026-11-25T13:00:00.000Z' }), 0, 'nothing left to drop');
+	// copied again later: the counters move, the context stays dropped
+	assert.equal((await store.save({ ...first, copiedAt: T3 })).copyCount, 2);
+	assert.deepEqual(store.list({ context: true }).find(run => run.id === first.id).context, {});
+});

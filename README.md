@@ -72,12 +72,12 @@ To sync from the command line without the server, run `node scripts/sync.js`. Wi
 - `--character <id>` (repeatable): only that character
 - `--region <id>` (repeatable): snapshot that region's market
 - `--no-market` or `--market-only`
-- `--rebuild`: rebuild `data/ledger/` from `data/raw/`; no ESI calls
+- `--rebuild`: rebuild the character ledgers in `data/ledger/` from `data/raw/`; no ESI calls. The book logs are left as they are (see below); add `--rebuild-book-logs` to rebuild them too, or pass it alone to rebuild only them
 - `--watch`: one watch refresh, the orders page's five-minute tick: your open orders, then the books and history of the types you have listed. No wallet, assets or contracts. It takes `--character` and `--region`, and cannot be combined with `--rebuild`, `--market-only`, `--no-market` or `--max-types`
 
 `--watch` is optional. A launchd job for it can run every five minutes while the game is open, on a machine where the orders page is not; use `StartInterval` 300 in place of the daily calendar interval below.
 
-The destination book job is off by default. With `EFLIP_REGION_BOOK=1` in `.env`, every full sync (the one that includes the market snapshot) ends with one snapshot of the destination region's whole order book, every type and both sides: `GET /markets/<region>/orders?order_type=all`, page by page, stored raw under `data/raw/public/` and folded into the per-type book logs as one sample per type (a type whose orders have all ended gets an empty sample). That gives types you do not trade a book log too. `node scripts/sync.js --region-book` takes one snapshot now and prints what it cost; `node scripts/sync.js --region-book-report` prints the last 24 hours of snapshots as a table, with totals and per-hour averages. For Domain a snapshot is about 194 pages, 388 `market-order` tokens (the bucket holds 12,000 per 15 minutes) and 46 MB of raw. The job waits while an export run is going, stops under 20 % of the bucket, takes the market lock (a watch tick that overlaps it reports its market step busy), and folds nothing from a snapshot with a page missing. Until the retention rule is set from the measurement, it keeps every raw page and every log sample indefinitely, so unset the variable if disk is tight. Do not run `--rebuild` while it is on: the book log rebuild does not replay regional snapshots yet, and it rewrites the log of any type that also has per-type raw from that alone.
+The destination book job is off by default. With `EFLIP_REGION_BOOK=1` in `.env`, every full sync (the one that includes the market snapshot) ends with one snapshot of the destination region's whole order book, every type and both sides: `GET /markets/<region>/orders?order_type=all`, page by page, stored raw under `data/raw/public/` and folded into the per-type book logs as one sample per type (a type whose orders have all ended gets an empty sample). That gives types you do not trade a book log too. `node scripts/sync.js --region-book` takes one snapshot now and prints what it cost; `node scripts/sync.js --region-book-report` prints the last 24 hours of snapshots as a table, with totals and per-hour averages. For Domain a snapshot is about 194 pages, 388 `market-order` tokens (the bucket holds 12,000 per 15 minutes) and 46 MB of raw. The job waits while an export run is going, stops under 20 % of the bucket, takes the market lock (a watch tick that overlaps it reports its market step busy), and folds nothing from a snapshot with a page missing. Set a storage budget with it (see Storage budget under Data): without one it keeps every raw page and every log sample, about 46 MB of raw an hour, and the pages' notice says so. The live book logs keep history after the budget has trimmed the raw behind it, so a rebuild from raw would shorten them to what raw still holds. `--rebuild` therefore leaves the book logs as they are and prints how far back their raw reaches (the oldest regional snapshot and per-type book still on disk). `--rebuild-book-logs` rebuilds them on purpose: it replays the regional snapshots whose pages are still in raw, in time order with the per-type checks, prints how many snapshots it could not replay because their pages were trimmed, and loses whatever history is older than the raw left. Use it to repair the logs, not as a routine step.
 
 ### Optional daily job (launchd)
 
@@ -130,15 +130,29 @@ Everything eflip stores is in `data/` in the checkout (`EFLIP_DATA_DIR` moves it
 - `raw/`: every ESI response body, verbatim, with its fetch time and the headers that matter. Ledgers and snapshots are derived from it.
 - `ledger/`: per-character ledgers and retained snapshots, derived from `raw/`.
 - `ledger/<characterId>/order-log.json`: each of your orders' price path, and how it ended once it has.
-- `ledger/market/<regionId>/<typeId>.json`: every competing order's price path, with the times the book was checked. The export page's observed figures are computed from these.
+- `ledger/market/<regionId>/<typeId>.json.gz`: every competing order's price path, with the times the book was checked. The export page's observed figures are computed from these.
 - `runs/`: export runs saved by "Copy orders" on `export.html`.
 - `esi-cache/`: per-route ETag and expiry bookkeeping, sync state and rate-limit state.
 - `esi-cache/public/_watch.json`: the last watch refresh, when it ran and what each character and type answered.
 - `esi-cache/public/_region-book.json`: the last destination book snapshot and how it ended. Each run also adds a `kind: "regionBook"` entry, with what it cost, to the public sync log under `raw/public/_sync-log/`.
+- `esi-cache/public/_storage.json`: the last storage budget run and the last trim. Each run also adds a `kind: "storage"` entry to the public sync log.
 - `locks/`: one lock per character and one for the market, so the server and the script never sync the same owner at once.
 - `samples/`: captured ESI responses used to write the test fixtures. The server does not read them.
 
 Tokens never reach the browser or git. Refresh tokens stay in `tokens.json`; access tokens stay in server memory. Neither is sent to a page or written under `public/` or `cache/`. The pages call only the task-specific `/api` routes, never a general ESI proxy.
+
+### Storage budget
+
+`EFLIP_STORAGE_BUDGET` in `.env` (for example `1GB`; decimal units, `500MB` or a number of bytes also work) is one allotment of disk for the bulky data that can be fetched again or regrows. Unset, nothing is ever trimmed. `EFLIP_STORAGE_SHARES` splits it, in percent, between four kinds; the defaults are `regionPages:40,bookLogs:45,typeBooks:10,runContexts:5`:
+
+- `regionPages`: the destination book job's raw order pages, trimmed a whole snapshot at a time.
+- `bookLogs`: the book logs under `ledger/market/`, trimmed by one time cutoff across all of them. Samples older than the cutoff go, and so do orders last seen before it; an order still listed keeps its last price before the cutoff, so its state at the cutoff is known.
+- `typeBooks`: the per-type books and histories under `raw/public/`, trimmed by one time cutoff across all of them. Files older than the cutoff go, except each book page's or history's newest file before it, which a later check that found that page unchanged still reads.
+- `runContexts`: the market context saved with each export run (the order books and history behind each row). The run's rows, settings and totals stay.
+
+The shares are soft: only the total is enforced, a kind under its share lends the room to the others, and when the total is over, the kind furthest over its share gives up its oldest piece first. Trimming never crosses these floors: the newest complete destination book snapshot, the newest raw file of each book or history (and of each regional page), the last 3 days of every book log, and the newest run's context. When the floors alone are over the budget, the pages' notice says by how much. Raw market pages and book logs are stored gzipped (about 6x and 10x smaller), and sizes are counted as they are on disk. Your characters' raw data and ledgers, the retained snapshots, the sync logs and `esi-cache/` are outside the budget and never trimmed.
+
+When a budget is set, it is applied after each destination book snapshot and after each market snapshot, under the market lock. What it trims is gone for good: the oldest book log history goes with the raw pages behind it (which went first), and a rebuild cannot bring it back. A lowered budget trims at the next run. `node scripts/sync.js --storage` applies the budget now and prints each kind's size against its share, the share of the budget used and what the last trim removed; without a budget it only measures. `node scripts/sync.js --storage-report` prints the same from the last run without running one. Neither needs credentials or calls ESI.
 
 ## Tests
 

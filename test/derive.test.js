@@ -173,7 +173,8 @@ test('a character with no raw data keeps the ledger it has', (t) => {
 	const result = derive.rebuildCharacter({ dataDir, characterId: 5 });
 	assert.deepEqual(result, { skipped: 'no raw data' });
 	assert.equal(fs.readFileSync(ledgerFile, 'utf8'), '[{"transaction_id":1}]\n');
-	assert.deepEqual(derive.rebuildAll({ dataDir, log: makeLog() }), { characters: {}, structures: null, bookLogs: 0 });
+	assert.deepEqual(derive.rebuildAll({ dataDir, log: makeLog() }), { characters: {}, structures: null, bookLogsRebuilt: false, bookLogs: 0, regionSnapshots: 0, regionSnapshotsSkipped: 0, bookChecksSkipped: 0, bookLogRawFrom: { regionSnapshotAt: null, typeBookAt: null } });
+	assert.deepEqual(derive.rebuildAll({ dataDir, log: makeLog(), bookLogs: true }), { characters: {}, structures: null, bookLogsRebuilt: true, bookLogs: 0, regionSnapshots: 0, regionSnapshotsSkipped: 0, bookChecksSkipped: 0, bookLogRawFrom: null });
 });
 
 test('a rebuild waits for a sync in progress instead of racing it', async (t) => {
@@ -241,12 +242,136 @@ test('a book log folded from rows in hand is the log foldBook builds, and the re
 	assert.deepEqual(expected.orders[1].path.map(entry => entry.price), [100, 99]);
 	assert.equal(expected.orders[2].lastSeen, '2026-11-20T12:00:00.000Z', 'an order left out of a later sample keeps its last sighting');
 
-	// a regional snapshot in raw: the pages are named `...-order-type-all[-page-n]`, which are not books of a type
+	// a regional snapshot in raw: the pages are named `...-order-type-all[-page-n]`, which are not books
+	// of a type; the rebuild replays them as the snapshot they were (and leaves 35, which has no raw)
 	ctx.fake.market.regionOrders.set(String(REGION), [row(11, 34, 5), row(12, 36, 7), row(13, 36, 8)]);
 	const run = await ctx.service.syncRegionBook({ regionId: REGION, force: true });
 	assert.equal(run.status, 'ok');
 	assert.equal(derive.bookPages(createRawStore({ dataDir: ctx.dataDir })).size, 0);
-	const before = fs.readFileSync(path.join(ctx.dataDir, 'ledger', 'market', String(REGION), '36.json.gz'));
-	assert.deepEqual(derive.rebuildBookLogs({ dataDir: ctx.dataDir }), { logs: 0 }, 'no per-type raw: nothing to rebuild, and no log is touched');
-	assert.deepEqual(fs.readFileSync(path.join(ctx.dataDir, 'ledger', 'market', String(REGION), '36.json.gz')), before);
+	const logDir = path.join(ctx.dataDir, 'ledger', 'market', String(REGION));
+	const before = Object.fromEntries(['34', '35', '36'].map(id => [id, fileText(path.join(logDir, `${id}.json.gz`))]));
+	assert.deepEqual(derive.rebuildBookLogs({ dataDir: ctx.dataDir }), { logs: 2, regionSnapshots: 1, regionSnapshotsSkipped: 0, checksSkipped: 0 }, '34 and 36 from the snapshot');
+	assert.deepEqual(Object.fromEntries(['34', '35', '36'].map(id => [id, fileText(path.join(logDir, `${id}.json.gz`))])), before);
+});
+
+// ---- the regional book: the rebuild replays the snapshots with the per-type checks
+
+const MARKET_REGION = 10000043;
+const bookRow = (id, typeId, price, o = {}) => ({ order_id: id, type_id: typeId, price, is_buy_order: false, volume_remain: 5, volume_total: 10, issued: '2026-11-20T10:00:00Z', duration: 90, range: 'region', location_id: 60008494, system_id: 30002187, min_volume: 1, ...o });
+
+// Per-type checks (the market step, a watch tick) and three regional snapshots, interleaved hour by
+// hour; the last hour runs the market step and the region book in the same millisecond.
+const bookHistory = async (ctx) => {
+	const { fake, clock, service } = ctx;
+	const R = MARKET_REGION;
+	fake.character(IVAN, { orders: [order(8001, { type_id: 35 })], assets: [asset(1, { type_id: 34 })] });
+	fake.market.orders.set(`${R}:35`, [bookRow(1, 35, 100), bookRow(2, 35, 110)]);
+	fake.market.orders.set(`${R}:34`, [bookRow(20, 34, 50)]);
+	await service.syncAll({ force: true, characterIds: [IVAN], regionBook: false });
+
+	// +1 h, snapshot A: 35 re-priced and with a buy order, 36 and 37 new to the logs, 34 has none
+	clock.advance(HOUR);
+	fake.market.regionOrders.set(String(R), [bookRow(1, 35, 99), bookRow(2, 35, 110), bookRow(3, 35, 90, { is_buy_order: true }), bookRow(4, 36, 200), bookRow(5, 37, 300)]);
+	const a = await service.syncRegionBook({ regionId: R });
+	assert.equal(a.status, 'ok', JSON.stringify(a.errors));
+
+	// +1 h, a watch tick: 35's own book changed again, now two pages
+	clock.advance(HOUR);
+	fake.market.orders.set(`${R}:35`, [bookRow(1, 35, 98), bookRow(2, 35, 110), bookRow(6, 35, 120)]);
+	const tick = await service.syncWatch({ regionIds: [R] });
+	assert.equal(tick.market.status, 'ok', JSON.stringify(tick.market));
+
+	// +1 h, snapshot B: 36 re-priced, 37 gone, 34 back, 38 new
+	clock.advance(HOUR);
+	fake.market.regionOrders.set(String(R), [bookRow(1, 35, 98), bookRow(2, 35, 110), bookRow(6, 35, 120), bookRow(4, 36, 190), bookRow(20, 34, 49), bookRow(8, 38, 7)]);
+	const b = await service.syncRegionBook({ regionId: R });
+	assert.equal(b.status, 'ok', JSON.stringify(b.errors));
+
+	// +1 h: the market step, then snapshot C (unchanged: 304s, the files B stored), at the same time
+	clock.advance(HOUR);
+	const both = await service.syncAll({ force: true, characterIds: [IVAN], regionBook: true });
+	assert.equal(both.market.status, 'ok', JSON.stringify(both.market));
+	assert.equal(both.regionBook.status, 'ok', JSON.stringify(both.regionBook));
+	assert.equal(both.regionBook.notModified, both.regionBook.pages);
+	return { a, b, c: both.regionBook };
+};
+
+test('the book log rebuild replays the regional snapshots in time order with the per-type checks: byte for byte what the jobs folded', async (t) => {
+	const ctx = setup(t);
+	const snaps = await bookHistory(ctx);
+	const marketDir = path.join(ctx.dataDir, 'ledger', 'market');
+	const incremental = treeOf(marketDir);
+	assert.deepEqual(Object.keys(incremental).sort(), [34, 35, 36, 37, 38].map(id => `${MARKET_REGION}/${id}.json.gz`));
+	const log35 = JSON.parse(incremental[`${MARKET_REGION}/35.json.gz`]);
+	assert.ok(log35.samples.length >= 6, 'per-type checks and snapshots both');
+	assert.ok(log35.samples.some(sample => sample.at === snaps.a.fetchedAt) && log35.samples.some(sample => sample.at === snaps.c.fetchedAt));
+	assert.deepEqual(JSON.parse(incremental[`${MARKET_REGION}/37.json.gz`]).samples.length, 3, 'A, then empty samples at B and C');
+
+	// (a) rebuilt in place
+	assert.deepEqual(derive.rebuildBookLogs({ dataDir: ctx.dataDir }), { logs: 5, regionSnapshots: 3, regionSnapshotsSkipped: 0, checksSkipped: 0 });
+	assert.deepEqual(treeOf(marketDir), incremental);
+
+	// (b) from raw alone
+	const fresh = tmpDataDir(t);
+	copyDir(path.join(ctx.dataDir, 'raw'), path.join(fresh, 'raw'));
+	const result = derive.rebuildAll({ dataDir: fresh, log: makeLog(), bookLogs: true });
+	assert.equal(result.bookLogs, 5);
+	assert.equal(result.regionSnapshots, 3);
+	assert.equal(result.regionSnapshotsSkipped, 0);
+	assert.deepEqual(treeOf(path.join(fresh, 'ledger', 'market')), incremental);
+});
+
+test('a regional snapshot whose pages were trimmed is skipped and counted, and the rebuild reproduces what raw still holds', async (t) => {
+	const ctx = setup(t);
+	const snaps = await bookHistory(ctx);
+	const raw = createRawStore({ dataDir: ctx.dataDir });
+	const entryA = raw.readSyncLog('public', snaps.a.syncedAt);
+	const pageOne = `markets-${MARKET_REGION}-orders-order-type-all`;
+	assert.ok(raw.remove('public', pageOne, entryA.pageStamps[0]) > 0);
+	const before37 = fs.readFileSync(path.join(ctx.dataDir, 'ledger', 'market', String(MARKET_REGION), '37.json.gz'));
+
+	const result = derive.rebuildAll({ dataDir: ctx.dataDir, log: makeLog(), bookLogs: true });
+	assert.equal(result.regionSnapshots, 2);
+	assert.equal(result.regionSnapshotsSkipped, 1);
+	assert.equal(result.bookLogs, 4, '34, 35, 36 and 38: 37 was only ever in snapshot A');
+	const ledger = require('../lib/ledger').createLedger({ dataDir: ctx.dataDir });
+	const at = (typeId) => ledger.readBookLog(MARKET_REGION, typeId).samples.map(sample => sample.at);
+	assert.ok(!at(35).includes(snaps.a.fetchedAt) && at(35).includes(snaps.b.fetchedAt), 'no sample from A');
+	assert.deepEqual(at(36), [snaps.b.fetchedAt, snaps.c.fetchedAt], '36 starts at B');
+	assert.equal(ledger.readBookLog(MARKET_REGION, 35).orders[3], undefined, 'the buy order only A saw');
+	assert.deepEqual(fs.readFileSync(path.join(ctx.dataDir, 'ledger', 'market', String(MARKET_REGION), '37.json.gz')), before37, 'a log with no raw left behind it is left as it was');
+
+	// a stored per-type check whose page file is gone is skipped too
+	const firstBook = raw.list('public', `markets-${MARKET_REGION}-orders-type-id-34`)[0];
+	raw.remove('public', `markets-${MARKET_REGION}-orders-type-id-34`, firstBook);
+	assert.equal(derive.rebuildBookLogs({ dataDir: ctx.dataDir }).checksSkipped, 1);
+	assert.ok(!at(34).includes(firstBook));
+});
+
+test('a plain rebuild leaves the book logs as they are and says how far back their raw reaches; asked, it rebuilds them', async (t) => {
+	const ctx = setup(t);
+	const snaps = await bookHistory(ctx);
+	const marketDir = path.join(ctx.dataDir, 'ledger', 'market');
+	const live = treeOf(marketDir);
+	const raw = createRawStore({ dataDir: ctx.dataDir });
+	// the budget trimmed snapshot A: the live logs still hold it, raw does not
+	raw.remove('public', `markets-${MARKET_REGION}-orders-order-type-all`, raw.readSyncLog('public', snaps.a.syncedAt).pageStamps[0]);
+	const fileTimes = () => fs.readdirSync(path.join(marketDir, String(MARKET_REGION))).map(name => fs.statSync(path.join(marketDir, String(MARKET_REGION), name)).mtimeMs);
+	const before = fileTimes();
+
+	const plain = derive.rebuildAll({ dataDir: ctx.dataDir, log: makeLog() });
+	assert.equal(plain.bookLogsRebuilt, false);
+	assert.deepEqual([plain.bookLogs, plain.regionSnapshots, plain.regionSnapshotsSkipped, plain.bookChecksSkipped], [0, 0, 0, 0]);
+	const oldestBook = raw.slugs('public').filter(slug => /^markets-\d+-orders(?:-page-\d+)?-type-id-\d+$/.test(slug)).flatMap(slug => raw.list('public', slug)).sort()[0];
+	assert.deepEqual(plain.bookLogRawFrom, { regionSnapshotAt: snaps.b.fetchedAt, typeBookAt: oldestBook }, 'B is the oldest snapshot left whole');
+	assert.ok(plain.bookLogRawFrom.typeBookAt < snaps.a.fetchedAt, 'the per-type books reach back to the first market step');
+	assert.deepEqual(treeOf(marketDir), live, 'not a byte changed');
+	assert.deepEqual(fileTimes(), before, 'not even rewritten');
+	assert.equal(plain.characters[IVAN].orderLog, 1, 'the character ledgers are rebuilt as before');
+
+	const asked = derive.rebuildAll({ dataDir: ctx.dataDir, log: makeLog(), bookLogs: true });
+	assert.equal(asked.bookLogsRebuilt, true);
+	assert.equal(asked.regionSnapshotsSkipped, 1);
+	assert.equal(asked.bookLogRawFrom, null);
+	assert.notDeepEqual(treeOf(marketDir), live, 'rebuilt from raw: A\'s samples are gone');
 });

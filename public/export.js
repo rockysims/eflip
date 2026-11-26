@@ -1590,10 +1590,11 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 
 	// Env notice (docs/order-monitor-plan.md, UI 2): a reminder while EFLIP_DATA_DIR or ESI_USER_AGENT
 	// is unset, and an error while the data directory cannot be written (env.dataDirError: characters
-	// cannot be linked and syncs cannot be saved there). It reads /api/config, which answers before SSO
-	// is set up, so it shows whether or not the app is configured. Built with textContent only; when
-	// the read fails, nothing is shown. The same sentences as results-shared.js's envNoticeLines.
-	const showEnvNotice = (env) => {
+	// cannot be linked and syncs cannot be saved there), then the storage line (storage-notice.js). It
+	// reads /api/config, which answers before SSO is set up, so it shows whether or not the app is
+	// configured. Built with textContent only; when the read fails, nothing is shown. The same
+	// sentences as results-shared.js's envNoticeLines.
+	const showEnvNotice = (env, config) => {
 		const box = $('#envNotice');
 		if (!box || !env || typeof env !== 'object') return;
 		const lines = [];
@@ -1606,12 +1607,17 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 			lines.push({ kind: 'note', text: `Synced data is in ${env.dataDir} because EFLIP_DATA_DIR is not set. Add EFLIP_DATA_DIR=/path to .env so every checkout shares one store.` });
 		}
 		if (env.userAgentFromEnv === false) lines.push({ kind: 'note', text: 'ESI_USER_AGENT is not set; CCP asks for a contact in it.' });
+		if (typeof storageNotice !== 'undefined') for (const { kind, text } of storageNotice.storageNoticeLines(config)) lines.push({ kind: kind === 'warn' ? 'note' : kind, text });
 		for (const { kind, text } of lines) {
 			const line = document.createElement('div');
-			if (kind === 'err') line.className = 'err';
-			const label = document.createElement('strong');
-			label.textContent = kind === 'err' ? 'Error:' : 'Note:';
-			line.append(label, ` ${text}`);
+			if (kind === 'err' || kind === 'info') line.className = kind;
+			if (kind === 'info') {
+				line.textContent = text;
+			} else {
+				const label = document.createElement('strong');
+				label.textContent = kind === 'err' ? 'Error:' : 'Note:';
+				line.append(label, ` ${text}`);
+			}
 			box.append(line);
 		}
 	};
@@ -1622,7 +1628,7 @@ const runReport = async ({ startStationKey, endStationKey, alwaysShowIds = new S
 	(async () => {
 		try {
 			const config = await (await fetch('/api/config')).json();
-			showEnvNotice(config.env);
+			showEnvNotice(config.env, config);
 			if (!config.configured) return;
 			const status = await (await fetch('/api/sync')).json();
 			if (!exportPersist.syncIsStale(status, Date.now())) return;

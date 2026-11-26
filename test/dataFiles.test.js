@@ -108,3 +108,31 @@ test('a damaged gzipped record throws on read, as a damaged plain one does', (t)
 	fs.writeFileSync(path.join(dir, '2026-11-20T13-00-00-000Z.json.gz'), zlib.gzipSync('{not json'));
 	assert.throws(() => raw.read('public', BOOK, '2026-11-20T13:00:00.000Z'), SyntaxError);
 });
+
+test('files lists a route\'s files with their sizes, both forms of a stamp apart; remove deletes a public market record in both forms and nothing else', (t) => {
+	const dataDir = tmpDataDir(t);
+	const raw = createRawStore({ dataDir });
+	raw.write('public', BOOK, record('2026-11-20T01:00:00.000Z', [1]));
+	raw.write('public', BOOK, record('2026-11-20T02:00:00.000Z', [2]));
+	// the same stamp held plain too (written before the gzip rule)
+	const plain = path.join(raw.root, 'public', BOOK, '2026-11-20T01-00-00-000Z.json');
+	fs.writeFileSync(plain, JSON.stringify(record('2026-11-20T01:00:00.000Z', [1])) + '\n');
+	const files = raw.files('public', BOOK);
+	assert.deepEqual(files.map(file => [file.stamp, path.basename(file.file)]), [
+		['2026-11-20T01:00:00.000Z', '2026-11-20T01-00-00-000Z.json'],
+		['2026-11-20T01:00:00.000Z', '2026-11-20T01-00-00-000Z.json.gz'],
+		['2026-11-20T02:00:00.000Z', '2026-11-20T02-00-00-000Z.json.gz'],
+	]);
+	for (const file of files) assert.equal(file.bytes, fs.statSync(file.file).size);
+	assert.deepEqual(raw.files('public', 'markets-1-history-type-id-2'), [], 'no such route');
+
+	const freed = raw.remove('public', BOOK, '2026-11-20T01:00:00.000Z');
+	assert.equal(freed, files[0].bytes + files[1].bytes);
+	assert.deepEqual(raw.list('public', BOOK), ['2026-11-20T02:00:00.000Z']);
+	assert.equal(raw.remove('public', BOOK, '2026-11-20T01:00:00.000Z'), 0, 'gone already');
+
+	raw.write(CHAR, 'wallet', record('2026-11-20T01:00:00.000Z', 5));
+	assert.throws(() => raw.remove(CHAR, 'wallet', '2026-11-20T01:00:00.000Z'), /only public market records/);
+	assert.throws(() => raw.remove('public', 'universe-structures-1', '2026-11-20T01:00:00.000Z'), /only public market records/);
+	assert.ok(raw.fileFor(CHAR, 'wallet', '2026-11-20T01:00:00.000Z'));
+});

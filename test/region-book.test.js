@@ -471,3 +471,50 @@ test('the market step keeps reading its regions from the newest market entry, no
 	assert.deepEqual(read.regionIds, [REGION], 'the newest public log entry is a regional book run');
 	assert.equal(read.types[35][REGION].orders.rows[0].order_id, 1);
 });
+
+test('with a storage budget a run that folded ends with the storage step: the older snapshot\'s pages go, its entry is marked, the newest snapshot stays whole', async (t) => {
+	const env = {};
+	const { dataDir, fake, clock, service } = setup(t, { env });
+	fake.market.regionOrders.set(String(REGION), SNAPSHOT_A);
+	const first = await service.syncRegionBook({ regionId: REGION, force: true });
+	assert.equal(first.status, 'ok');
+	assert.equal(first.storage, undefined, 'no budget: no storage step');
+
+	env.EFLIP_STORAGE_BUDGET = '1';
+	clock.advance(HOUR);
+	fake.market.regionOrders.set(String(REGION), SNAPSHOT_B);
+	const second = await service.syncRegionBook({ regionId: REGION });
+	assert.equal(second.status, 'ok', JSON.stringify(second.errors));
+	const step = second.storage;
+	assert.equal(step.status, 'ok', JSON.stringify(step));
+	assert.equal(step.reason, 'regionBook');
+	assert.equal(step.trims.regionPages.snapshots, 1);
+	assert.equal(step.trims.regionPages.files, 2, 'both pages of the first snapshot changed, so both were its own');
+	assert.equal(step.trims.bookLogs.pieces, 0, 'the logs hold one hour: all inside the 3-day floor');
+	assert.ok(step.unmet > 0);
+	const [one, two] = regionBookEntries(dataDir);
+	assert.ok(typeof one.trimmedAt === 'string' && one.trimmedAt <= step.syncedAt, 'marked when trimmed');
+	assert.equal(two.trimmedAt, undefined);
+	assert.deepEqual(rawNames(dataDir, SLUG).length, 1);
+	assert.deepEqual(rawNames(dataDir, `${SLUG}-page-2`).length, 1);
+	const kept = [rawNames(dataDir, SLUG)[0], rawNames(dataDir, `${SLUG}-page-2`)[0]].map(name => name.replace(/T(\d\d)-(\d\d)-(\d\d)-(\d{3})Z\.json(?:\.gz)?$/, 'T$1:$2:$3.$4Z'));
+	assert.deepEqual(kept, two.pageStamps, 'the newest snapshot\'s pages');
+	const raw = createRawStore({ dataDir });
+	const storageEntries = raw.syncLogStamps('public').map(stamp => raw.readSyncLog('public', stamp)).filter(entry => entry.kind === 'storage');
+	assert.equal(storageEntries.length, 1);
+	assert.equal(storageEntries[0].reason, 'regionBook');
+
+	// a run that is skipped does nothing more
+	const skipped = await service.syncRegionBook({ regionId: REGION });
+	assert.equal(skipped.status, 'skipped');
+	assert.equal(skipped.storage, undefined);
+	// the next hour, unchanged (304s): it names the newest files again, and the storage step keeps them
+	clock.advance(HOUR);
+	fake.reset();
+	const third = await service.syncRegionBook({ regionId: REGION });
+	assert.equal(third.status, 'ok');
+	assert.equal(third.notModified, 2);
+	assert.equal(third.storage.trims.regionPages.pieces, 0, 'the second snapshot\'s files are the third\'s too');
+	assert.deepEqual(rawNames(dataDir, SLUG).length, 1);
+	assert.equal(bookLog(dataDir, 35).samples.length, 3);
+});

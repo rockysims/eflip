@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
 const { spawnSync } = require('node:child_process');
-const { main, parseArgs, formatSummary, formatWatch, formatRegionBook, formatRegionBookReport, hasFailure, watchFailed, UsageError } = require('../scripts/sync');
+const { main, parseArgs, formatSummary, formatWatch, formatRegionBook, formatRegionBookReport, formatStorage, hasFailure, watchFailed, UsageError } = require('../scripts/sync');
 const { acquireLock, createRawStore } = require('../lib/dataFiles');
 const { createTokenStore } = require('../lib/tokenStore');
 const {
@@ -42,11 +42,16 @@ const setup = (t, { link = true } = {}) => {
 };
 
 test('arguments: characters and regions repeat, flags combine, mistakes are usage errors', () => {
-	assert.deepEqual(parseArgs([]), { characterIds: null, regionIds: null, market: true, marketOnly: false, rebuild: false, watch: false, regionBook: false, regionBookReport: false, help: false, maxTypes: undefined });
+	assert.deepEqual(parseArgs([]), { characterIds: null, regionIds: null, market: true, marketOnly: false, rebuild: false, rebuildBookLogs: false, watch: false, regionBook: false, regionBookReport: false, storage: false, storageReport: false, help: false, maxTypes: undefined });
 	const full = parseArgs(['--character', '1', '--character', '2', '--region', '10000043', '--no-market', '--max-types', '50']);
 	assert.deepEqual([full.characterIds, full.regionIds, full.market, full.maxTypes], [[1, 2], [10000043], false, 50]);
 	assert.equal(parseArgs(['--market-only']).marketOnly, true);
 	assert.equal(parseArgs(['--rebuild']).rebuild, true);
+	assert.deepEqual([parseArgs(['--rebuild-book-logs']).rebuild, parseArgs(['--rebuild-book-logs']).rebuildBookLogs], [false, true]);
+	assert.deepEqual([parseArgs(['--rebuild', '--rebuild-book-logs']).rebuild, parseArgs(['--rebuild', '--rebuild-book-logs']).rebuildBookLogs], [true, true]);
+	for (const bad of [['--watch', '--rebuild-book-logs'], ['--region-book', '--rebuild-book-logs'], ['--storage', '--rebuild-book-logs'], ['--region-book-report', '--rebuild-book-logs']]) {
+		assert.throws(() => parseArgs(bad), UsageError, bad.join(' '));
+	}
 	const watch = parseArgs(['--watch', '--character', '1', '--region', '10000043']);
 	assert.deepEqual([watch.watch, watch.characterIds, watch.regionIds], [true, [1], [10000043]], '--watch goes with --character and --region');
 	for (const bad of [['--bogus'], ['--character'], ['--character', 'abc'], ['--character', '0'], ['--market-only', '--no-market'], ['--region', '-3'], ['--watch', '--rebuild'], ['--watch', '--market-only'], ['--watch', '--no-market'], ['--watch', '--max-types', '5']]) {
@@ -259,11 +264,20 @@ test('--rebuild also rebuilds the order log and the book logs, and lists what th
 	const before = texts();
 	fs.rmSync(path.join(ctx.dataDir, 'ledger'), { recursive: true });
 	ctx.lines.length = 0;
-	assert.equal(await ctx.run(['--rebuild'], { env: {} }), 0);
+	assert.equal(await ctx.run(['--rebuild', '--rebuild-book-logs'], { env: {} }), 0);
 	assert.deepEqual(texts(), before, 'both logs, byte for byte (the book log\'s text inside its gzip)');
 	assert.match(ctx.lines.join('\n'), /90000001: .*, 1 logged orders/);
-	assert.match(ctx.lines.join('\n'), /book logs: 1/);
+	assert.match(ctx.lines.join('\n'), /^book logs: 1$/m);
 	assert.ok(!/warning:/.test(ctx.lines.join('\n')));
+
+	// a plain --rebuild leaves the book log alone and says how far back its raw reaches
+	fs.rmSync(path.dirname(bookLog), { recursive: true });
+	ctx.lines.length = 0;
+	assert.equal(await ctx.run(['--rebuild'], { env: {} }), 0);
+	assert.ok(!fs.existsSync(bookLog), 'not rebuilt');
+	assert.match(ctx.lines.join('\n'), /90000001: .*, 1 logged orders/);
+	assert.match(ctx.lines.join('\n'), /^book logs left as they are: raw reaches back to 2026-11-20 12:00 UTC \(the oldest per-type book\); pass --rebuild-book-logs to rebuild them from raw and lose what is older$/m);
+	assert.ok(!/^book logs: /m.test(ctx.lines.join('\n')));
 
 	// a raw answer in which an order's volume rose: recorded, and reported
 	createRawStore({ dataDir: ctx.dataDir }).write(IVAN, 'orders', { fetchedAt: '2026-11-20T15:00:00.000Z', url: 'x', status: 200, headers: {}, body: [order(8001, { type_id: 35, volume_remain: 9 })] });
@@ -460,4 +474,126 @@ test('formatRegionBookReport averages over the hours the snapshots span, and cop
 	assert.match(two, /per hour \(11\.0 h\)\s+2\s+4\s+0\.4\s+\+0\.2\s+1 s/);
 	// a log that shrank shows its sign
 	assert.match(formatRegionBookReport([entry('2026-11-20T10:00:00.000Z', { logBytesBefore: 3000000, logBytesAfter: 1000000 })], { now: Date.UTC(2026, 10, 20, 11, 0, 0) }), /-2\.0/);
+});
+
+// ---- --storage and --storage-report
+
+test('arguments: --storage and --storage-report take no other flag', () => {
+	assert.equal(parseArgs(['--storage']).storage, true);
+	assert.equal(parseArgs(['--storage-report']).storageReport, true);
+	for (const bad of [
+		['--storage', '--storage-report'], ['--storage', '--rebuild'], ['--storage', '--watch'], ['--storage', '--region-book'], ['--storage', '--region', '1'],
+		['--storage', '--character', '1'], ['--storage', '--no-market'], ['--storage-report', '--market-only'], ['--storage-report', '--max-types', '3'], ['--storage-report', '--region-book-report'],
+	]) {
+		assert.throws(() => parseArgs(bad), UsageError, bad.join(' '));
+	}
+});
+
+test('--storage runs the budget once with no credentials and no ESI call, printing each kind against its share and the last trim; --storage-report prints the last run without running', async (t) => {
+	const ctx = setup(t);
+	ctx.fake.pageSize = 2;
+	ctx.fake.market.regionOrders.set(String(REGION), regionBookRows([34, 35, 36]));
+	assert.equal(await ctx.run(['--region-book', '--region', String(REGION)]), 0, ctx.errors.join('\n'));
+	ctx.clock.advance(HOUR);
+	ctx.fake.market.regionOrders.set(String(REGION), regionBookRows([34, 35, 36], 99));
+	assert.equal(await ctx.run(['--region-book', '--region', String(REGION)]), 0, ctx.errors.join('\n'));
+	ctx.fake.reset();
+
+	// nothing has run yet
+	ctx.lines.length = 0;
+	assert.equal(await ctx.run(['--storage-report'], { env: {} }), 0);
+	assert.match(ctx.lines.join('\n'), /^storage \(last run\): no storage run yet/);
+
+	// no budget: it measures and says so
+	ctx.lines.length = 0;
+	assert.equal(await ctx.run(['--storage'], { env: {} }), 0, ctx.errors.join('\n'));
+	const bare = ctx.lines.join('\n');
+	assert.match(bare, /^storage: no budget \(EFLIP_STORAGE_BUDGET is not set\), so nothing is trimmed$/m);
+	assert.match(bare, /^  kind +on disk$/m);
+	assert.match(bare, /^  regionPages +\d+(\.\d+)? (bytes|KB)$/m);
+	assert.match(bare, /^  total +\d/m);
+
+	// a budget the first snapshot's pages put over
+	ctx.lines.length = 0;
+	assert.equal(await ctx.run(['--storage'], { env: { EFLIP_STORAGE_BUDGET: '1' } }), 0, ctx.errors.join('\n'));
+	const text = ctx.lines.join('\n');
+	assert.match(text, /^storage: \d+ % of the 1 bytes budget used, measured 2026-11-20 13:00:00 UTC \(after a request\)$/m);
+	assert.match(text, /^  kind +on disk +share +share of budget$/m);
+	assert.match(text, /^  regionPages +\S+ (bytes|KB) +40 % +0 bytes$/m);
+	assert.match(text, /^  bookLogs +\S+ (bytes|KB) +45 % +0 bytes$/m);
+	assert.match(text, /^  trimmed \S+ (bytes|KB) to \S+ (bytes|KB)$/m);
+	assert.match(text, /^  last trim 2026-11-20 13:00:00 UTC: regionPages 1 snapshot, \S+ (bytes|KB)$/m);
+	assert.match(text, /^  over budget by \S+ (bytes|KB): nothing left to trim above the floors$/m);
+	assert.equal(ctx.fake.calls.length, 0, 'no ESI call');
+
+	// the report reads the last run back, and a run with nothing left to trim keeps the last trim
+	ctx.clock.advance(MINUTE);
+	ctx.lines.length = 0;
+	assert.equal(await ctx.run(['--storage'], { env: { EFLIP_STORAGE_BUDGET: '1' } }), 0);
+	assert.ok(!/^  trimmed /m.test(ctx.lines.join('\n')), 'nothing trimmed this time');
+	assert.match(ctx.lines.join('\n'), /^  last trim 2026-11-20 13:00:00 UTC: regionPages 1 snapshot/m);
+	ctx.lines.length = 0;
+	assert.equal(await ctx.run(['--storage-report'], { env: {} }), 0);
+	const report = ctx.lines.join('\n');
+	assert.match(report, /^storage \(last run\): \d+ % of the 1 bytes budget used, measured 2026-11-20 13:01:00 UTC \(after a request\)$/m);
+	assert.match(report, /^  last trim 2026-11-20 13:00:00 UTC: regionPages 1 snapshot/m);
+
+	// the market lock held: busy, exit 1
+	const release = acquireLock(ctx.dataDir, 'market');
+	ctx.lines.length = 0;
+	assert.equal(await ctx.run(['--storage'], { env: { EFLIP_STORAGE_BUDGET: '1' } }), 1);
+	assert.equal(ctx.lines.join('\n'), 'storage: busy - another market sync is running');
+	release();
+
+	// a plain --rebuild leaves the book logs as they are and names the oldest raw behind them
+	const logDir = path.join(ctx.dataDir, 'ledger', 'market', String(REGION));
+	const logsBefore = fs.readdirSync(logDir).map(name => fs.readFileSync(path.join(logDir, name)).toString('base64'));
+	ctx.lines.length = 0;
+	assert.equal(await ctx.run(['--rebuild'], { env: {} }), 0);
+	assert.deepEqual(ctx.lines, [
+		'structures: none in raw',
+		'book logs left as they are: raw reaches back to 2026-11-20 13:00 UTC (the oldest regional snapshot); pass --rebuild-book-logs to rebuild them from raw and lose what is older',
+	]);
+	assert.deepEqual(fs.readdirSync(logDir).map(name => fs.readFileSync(path.join(logDir, name)).toString('base64')), logsBefore);
+
+	// --rebuild-book-logs rebuilds them, and says what it could not replay
+	ctx.lines.length = 0;
+	assert.equal(await ctx.run(['--rebuild-book-logs'], { env: {} }), 0);
+	assert.deepEqual(ctx.lines, ['book logs: 3 (1 regional snapshot replayed)', '1 regional snapshot not replayed: pages trimmed'], 'the book logs alone: no character line');
+});
+
+test('formatStorage reads a run: the table against the shares, the trim per kind, unmet; formatSummary carries it', () => {
+	const run = {
+		status: 'ok', syncedAt: '2026-11-25T12:00:00.000Z', reason: 'regionBook', budgetBytes: 1e9,
+		shares: { regionPages: 40, bookLogs: 45, typeBooks: 10, runContexts: 5 },
+		usage: { regionPages: 380e6, bookLogs: 200e6, typeBooks: 30e6, runContexts: 10e6 },
+		totalBefore: 640e6, totalAfter: 620e6, unmet: 0,
+		trims: {
+			regionPages: { pieces: 2, snapshots: 2, strayFiles: 0, files: 388, bytesFreed: 15.4e6 },
+			bookLogs: { pieces: 120, cutoffAt: '2026-11-20T00:00:00.000Z', logs: 120, samplesDropped: 240, entriesDropped: 1000, ordersDropped: 30, bytesFreed: 4.6e6 },
+			typeBooks: { pieces: 0, files: 0, bytesFreed: 0 },
+			runContexts: { pieces: 1, runs: 1, bytesFreed: 2e5 },
+		},
+	};
+	run.lastTrim = { at: run.syncedAt, trims: run.trims };
+	assert.equal(formatStorage(run), [
+		'storage: 62 % of the 1 GB budget used, measured 2026-11-25 12:00:00 UTC (after the region book)',
+		'  kind         on disk  share  share of budget',
+		'  regionPages   380 MB   40 %           400 MB',
+		'  bookLogs      200 MB   45 %           450 MB',
+		'  typeBooks      30 MB   10 %           100 MB',
+		'  runContexts    10 MB    5 %            50 MB',
+		'  total         620 MB',
+		'  trimmed 640 MB to 620 MB',
+		'  last trim 2026-11-25 12:00:00 UTC: regionPages 2 snapshots, 15.4 MB; bookLogs 120 logs cut before 2026-11-20 00:00:00 UTC (240 samples, 1000 path entries, 30 orders dropped), 4.6 MB; runContexts 1 run, 200 KB',
+	].join('\n'));
+	const over = formatStorage({ ...run, trims: {}, unmet: 25e6, lastTrim: null, reason: 'market' });
+	assert.match(over, /\(after the market snapshot\)$/m);
+	assert.match(over, /^  last trim: none yet$/m);
+	assert.match(over, /^  over budget by 25 MB: nothing left to trim above the floors$/m);
+	assert.equal(formatStorage({ status: 'failed', reason: 'disk on fire' }), 'storage: failed - disk on fire');
+	assert.match(formatStorage({ status: 'no-budget', budgetBytes: null, error: 'storage shares: they add up to 110 %, more than 100', usage: run.usage }), /^storage: no budget \(EFLIP_STORAGE_BUDGET or EFLIP_STORAGE_SHARES did not parse: storage shares: they add up to 110 %, more than 100\), so nothing is trimmed/);
+	assert.match(formatSummary({ characters: [], market: null, storage: run }), /^storage: 62 % of the 1 GB budget used/m);
+	assert.equal(hasFailure({ characters: [], market: null, storage: run }), false);
+	assert.equal(hasFailure({ characters: [], market: null, storage: { status: 'failed', reason: 'x' } }), true, 'a storage step that failed fails the run');
 });

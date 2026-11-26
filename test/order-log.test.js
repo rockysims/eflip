@@ -189,7 +189,7 @@ test('book checks come from the sync logs and the raw page files: new entries, o
 	// and an entry that failed to answer is not a sample
 	raw.writeSyncLog('public', { syncedAt: T(90), finishedAt: T(90), source: 'watch', regionIds: [REGION], typeIds: [34], status: 'partial', calls: 1, books: [{ regionId: REGION, typeId: 34, outcome: 'error', at: T(90), pages: 1, stamps: {}, history: null }] });
 
-	assert.deepEqual(derive.buildBookLogs({ raw, ledger }), { logs: 1 }, 'type 35 and 99 have no raw book: no log without one');
+	assert.deepEqual(derive.buildBookLogs({ raw, ledger }), { logs: 1, regionSnapshots: 0, regionSnapshotsSkipped: 0, checksSkipped: 0 }, 'type 35 and 99 have no raw book: no log without one');
 	const log = ledger.readBookLog(REGION, 34);
 	assert.deepEqual(log.samples, [
 		{ at: T(0).replace('.000Z', '.100Z'), stored: true },
@@ -375,8 +375,8 @@ test('re-deriving from raw gives byte-for-byte the order log and the book logs t
 	assert.equal(partial.pages, 3);
 	assert.ok(entries.some(entry => entry.source === 'watch') && entries.some(entry => entry.source === 'market'));
 
-	// (a) rebuilt in place
-	const result = derive.rebuildAll({ dataDir, log: makeLog() });
+	// (a) rebuilt in place (the book logs only when asked)
+	const result = derive.rebuildAll({ dataDir, log: makeLog(), bookLogs: true });
 	assert.equal(result.bookLogs, 3);
 	assert.equal(result.characters[IVAN].orderLog, 3);
 	assert.deepEqual(result.characters[IVAN].orderLogWarnings, []);
@@ -385,7 +385,7 @@ test('re-deriving from raw gives byte-for-byte the order log and the book logs t
 	// (b) from raw alone
 	const fresh = tmpDataDir(t);
 	fs.cpSync(path.join(dataDir, 'raw'), path.join(fresh, 'raw'), { recursive: true });
-	derive.rebuildAll({ dataDir: fresh, log: makeLog() });
+	derive.rebuildAll({ dataDir: fresh, log: makeLog(), bookLogs: true });
 	assert.deepEqual(treeOf(path.join(fresh, 'ledger')), incremental);
 });
 
@@ -427,7 +427,7 @@ test('logs that predate the watch are built from raw and the old sync logs first
 	assert.deepEqual(createLedger({ dataDir }).readBookLog(REGION, 34).samples.map(sample => sample.stored), [true, false, false]);
 
 	const incremental = treeOf(path.join(dataDir, 'ledger'));
-	derive.rebuildAll({ dataDir, log: makeLog() });
+	derive.rebuildAll({ dataDir, log: makeLog(), bookLogs: true });
 	assert.deepEqual(treeOf(path.join(dataDir, 'ledger')), incremental);
 });
 
@@ -437,5 +437,5 @@ test('a rebuild waits for the market lock like it waits for a character\'s', asy
 	const hold = acquireLock(ctx.dataDir, 'market');
 	assert.throws(() => derive.rebuildBookLogs({ dataDir: ctx.dataDir }), /market is being synced/);
 	hold();
-	assert.deepEqual(derive.rebuildBookLogs({ dataDir: ctx.dataDir }), { logs: 0 });
+	assert.deepEqual(derive.rebuildBookLogs({ dataDir: ctx.dataDir }), { logs: 0, regionSnapshots: 0, regionSnapshotsSkipped: 0, checksSkipped: 0 });
 });
