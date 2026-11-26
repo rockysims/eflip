@@ -7,7 +7,7 @@ are concrete. Review gate: end of P1.2 (a browser check with Rocky of the toolti
 ## Scope
 
 Compute the observed figures of plan decision 3 from the book logs that already exist
-(`data/ledger/market/<regionId>/<typeId>.json`), serve them, blend them into the estimate per
+(`data/ledger/market/<regionId>/<typeId>.json.gz`), serve them, blend them into the estimate per
 decision 1, show "avg days idle", mark blended cells, save the observed figures with runs. Until
 M2 runs, only types in play (listed, in transit, held, sold in 90 days) have coverage; the rest of
 the page is unchanged by construction (`f = 0`).

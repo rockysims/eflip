@@ -31,17 +31,18 @@ Domain all orders: 194 pages, ~238 KB each, 388 tokens a snapshot; sell-only pag
 
 ## P2.1 — the job behind a flag, with measurement (sonnet, mirrors `doSyncMarket`)
 
-- `lib/sync.js`: `doSyncRegionBook({ regionId, stationId })`: fetch `/markets/<regionId>/orders?
-  order_type=sell&page=N` for every page through `esi.get` (raw-first, ETag aware), under the
-  `market` lock, deferring while an export run is in progress exactly as `doSyncMarket` does,
-  pausing under 20 % remaining. Then, per type present in the pages (station orders only), call
-  `derive.updateBookLog` with `check = {at: fetchedAt, stored: true, rows}` where `rows` are that
-  type's region orders from the snapshot (the same shape the per-type books give, so `foldBook` is
-  unchanged); types with a log but no orders in the snapshot get a stored check with empty rows
-  (their orders ended). Record per snapshot in the public sync log: pages, tokens used, bytes,
-  types touched, log bytes before and after, elapsed.
-- Raw slug: `markets-<regionId>-orders-sell-page-<n>` under `data/raw/public/`, as `esi.js` names
-  things; `esi.js` state per page as usual.
+- `lib/sync.js`: `doSyncRegionBook({ regionId, force, defer })`: fetch `/markets/<regionId>/orders?
+  order_type=all&page=N` for every page through `esi.get` (raw-first, ETag aware), under the
+  `market` lock, pausing under 20 % remaining. Nothing waits for an export run; only a
+  `syncAll({market: false})` (a caller keeping off the market-order bucket) answers `deferred`.
+  Then, per type present in the pages (every station, both sides), call
+  `derive.updateBookLogWithRows` with that type's region orders from the snapshot as one stored
+  check (the same shape the per-type books give, so `foldBook` is unchanged); types with a log but
+  no orders in the snapshot get a stored check with empty rows (their orders ended). Record per
+  snapshot in the public sync log: pages, tokens used, bytes, types touched, log bytes before and
+  after, elapsed.
+- Raw slug: `markets-<regionId>-orders-order-type-all[-page-<n>]` under `data/raw/public/`, as
+  `esi.js` names things; `esi.js` state per page as usual.
 - `scripts/sync.js --region-book` and `POST /api/sync` body flag `regionBook: true`; the hourly
   schedule only when `EFLIP_REGION_BOOK=1` for this phase.
 - Tests (`test/sync.test.js` style, fake fetch): pages fold into logs; a type absent from the

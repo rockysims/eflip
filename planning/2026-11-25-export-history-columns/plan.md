@@ -115,8 +115,9 @@ raw; 358 book logs on this machine), Rocky's answers and the rough edges.
    the last 3 days of every log. Book logs and raw pages are gzipped (about 10x and 6x). Character
    data stays outside the budget. The rebuild-from-raw invariant holds for the raw the budget still
    holds; the folded logs are the durable record beyond it. P2.1 measures first.
-9. **M2 budget and manners.** At most ~400 `market-order` tokens a snapshot; the job defers while
-   an export run is going (as the market sync does) and pauses under 20 % remaining.
+9. **M2 budget and manners.** At most ~400 `market-order` tokens a snapshot; the job does not wait
+   for an export run (the server cannot tell one is going; only a sync posted with `market: false`
+   answers `deferred`) and pauses under 20 % remaining.
 10. **Coordination.** M2 changes files the order-monitor session is still changing; it starts
     after that session's Phases 3–4 land on `feature/export-rework`, or is handed to that session.
 

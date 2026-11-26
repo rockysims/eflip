@@ -10,6 +10,8 @@
 //                                           that draws on the market-order bucket
 //   node scripts/sync.js --market-only      only the market snapshot
 //   node scripts/sync.js --region 10000043  snapshot that region's market (repeatable)
+//   node scripts/sync.js --max-types 500    check at most that many types in the market snapshot
+//                                           (default 300, split between the regions)
 //   node scripts/sync.js --rebuild          rebuild the character ledgers (and structure names) from
 //                                           data/raw/; no ESI, no credentials. The book logs are left
 //                                           as they are: once the storage budget has trimmed raw, the
@@ -45,6 +47,7 @@
 //                                           the share of the budget used and the last trim. Without a
 //                                           budget it only measures. No ESI, no credentials, no other flag.
 //   node scripts/sync.js --storage-report   the same from the last storage run, without running one.
+//   node scripts/sync.js --help             the usage lines (also -h); exit code 0.
 //
 // Always syncs (the page's "more than an hour ago" test is the server's business), but every route
 // still honours its Expires, so a run inside the cache windows makes no call. The regional book

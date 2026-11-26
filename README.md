@@ -1,6 +1,6 @@
 # eflip
 
-eflip is a local EVE Online trading tool with three pages: `export.html` plans an export run, `results.html` shows what that run really did, from your own wallet, orders, assets and contracts, and `orders.html` shows what has sold recently and which of your sell orders are worth updating (live while open, refreshing every five minutes). An Express server on your machine syncs that data from ESI and keeps the EVE tokens to itself; the pages only call its `/api` routes. It is meant to run on your own machine only; there is no hosted deployment.
+eflip is a local EVE Online trading tool with four pages: `export.html` plans an export run, `results.html` shows what that run really did, from your own wallet, orders, assets and contracts, `insights.html` charts the same results data, and `orders.html` shows what has sold recently and which of your sell orders are worth updating (live while open, refreshing every five minutes). An Express server on your machine syncs that data from ESI and keeps the EVE tokens to itself: the pages read your synced data only through its `/api` routes, and fetch public market data and type names from ESI and Fuzzwork directly, cached through its `/file` routes, so no token ever reaches a page. It is meant to run on your own machine only; there is no hosted deployment.
 
 ## Setup
 
@@ -21,7 +21,7 @@ eflip is a local EVE Online trading tool with three pages: `export.html` plans a
 4. Copy the application's Client ID and Secret Key into `.env` as `EVE_CLIENT_ID` and `EVE_CLIENT_SECRET`.
 5. Set `ESI_USER_AGENT` to the app name, version and your main character's name, for example `eflip/1.0 (Your Character)`. CCP asks for a contact in every ESI request.
 
-Without `EVE_CLIENT_ID` and `EVE_CLIENT_SECRET`, the `/sso` and `/api/characters` routes answer 503 "not configured". The optional keys (`EFLIP_DATA_DIR`, `HOST`, `PORT`, `ESI_COMPAT_DATE`) are explained in `.env.example`.
+Without `EVE_CLIENT_ID` and `EVE_CLIENT_SECRET`, every `/sso` route and every `/api` route that reads synced data (characters, sync, watch, order-log, ledger, snapshots, market, market-stats, sold-before) answers 503 "not configured"; `/api/config`, `/api/health` and `/api/runs` keep working. The optional keys (`EFLIP_DATA_DIR`, `HOST`, `PORT`, `EFLIP_REGION_BOOK`, `EFLIP_STORAGE_BUDGET`, `EFLIP_STORAGE_SHARES`, `ESI_COMPAT_DATE`) are explained in `.env.example`.
 
 `EFLIP_DATA_DIR` sets one data directory that every checkout can share; without it, the synced data is in `data/` in this checkout. `ESI_USER_AGENT` (step 5) is the contact CCP asks for in every ESI request. The pages show a note while either one is unset; both still work without them.
 
@@ -31,7 +31,7 @@ Without `EVE_CLIENT_ID` and `EVE_CLIENT_SECRET`, the `/sso` and `/api/characters
 npm start
 ```
 
-Then open http://localhost:5001/export.html (export planning), http://localhost:5001/results.html (trade results) or http://localhost:5001/orders.html (order monitor).
+Then open http://localhost:5001/export.html (export planning), http://localhost:5001/results.html (trade results), http://localhost:5001/insights.html (charts of the trade results) or http://localhost:5001/orders.html (order monitor).
 
 The server binds `127.0.0.1:5001` by default. To change `HOST` or `PORT`, set them in `.env` and make the callback URL match (`EVE_CALLBACK_URL` and the developer application).
 
@@ -52,7 +52,7 @@ Each character's chip shows its status (last sync, missing scope, or re-link nee
 `orders.html` gives each open sell order of your linked characters a verdict, with the figures behind it:
 
 - `top`: nothing is ahead of the order at your station.
-- `leave`: the orders ahead clear on their own, in less time than the leave threshold or in no more than one typical sale.
+- `leave`: the orders ahead clear on their own: in less time than the leave threshold, or, while days behind is under the undercut threshold, in no more than one typical sale.
 - `maybe`: between the others, with the numbers shown.
 - `undercut`: the orders ahead would take days to clear, so matching the best price is worth a look.
 - `reconsider`: matching the best price would sell below cost or under the ROI floor.
@@ -65,7 +65,7 @@ While the page is open, it refreshes your open orders and the order books of the
 
 ## Syncing
 
-Every page syncs each linked character on load when its last sync is more than an hour old. "Sync all" on `results.html` syncs every character now.
+`results.html` and `export.html` sync the linked characters on load when one's last sync is more than an hour old (`export.html` without the market snapshot), and `orders.html` asks for a sync without the market snapshot on load and after each watch refresh; the server skips a character synced within the hour. "Sync all" on `results.html` syncs every character and the market snapshot now.
 
 ESI keeps about 30 days of wallet history and 30 days of contracts. Rows older than that which were never synced cannot be recovered, so sync at least every few weeks, or run the daily job below. Everything synced is stored raw under `data/raw/`, so it stays on disk after ESI forgets it.
 
@@ -73,9 +73,9 @@ To sync from the command line without the server, run `node scripts/sync.js`. Wi
 
 - `--character <id>` (repeatable): only that character
 - `--region <id>` (repeatable): snapshot that region's market
-- `--no-market` or `--market-only`
+- `--no-market` (no market snapshot and no destination book) or `--market-only`
 - `--rebuild`: rebuild the character ledgers in `data/ledger/` from `data/raw/`; no ESI calls. The book logs are left as they are (see below); add `--rebuild-book-logs` to rebuild them too, or pass it alone to rebuild only them
-- `--watch`: one watch refresh, the orders page's five-minute tick: your open orders, then the books and history of the types you have listed. No wallet, assets or contracts. It takes `--character` and `--region`, and cannot be combined with `--rebuild`, `--market-only`, `--no-market` or `--max-types`. With `EFLIP_REGION_BOOK=1` it also takes the hourly destination book when one is due (below), and prints one line saying whether that is on
+- `--watch`: one watch refresh, the orders page's five-minute tick: your open orders, then the books and history of the types you have listed. No wallet, assets or contracts. It takes `--character` and `--region`, and cannot be combined with `--rebuild`, `--rebuild-book-logs`, `--market-only`, `--no-market` or `--max-types`. With `EFLIP_REGION_BOOK=1` it also takes the hourly destination book when one is due (below), and prints one line saying whether that is on
 
 `--watch` is optional. A launchd job for it can run every five minutes while the game is open, on a machine where the orders page is not; use `StartInterval` 300 in place of the daily calendar interval below. With the destination book on, the tick that finds the last snapshot 55 minutes old takes a new one, which makes that run last a few minutes; launchd does not start a second copy of a job while one is running.
 
@@ -83,12 +83,12 @@ The destination book is opt-in. With `EFLIP_REGION_BOOK=1` in `.env`, one snapsh
 
 - by the server (`npm start`), while it is up: the first snapshot a minute after it starts (so it is listening and the rate limits are loaded), then every hour. A restart starts that clock over, and a snapshot is skipped when the last one was folded under 55 minutes ago, so a restart or a second process does not double it. A run that fails is logged and the next hour still runs; two runs never overlap. `GET /api/config` says in `regionBook` whether the schedule is running (`scheduled`), when it fires next (`nextRunAt`) and how the last scheduled run ended (`lastRun`).
 - by `node scripts/sync.js --watch`, on the first tick that finds the last snapshot 55 minutes old (with none yet, the first tick takes one right away). A script has no clock of its own: a launchd job that runs `--watch` every five minutes (see Optional daily job) keeps the book hourly with the server stopped. `--watch` prints one line, `hourly region book: on` or `off`.
-- by every full sync (the one that includes the market snapshot), which ends with one.
+- by every sync that includes the market snapshot (a plain `node scripts/sync.js`, "Sync all", the results page's sync on load), which ends with one under the same 55-minute rule: a forced sync does not take a second snapshot inside the hour. A sync without the market snapshot (`--no-market`, the export and orders pages) takes none.
 - by hand: `node scripts/sync.js --region-book` takes one snapshot now and prints what it cost, and `node scripts/sync.js --region-book-report` prints the last 24 hours of snapshots as a table, with totals and per-hour averages. That is also how to measure one run (pages, tokens, bytes, seconds) before turning the schedule on.
 
 It is off by default because it is the biggest thing eflip stores and, without a storage budget, nothing limits it: every raw page and every log sample is kept, about 46 MB of order pages an hour for Domain before compression (about 8 MB on disk once gzipped, some 190 MB a day). Set `EFLIP_STORAGE_BUDGET` with it (see Storage budget under Data), and the pages' notice nags until you do.
 
-A snapshot is `GET /markets/<region>/orders?order_type=all`, page by page, stored raw under `data/raw/public/` and folded into the per-type book logs as one sample per type (a type whose orders have all ended gets an empty sample). That gives types you do not trade a book log too. For Domain it is about 194 pages, 388 `market-order` tokens (the bucket holds 12,000 per 15 minutes) and 46 MB of orders. The job does not wait for an export run in progress (the server cannot tell one is going, and 388 tokens is a small share of the bucket), but it stops under 20 % of the bucket, takes the market lock (a watch tick that overlaps it reports its market step busy), and folds nothing from a snapshot with a page missing. The live book logs keep history after the budget has trimmed the raw behind it, so a rebuild from raw would shorten them to what raw still holds. `--rebuild` therefore leaves the book logs as they are and prints how far back their raw reaches (the oldest regional snapshot and per-type book still on disk). `--rebuild-book-logs` rebuilds them on purpose: it replays the regional snapshots whose pages are still in raw, in time order with the per-type checks, prints how many snapshots it could not replay because their pages were trimmed, and loses whatever history is older than the raw left. Use it to repair the logs, not as a routine step.
+A snapshot is `GET /markets/<region>/orders?order_type=all`, page by page, stored raw under `data/raw/public/` and folded into the per-type book logs as one sample per type (a type whose orders have all ended gets an empty sample). That gives types you do not trade a book log too. For Domain it is about 194 pages, 388 `market-order` tokens (the bucket holds 12,000 per 15 minutes) and 46 MB of orders. The job does not wait for an export run in progress (the server cannot tell one is going, and 388 tokens is a small share of the bucket), but it stops under 20 % of the bucket, takes the market lock (a watch tick that overlaps it reports its market step busy), and folds nothing from a snapshot with a page missing. The live book logs keep history after the budget has trimmed the raw behind it, so a rebuild from raw would shorten them to what raw still holds. `--rebuild` therefore leaves the book logs as they are and prints how far back their raw reaches (the oldest regional snapshot and per-type book still on disk). `--rebuild-book-logs` rebuilds them on purpose: it replays the regional snapshots whose pages are still in raw, in time order with the per-type checks, prints how many snapshots and per-type checks it could not replay because their raw was trimmed, and loses whatever history is older than the raw left. Use it to repair the logs, not as a routine step.
 
 ### Optional daily job (launchd)
 
@@ -138,8 +138,9 @@ The job runs at 04:15 local time. `WorkingDirectory` is the checkout, and `scrip
 Everything eflip stores is in `data/` in the checkout (`EFLIP_DATA_DIR` moves it). The folder is gitignored and private: directories are 0700 and files 0600.
 
 - `tokens.json`: linked characters and their refresh tokens.
-- `raw/`: every ESI response body, verbatim, with its fetch time and the headers that matter. Ledgers and snapshots are derived from it.
+- `raw/`: every ESI response body, verbatim, with its URL, status, fetch time and all its response headers (a body the same as the last one stored for that route is not stored again). Ledgers and snapshots are derived from it.
 - `ledger/`: per-character ledgers and retained snapshots, derived from `raw/`.
+- `ledger/structures.json`: structure names by id, shared by all characters.
 - `ledger/<characterId>/order-log.json`: each of your orders' price path, and how it ended once it has.
 - `ledger/market/<regionId>/<typeId>.json.gz`: every competing order's price path, with the times the book was checked. The export page's observed figures are computed from these.
 - `runs/`: export runs saved by "Copy orders" on `export.html`.
@@ -147,17 +148,17 @@ Everything eflip stores is in `data/` in the checkout (`EFLIP_DATA_DIR` moves it
 - `esi-cache/public/_watch.json`: the last watch refresh, when it ran and what each character and type answered.
 - `esi-cache/public/_region-book.json`: the last destination book snapshot and how it ended. Each run also adds a `kind: "regionBook"` entry, with what it cost, to the public sync log under `raw/public/_sync-log/`.
 - `esi-cache/public/_storage.json`: the last storage budget run and the last trim. Each run also adds a `kind: "storage"` entry to the public sync log.
-- `locks/`: one lock per character and one for the market, so the server and the script never sync the same owner at once.
+- `locks/`: one lock per character and one for the market, so the server and the script never sync the same owner at once. A lock is taken over when its process is gone, when its pid belongs to another boot, or when it went untouched for 30 minutes (a live holder touches it every minute).
 - `samples/`: captured ESI responses used to write the test fixtures. The server does not read them.
 
-Tokens never reach the browser or git. Refresh tokens stay in `tokens.json`; access tokens stay in server memory. Neither is sent to a page or written under `public/` or `cache/`. The pages call only the task-specific `/api` routes, never a general ESI proxy.
+Tokens never reach the browser or git. Refresh tokens stay in `tokens.json`; access tokens stay in server memory. Neither is sent to a page or written under `public/` or `cache/`. The pages read synced data only through the task-specific `/api` routes, never a general ESI proxy; what they fetch from ESI and Fuzzwork themselves is public market data and type names, without a token, cached in `cache/` through the `/file` routes.
 
 ### Storage budget
 
 `EFLIP_STORAGE_BUDGET` in `.env` (for example `1GB`; decimal units, `500MB` or a number of bytes also work) is one allotment of disk for the bulky data that can be fetched again or regrows. Unset, nothing is ever trimmed. `EFLIP_STORAGE_SHARES` splits it, in percent, between four kinds; the defaults are `regionPages:40,bookLogs:45,typeBooks:10,runContexts:5`:
 
 - `regionPages`: the destination book job's raw order pages, trimmed a whole snapshot at a time.
-- `bookLogs`: the book logs under `ledger/market/`, trimmed by one time cutoff across all of them. Samples older than the cutoff go, and so do orders last seen before it; an order still listed keeps its last price before the cutoff, so its state at the cutoff is known.
+- `bookLogs`: the book logs under `ledger/market/`, trimmed by one time cutoff across all of them. Samples older than the cutoff go, and so do orders last seen before it; an order still listed keeps its last price before the cutoff, so its state at the cutoff is known. When the first sample the cutoff would keep is a check that found the book unchanged (a 304), the log keeps back to the stored check it stands for, with that check's orders.
 - `typeBooks`: the per-type books and histories under `raw/public/`, trimmed by one time cutoff across all of them. Files older than the cutoff go, except each book page's or history's newest file before it, which a later check that found that page unchanged still reads.
 - `runContexts`: the market context saved with each export run (the order books and history behind each row). The run's rows, settings and totals stay.
 

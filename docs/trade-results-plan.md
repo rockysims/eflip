@@ -18,9 +18,10 @@ reach `public/`, the browser, git or `cache/`: the Express server holds them, an
 `/api/...` routes.
 
 Data principle (2026-11-13): save raw first, derive later. Every ESI response is stored verbatim,
-with its fetch time and the headers that matter (`ETag`, `Expires`, `Last-Modified`, `X-Pages`,
-`X-Ratelimit-*`), under `data/raw/<characterId>/<route-slug>/<fetchedAt>.json`; public routes go
-under `data/raw/public/...`. A 304 stores nothing, and a body whose content hash equals the last
+with its URL, status, fetch time and all its response headers (`ETag`, `Expires`, `Last-Modified`,
+`X-Pages`, `X-Ratelimit-*` among them), under
+`data/raw/<characterId>/<route-slug>/<fetchedAt>.json`; public routes go under
+`data/raw/public/...`. A 304 stores nothing, and a body whose content hash equals the last
 stored one is not stored again. Ledgers and snapshots are derived views that `lib/derive.js`
 rebuilds from raw, so a wrong rule is fixed by re-deriving, never by re-fetching. ESI forgets
 wallet rows after about 30 days; raw is the one copy that keeps everything that might be useful
@@ -51,8 +52,10 @@ Terms used below:
      demand when less than 60 s remain.
    - Refresh is single-flight per character. Always store the returned `refresh_token`: CCP says it
      "MIGHT change when it is refreshed".
-   - A 4xx from the token endpoint (`invalid_grant`) sets `status: 'relink'` and stops syncing that
-     character, keeping its ledger. Only network errors are retried.
+   - A 4xx from the token endpoint whose OAuth error is `invalid_grant` sets `status: 'relink'` and
+     stops syncing that character, keeping its ledger; any other 4xx is thrown like a 5xx. A re-link
+     during a refresh wins over the old grant's answer: no mark lands. Only network errors are
+     retried.
 3. **JWT verification with zero new dependencies.** Node 24 provides `fetch`,
    `crypto.createPublicKey({key: jwk, format: 'jwk'})` and `crypto.verify`.
    - Find `jwks_uri` in `https://login.eveonline.com/.well-known/oauth-authorization-server`.
@@ -229,7 +232,8 @@ Server files live under `data/` (gitignored; `EFLIP_DATA_DIR` overrides the loca
   cross-check on transactions; stock aging per station; and capital at work over time (Phase 8).
 - `data/ledger/<characterId>/profile.json`: `{fetchedAt, skills, standings}`, refreshed daily; the
   raw copies keep the history.
-- `data/esi-cache/<characterId>/<route-slug>.json`: `{etag, expires, body, pages}`.
+- `data/esi-cache/<characterId>/<route-slug>.json`: `{url, etag, expires, pages, checkedAt, status}`,
+  with no body (the body is in raw).
   - Keyed by path and query, never by token.
   - Sends `If-None-Match` (a 304 costs 1 token) and skips the call while `Expires` is ahead.
 - `data/runs/<runId>.json`: persisted export runs (see Comparison).
@@ -257,17 +261,17 @@ so a long break does not lose a month of wallet history):
 4. Skills and standings, at most once a day.
 5. Destination market snapshot: for every type that is held, listed, in transit or sold in the
    last 90 days, the destination region's current orders for that type and its daily history,
-   stored raw. At most 300 types per sync, and only after any export run in progress finishes,
-   since it draws on the IP-keyed `market-order` bucket the export page shares. Gives: competition
-   at listing time against days to sell, the user's share of regional daily volume, and realized
-   price against the daily average (Phase 8).
+   stored raw. At most 300 types per sync. It draws on the IP-keyed `market-order` bucket the
+   export page shares, so the export page's own sync leaves it out (`market: false`). Gives:
+   competition at listing time against days to sell, the user's share of regional daily volume,
+   and realized price against the daily average (Phase 8).
 6. Store raw, derive, then record `syncedAt`, errors and rate-limit headers.
 
 **Budget.** One sync is about 3–5 `char-wallet` calls (≤ 10 of 150 tokens), 1–10 contract calls,
 1–3 asset pages, and once a day one skills and one standings call. The destination market
 snapshot adds up to 300 order calls (≤ 600 of the 12000 `market-order` tokens, 2 per call, which
-is why it waits for a run in progress) and up to 300 history calls (no bucket: the legacy error
-limit).
+is why the export page's sync leaves it out) and up to 300 history calls (no bucket: the legacy
+error limit).
 Syncs are at most hourly, which matches the cache timers. Price lookups take 2 tokens per held
 type from the same market-order bucket. (2026-11-26: with `EFLIP_REGION_BOOK=1` the server also
 takes the destination region's whole order book once an hour, about 194 pages and 388 tokens for
@@ -288,7 +292,9 @@ Added by Phase 3 (2026-11-19), beside the files above:
   that found nothing due does not delay the next one. A snapshot is written only when orders,
   assets and balance were all current in that sync.
 - `data/locks/<name>.lock`: one lock per character and one for the market, so the server and the
-  script never sync the same owner at once; a lock whose process is gone is taken over.
+  script never sync the same owner at once. A lock is taken over when its process is gone, when
+  its pid belongs to another boot, or when it went untouched for 30 minutes (a live holder touches
+  it every minute).
 - `data/ledger/structures.json`: structure names by id, shared by all characters; `/api/ledger`
   returns it beside the characters. `profile.skills` is the skills array (`total_sp` stays in raw).
 - Market snapshot: the cap of 300 counts (region, type) pairs, chosen by priority (listed, in
@@ -297,15 +303,19 @@ Added by Phase 3 (2026-11-19), beside the files above:
   book. The destination region is the end region of the newest run in `data/runs/`, else the
   region holding most of the characters' sell orders. Types with no market are remembered and
   no longer take a slot.
-- Routes: `POST /api/sync` takes `{characterIds?, force?, market? (default true), regionIds?}`,
-  runs the characters one after another and then the market, and without `force` skips an owner
-  synced within the hour (`market: false` lets the export page defer the market step during a
-  run); `GET /api/sync` reports per-character status and progress; `/api/ledger` keys are
+- Routes: `POST /api/sync` takes `{characterIds?, force?, market? (default true), regionIds?,
+  regionBook?, storage?}` (the last two booleans, added with the destination book and the storage
+  budget: `regionBook: true` takes the book now, `false` skips it even with `EFLIP_REGION_BOOK=1`;
+  `storage: true` runs the budget's step at the end), runs the characters one after another and
+  then the market, and without `force` skips an owner synced within the hour (`market: false`
+  lets the export page defer the market step during a run); `GET /api/sync` reports per-character status and progress; `/api/ledger` keys are
   camelCase (`ordersHistory`, `contractItems`) plus `sync` and `profile`, and `since` filters by
   `date`, `issued` or `date_issued`; `/api/market?typeIds=&regionIds=` answers
   `{regionIds, syncedAt, types: {typeId: {regionId: {orders, history}}}}` from raw.
 - Removing a character with `?purge=1` deletes its ledger, raw and ESI bookkeeping together (a
-  ledger deleted alone would be rebuilt from raw) and answers 409 while that character syncs.
+  ledger deleted alone would be rebuilt from raw) and answers 409 while that character syncs. The
+  character is unlinked under its lock before its files go, so a tick during the revoke finds it
+  gone; any other failure answers 500.
 
 ## Profit accounting rules (`public/results-calc.js`, pure, UMD like `estimate.js`)
 
@@ -541,9 +551,11 @@ lookups.
 3. **API routes.** `GET /api/config`, `GET /api/characters`, `DELETE /api/characters/:id[?purge=1]`,
    `POST /api/sync {characterIds?, force?}`, `GET /api/ledger?characterIds=&since=`,
    `GET /api/snapshots?characterIds=&since=` (retained snapshots), `GET /api/market?typeIds=`
-   (the latest destination market snapshot), `POST|GET /api/runs`, `GET|DELETE /api/runs/:id`.
+   (the latest destination market snapshot), `POST|GET /api/runs` (no `/api/runs/:id`: not
+   built, see Phase 5).
 4. **Guards.**
-   - `/api` and `/sso` reject a `Host` other than `localhost:<port>` or `127.0.0.1:<port>`, and
+   - `/api` and `/sso` reject a `Host` whose name is not `localhost`, `127.0.0.1` or `[::1]` (any
+     port), and
      an `Origin` that is present but not same-origin. No CORS headers are sent.
    - Listen on `process.env.HOST || '127.0.0.1'`.
    - `/file/:path` (done, `lib/cache-files.js`) answers 400 unless the name matches
@@ -552,7 +564,9 @@ lookups.
 5. **`.env` keys** (documented in a committed `.env.example`): `EVE_CLIENT_ID`,
    `EVE_CLIENT_SECRET`, `EVE_CALLBACK_URL=http://localhost:5001/sso/callback`, `ESI_USER_AGENT`
    (app/version/contact, as CCP asks), and optional `EFLIP_DATA_DIR`, `HOST`, `PORT`. With
-   `EVE_CLIENT_ID` unset, these routes answer 503 `not configured`.
+   `EVE_CLIENT_ID` or `EVE_CLIENT_SECRET` unset, the `/sso` routes and the `/api` routes that
+   read synced data answer 503 `not configured`; `/api/config`, `/api/health` and `/api/runs`
+   keep working.
 6. **`.gitignore`:** add `data/`. Then delete the stale `cache/*characters*wallet*` files that
    `exportAndSold` wrote.
 7. **Developer app (the user, once).** At `https://developers.eveonline.com/applications`, create
@@ -712,7 +726,8 @@ outside `requireConfigured`, 58 tests. As built:
   and `DELETE` are not built yet (Phase 6 or 8 adds them if a page needs one run's context).
 - Context orders keep `order_id`, `volume_total` and `min_volume` beyond the plan's five fields;
   history keeps the rows the estimator read (90 days). A run is about 18 KB per row; the POST cap
-  is 4 MB (about 220 rows), below `server.js`'s 5 MB parser.
+  is 4 MB (about 220 rows), the route's own parser limit (`RUNS_MAX_BYTES`); `server.js`'s 5 MB
+  parser serves only the `/file` cache routes.
 - Rows with `qty` under 1 are left out; a copy with no such row posts nothing. A failed save
   shows "Copied (run not saved)" on the button and the clipboard still works.
 - The page-load sync fires when any linked character is stale (the server skips fresh ones), with

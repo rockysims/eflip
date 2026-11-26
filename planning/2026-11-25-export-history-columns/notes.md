@@ -298,9 +298,15 @@ Rough edges:
   an order still listed keeps the newest entry before the cutoff (its state at the cutoff, so a
   re-price just after still reads as a re-price). Bucket bytes are dated by when a cutoff frees them,
   scaled to compressed size on disk; `unmet` is the real overage when only floors remain.
+  (Amended 2026-11-26: when the first sample a cutoff would keep is a check that found the book
+  unchanged (a 304), the log keeps back to the stored check it stands for, with that check's
+  orders.)
 - typeBooks trims by a day cutoff across all per-type slugs, keeping each route's newest file and
   its newest file before the cutoff, so any later check still finds every page it read; the one
-  exception is the last check before the cutoff on a multi-page book.
+  exception is the last check before the cutoff on a multi-page book. (Amended 2026-11-26: the last
+  check before the cutoff is always whole; the edge is an earlier check whose unchanged page a
+  later check before the cutoff stored anew, and `--rebuild-book-logs` leaves such a check out and
+  counts it.)
 - regionPages trims whole snapshots; a 304 page's file belongs to the newest entry naming it; the
   newest file of each regional page route is never deleted.
 - Rebuild: `--rebuild` leaves the book logs alone and says how far raw reaches; `--rebuild-book-logs`

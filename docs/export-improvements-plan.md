@@ -71,15 +71,15 @@ orders, destination region history. Changes:
    quantity as `targetVolume`, so this follows the factor with real book
    prices.
 8. **Daily profit**: `(revenue - cost) / max(daysToClear, 1)`. Ranking uses
-   this. For one release the old `(revenue - cost) / DAYS_TO_COMPLETE` is also
-   reported as `dailyProfitOldMil` so the two can be compared in the table;
-   remove after the user is happy. For a factor other than 1 the page re-runs
-   the estimate with the factored quantity as `targetVolume`, so this follows
-   the factor with real book prices.
+   this. For one release the old `(revenue - cost) / DAYS_TO_COMPLETE` was also
+   reported as `dailyProfitOldMil` so the two could be compared in the table;
+   it has since been removed (2026-11-26). For a factor other than 1 the page
+   re-runs the estimate with the factored quantity as `targetVolume`, so this
+   follows the factor with real book prices.
 9. Remove the dead "margin crashed" filter.
 10. Report shape (all Mil values via `roundMils`): `volume`, `costPerItemMil`,
     `revenuePerItemMil`, `profitPerItemMil`, `roi`, `dailyProfitMil`,
-    `dailyProfitOldMil`, `daysToClear`, `competingVolume`, `dailyDemand`,
+    `daysToClear`, `competingVolume`, `dailyDemand`,
     `activeSellers`, `daysSinceSellerUpdate` (idle days over every destination
     sell order), `daysSinceInBandSellerUpdate` (the same over the orders within
     `SUPPLY_BAND` above the sell price; the "days idle" cell tooltip),
@@ -231,12 +231,13 @@ Fixtures are small hand-written order/history arrays.
    triaged / total, reports done / enqueued, in flight, paused-until if any,
    elapsed.
 3. Table, sortable by any column, sticky header, numbers right-aligned with
-   thousands separators. Columns: select, name (with type id), daily profit,
-   profit/item, cost/item, revenue/item, ROI, days to clear, recommended
-   volume, factor, order qty, order cost, order revenue, km3, competing
-   volume, active sellers, days since update, active days, daily profit (old),
-   reason (only with "show filtered"). Default sort daily profit desc; live
-   re-sort as rows arrive, suspended while the user is editing a row.
+   thousands separators. Columns (as built, 2026-11-26): select, name, daily
+   profit, ROI, factor, quantity, days of supply left, active sellers, rivals,
+   days idle, avg days idle, km3, active days, cost/item, revenue/item, order
+   cost, order revenue, order profit, days to clear, sold before. With "show
+   filtered", a row the filter left out shows dim, its reason in the name's
+   tooltip. Default sort daily profit desc; live re-sort as rows arrive,
+   suspended while the user is editing a row.
 4. Factor per row (default = global factor at the time the row appears).
    At a factor other than 1 the row is re-estimated with `ceil(volume ×
    factor)` as `targetVolume`, bought for real up the source book past the

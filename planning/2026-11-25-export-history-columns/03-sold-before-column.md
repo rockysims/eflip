@@ -13,8 +13,9 @@ Out of scope: a per-type correction of the predicted sell price (calibration, in
 
 ## Files
 
-- `lib/api.js`: `GET /api/sold-before?stationId=&typeIds=` answers `{<typeId>: {units,
-  netMarginMilPerUnit, medianDaysOnMarket, lastSoldAt}}` from `results-calc.js` facts over the
+- `lib/api.js`: `POST /api/sold-before {stationId, typeIds, days?, sourceStationId?}` answers
+  `{stationId, days, types: {<typeId>: {units, sales, lastSoldAt, netMarginMilPerUnit,
+  medianDaysOnMarket}}}` from `results-calc.js` facts over the
   pooled linked characters (`facts.sells`, `facts.lots`; days on market as `results-calc` already
   computes it). ≤ 500 ids a call. Behind `requireConfigured`.
 - `public/export.js`: fetch in batches after the books load (beside the market-stats fetch of
