@@ -929,8 +929,9 @@
 				if (!isNum(r.marginIfMatch)) return blank(`match price ${fmtExact(r.matchPrice)}; no landed cost, so no margin`);
 				const roi = roiOf(r);
 				const below = roi !== null && roi < thresholds.minRoi - 1e-9;
-				const lines = [`${fmtExact(r.matchPrice)} (best − 0.01) × (1 − ${(r.taxRate * 100).toFixed(2)}% tax) − ${fmtExact(r.landedCost)} landed cost = ${fmtExact(r.marginIfMatch)} a unit`, `ROI ${roi.toFixed(2)}x (floor ${thresholds.minRoi}x)${below ? ': below the floor' : ''}`];
-				return { t: `${money(r.marginIfMatch, true)} <span class="${below ? 'below' : 'dim'}">(${below ? '▼ ' : ''}${roi.toFixed(2)}x)</span>`, title: lines.join('\n') };
+				const roiText = roi === null ? DASH : `${roi.toFixed(2)}x`;
+				const lines = [`${fmtExact(r.matchPrice)} (best − 0.01) × (1 − ${(r.taxRate * 100).toFixed(2)}% tax) − ${fmtExact(r.landedCost)} landed cost = ${fmtExact(r.marginIfMatch)} a unit`, `ROI ${roiText} (floor ${thresholds.minRoi}x)${below ? ': below the floor' : ''}`];
+				return { t: `${money(r.marginIfMatch, true)} <span class="${below ? 'below' : 'dim'}">(${below ? '▼ ' : ''}${roiText})</span>`, title: lines.join('\n') };
 			} },
 		{ key: 'fee', label: 'fee est.', val: (r) => r.feeEstimate,
 			help: 'what changing this order\u2019s price probably costs: the relist fee is a flat share of the remaining order value, the same for every item, fitted from your newest relists at that station; without a rate of yours yet, the median of this order\u2019s or this item\u2019s past price-change fees',
