@@ -29,7 +29,8 @@ Terms used below:
 - **watch refresh**: the light sync the orders page triggers: our open orders, then the books and
   daily history of the types we have listed, every five minutes while the page is open.
 - **units ahead**: the summed `volume_remain` of sell orders at our station priced strictly below
-  ours (equal prices issued before ours count as ahead too; "Still open" 1).
+  ours, plus equal-priced orders issued before ours (decision 12: the tie-break hardly matters, and
+  the older order is the conservative reading).
 - **days behind**: units ahead divided by daily volume: how long the queue in front of us takes to
   clear if nobody else lists.
 - **daily volume**: the recency-weighted mean of the item's regional daily `volume` over the last
@@ -64,8 +65,9 @@ Terms used below:
   between two `orders` answers (up to 20 min).
 - `orders/history`: a filled order reads `expired` with `volume_remain: 0`; one that ran out of
   time keeps its remainder; a withdrawn one reads `cancelled` (resolved 2026-11-19).
-- Modifying an order changes its price only, so a drop in `volume_remain` on a persisting
-  `order_id` is a fill ("Still open" 2 confirms it on the log).
+- Modifying an order changes its price only; raising the quantity means cancelling and placing a
+  new order (Rocky, 2026-11-25). So `volume_remain` never rises on a persisting `order_id`, and a
+  drop is a fill.
 - The fee for a price change is charged on the change, not at a rate: Grant's 214 `brokers_fee`
   rows in 13 days (up to 34 a day) ran from 0.1 % to 2.4 % of order value. Estimates come from an
   order's own past fees (rule 6), never from a rate.
@@ -159,9 +161,13 @@ Thresholds and defaults: `LEAVE_HOURS 8`, `UNDERCUT_DAYS 2`, `MIN_ROI` (the expo
    `{date, typeId, characterId, qty, unitPrice, gross, net = gross − tax − brokerShare −
    relistShare, profit, orderId, daysSinceListed}`. `orderId` is the order of the same character,
    type and location whose log price at that time equals `unitPrice`; null when none or several.
-   Grouped per type and day for the table; per sale for the plot. Window totals: units, gross, net,
-   profit, relist fees paid (fee rows in the window), and `asOf.transactions`, the newest
-   transaction date, so the page can say what hour the sales are good to.
+   Grouped per type and day for the table. For the plot, sales of the same item are merged into
+   **clusters** when each follows the previous within `clusterGapMs` (an input; the page passes the
+   window length over 150, at least 10 minutes): `{typeId, start, end, qty, gross, net, profit,
+   sales: [...]}`, so a burst of fills reads as one dot whose area is their total profit (decision
+   10). Window totals: units, gross, net, profit, relist fees paid (fee rows in the window), and
+   `asOf.transactions`, the newest transaction date, so the page can say what hour the sales are
+   good to.
    **Pending fills.** Per open order, `filledPerLog = volumeTotal − volumeRemain` against
    `filledPerTx`, the units of the sales matched to it; the difference, when positive, is a pending
    sale at the order's price dated at the last drop in the log. Drawn hollow; it becomes a sale when
@@ -169,8 +175,9 @@ Thresholds and defaults: `LEAVE_HOURS 8`, `UNDERCUT_DAYS 2`, `MIN_ROI` (the expo
 9. **Share.** Per type over the window's days: our units sold divided by the summed regional
    `volume` of those days, labelled "share of Domain volume"; null without history. The station-level
    sell-side share from book differences is backlog (Out of scope).
-10. **Output.** `{rows, sales, pending, salesByTypeDay, share, timeOnTop: {overall, byType}, totals,
-    asOf: {orders, books, transactions}, warnings}`. Every figure is traceable to an input row.
+10. **Output.** `{rows, sales, salesClusters, pending, salesByTypeDay, share, timeOnTop: {overall,
+    byType}, totals, asOf: {orders, books, transactions}, warnings}`. Every figure is traceable to
+    an input row.
 
 ## UI (`public/orders.html`, `public/orders.js`)
 
@@ -206,11 +213,13 @@ and the formatters. The implementer loads the `ui-patterns` and `dataviz` skills
    `est` figures get the usual tilde.
 5. **Sold recently.** Window toggle (24 h / 2 d / 7 d / 30 d), a totals line (units, gross, net,
    profit, relist fees paid, overall share of Domain volume), then the **sales timeline**: x is time
-   over the window, y is one row per item (newest sale on top), one dot per sale sized by units
-   (square-root scale) and coloured by profit per unit (loss, thin, healthy: the dataviz palette's
-   diverging bands), pending fills hollow. Hover and keyboard focus (an own hit layer, as insights
-   does) show time (local, EVE time in parentheses), item, units × price, net per unit, profit, the
-   order it filled and days since listing. A "show order events" toggle adds, on each item's row, a
+   over the window, y is one row per item (newest sale on top), one dot per sale cluster (rule 8)
+   whose **area is the total profit** of the sale or sales it stands for, placed at the cluster's
+   midpoint; a loss is drawn in the palette's negative colour with the area of its size, a profit in
+   the positive one; pending fills are hollow. Hover and keyboard focus (an own hit layer, as
+   insights does) list each sale in the cluster: time (local, EVE time in parentheses), item, units
+   × price, net per unit, profit, the order it filled and days since listing. A "show order events"
+   toggle adds, on each item's row, a
    tick at every price change of ours and a hollow tick at every undercut against us, so an item's
    recent history reads in one line. Below the plot, the per-type-and-day table is the accessible
    alternative and carries the share column.
@@ -273,7 +282,8 @@ predate ours; episodes with a censored current one, a missed sample and a price-
 trade from own sales and the history fallback; landed cost over the FIFO remainder, and `nocost`;
 the fee estimate's three fallbacks; every verdict branch at its threshold, the demotion to `maybe`,
 and the sort; sale-to-order matching unique and ambiguous; a pending fill that a later transaction
-absorbs; share with and without history; `asOf` values.
+absorbs; sale clusters (two sales inside the gap merge, a third outside it starts a new cluster, a
+loss and a profit keep their signs in the total); share with and without history; `asOf` values.
 
 Gate: `node --test test/*.test.js`.
 
@@ -328,23 +338,25 @@ Gate: tests pass; the export page shows the notice with the variable unset.
 6. Refresh every five minutes while the page is open, stored raw; no notifications.
 7. One shared data directory through `EFLIP_DATA_DIR`, with an on-page reminder whenever it is not
    set (Rocky: "show a reminder alert when it isn't set so I don't forget"); the same for
-   `ESI_USER_AGENT`.
+   `ESI_USER_AGENT` (confirmed 2026-11-25).
 8. This branch was fast-forwarded onto `feature/export-rework`; that branch is fast-forwarded after
    each green gate.
 9. Time on top: measured per episode from our `issued` to the first competing `issued` below us, with
    a median per item and overall (Rocky: "how quickly other people undercut me so I have a sense of
    how long I'll stay on top if I do undercut"). It also feeds the verdict (rule 7's demotion).
 10. Sold recently is a timeline: time on x, one row per item on y, a dot per sale with hover details
-    (Rocky's design), plus the per-type-and-day table as the accessible alternative.
+    (Rocky's design). Amended 2026-11-25: the dot's area is the total profit of the sale, or of
+    several sales merged when they fell very close together in time; the per-type-and-day table
+    stays as the accessible alternative.
 11. The copy Rocky uses day to day runs on another computer from `feature/export-rework` with
     `npm run start`, so only what reaches that branch reaches him; the data on this machine (two
     characters, 2026-11-19 to 22) is for development and smoke tests.
+12. Equal-priced orders: the sub-sort "doesn't really matter" (Rocky); the older order counts as
+    ahead, which is also what a "days idle" tie-break gives.
+13. An order's quantity never rises: raising it means cancelling and placing a new order (Rocky), so
+    a drop in `volume_remain` is always a fill.
 
 ### Still open
 
-1. Whether EVE serves equal-priced sell orders oldest first. Until confirmed, an equal price issued
-   before ours counts as ahead (the conservative reading).
-2. That `volume_remain` never rises on a persisting `order_id` (the modify dialog changes the price
-   only). The Phase 1 gate checks the order log for any rise; one would mean a fill was misread.
-3. Whether a competing order's `issued` moves on anything but a price change. None is known; the
-   log will show it if it does.
+1. Whether a competing order's `issued` moves on anything but a price change. Rocky does not know
+   either; the book log will show it if it does.
